@@ -26,10 +26,7 @@ import {
   createNewPlaylist,
   getAlbum,
   getPlaylist,
-  getRandomSongsFiltered,
-  getSimilarSongs,
   getSimilarSongs2,
-  getTopSongs,
   starAlbum,
   starArtist,
   starSong,
@@ -41,6 +38,7 @@ import {
   type Child,
   type Playlist,
 } from './subsonicService';
+import { buildMoreLikeThisQueue } from './relatedTracksService';
 
 /* ------------------------------------------------------------------ */
 /*  Star / Unstar                                                      */
@@ -185,44 +183,6 @@ export async function removeItemFromQueue(index: number): Promise<void> {
  *
  * Exported for unit tests. Used by `playMoreLikeThis`.
  */
-async function buildMoreLikeThisQueue(
-  source: Child,
-  target: number,
-): Promise<Child[]> {
-  const seen = new Set<string>([source.id]);
-  const out: Child[] = [];
-  const push = (tracks: readonly Child[] | null | undefined): void => {
-    if (!tracks) return;
-    for (const t of tracks) {
-      if (out.length >= target) return;
-      if (!t?.id || seen.has(t.id)) continue;
-      seen.add(t.id);
-      out.push(t);
-    }
-  };
-
-  push(await getSimilarSongs(source.id, target));
-  if (out.length >= target) return out;
-
-  if (source.artistId) {
-    push(await getSimilarSongs2(source.artistId, target));
-    if (out.length >= target) return out;
-  }
-
-  const genre = source.genre ?? source.genres?.[0];
-  if (genre) {
-    // Request 2× target so dedup leaves us with plenty of fresh picks.
-    push(await getRandomSongsFiltered({ size: target * 2, genre }));
-    if (out.length >= target) return out;
-  }
-
-  if (source.artist) {
-    push(await getTopSongs(source.artist, target));
-  }
-
-  return out;
-}
-
 /**
  * Fetch similar songs for a given track and set them as the play queue.
  * Uses processing overlay for progress, success, and error feedback.

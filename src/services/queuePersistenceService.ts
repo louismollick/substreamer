@@ -3,7 +3,8 @@
 // Position blob: tiny + already throttled to 10s, so it stays on the sync
 // adapter. Init reads are synchronous (one-shot at player start).
 import { kvStorage, kvStorageSync } from '../store/persistence';
-import { type Child } from './subsonicService';
+import type { QueueTrackOrigin } from '../store/playerStore';
+import type { Child } from './subsonicService';
 
 const QUEUE_KEY = 'substreamer-persisted-queue';
 const POSITION_KEY = 'substreamer-persisted-position';
@@ -23,6 +24,7 @@ const QUEUE_DEBOUNCE_MS = 1500;
 interface PersistedQueue {
   queue: Child[];
   currentTrackIndex: number;
+  origins: QueueTrackOrigin[];
 }
 
 interface PersistedPosition {
@@ -54,11 +56,16 @@ function flushQueueWrite(): void {
 export function persistQueue(
   queue: Child[],
   currentTrackIndex: number,
+  origins: QueueTrackOrigin[] = queue.map(() => 'manual'),
 ): void {
   // Hold the latest snapshot in memory; (re)arm the debounce. Readers see it
   // immediately via getPersistedQueue (pending-first), so the delayed disk
   // write is transparent.
-  pendingQueue = { queue, currentTrackIndex };
+  pendingQueue = {
+    queue,
+    currentTrackIndex,
+    origins: normalizeOrigins(queue, origins),
+  };
   clearQueueTimer();
   queueTimer = setTimeout(flushQueueWrite, QUEUE_DEBOUNCE_MS);
 }
@@ -121,10 +128,24 @@ export function getPersistedQueue(): PersistedQueue | null {
   try {
     const data = JSON.parse(raw) as PersistedQueue;
     if (!Array.isArray(data.queue) || data.queue.length === 0) return null;
-    return data;
+    return { ...data, origins: normalizeOrigins(data.queue, data.origins) };
   } catch {
     return null;
   }
+}
+
+function normalizeOrigins(
+  queue: Child[],
+  origins: unknown,
+): QueueTrackOrigin[] {
+  if (
+    !Array.isArray(origins) ||
+    origins.length !== queue.length ||
+    origins.some((origin) => origin !== 'manual' && origin !== 'autoplay')
+  ) {
+    return queue.map(() => 'manual');
+  }
+  return origins as QueueTrackOrigin[];
 }
 
 export function getPersistedPosition(): PersistedPosition | null {

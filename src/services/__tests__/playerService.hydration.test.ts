@@ -107,7 +107,10 @@ jest.mock('../../store/musicCacheStore', () => ({
 
 const mockOfflineMode = { offlineMode: false };
 jest.mock('../../store/offlineModeStore', () => ({
-  offlineModeStore: { getState: jest.fn(() => mockOfflineMode) },
+  offlineModeStore: {
+    getState: jest.fn(() => mockOfflineMode),
+    subscribe: jest.fn(() => jest.fn()),
+  },
 }));
 
 const subsonicMocks = {
@@ -224,7 +227,7 @@ describe('cold-start hydration', () => {
     expect(mockToastFail).toHaveBeenCalled();
     expect(mockTP.setQueue).not.toHaveBeenCalled();
     expect(mockTP.clearQueue).toHaveBeenCalled();
-    expect(mockSetQueue).toHaveBeenCalledWith([]);
+    expect(mockSetQueue).toHaveBeenCalledWith([], []);
   });
 
   it('does nothing when there is no persisted queue', async () => {

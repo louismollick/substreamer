@@ -23,6 +23,21 @@ beforeEach(() => {
 });
 
 describe('persistQueue / getPersistedQueue', () => {
+  it('round-trips origins and normalizes malformed legacy data to manual', () => {
+    const queue = [makeChild('a'), makeChild('b')];
+    persistQueue(queue, 0, ['manual', 'autoplay']);
+    expect(getPersistedQueue()?.origins).toEqual(['manual', 'autoplay']);
+    persistQueue(queue, 0, ['autoplay'] as any);
+    expect(getPersistedQueue()?.origins).toEqual(['manual', 'manual']);
+  });
+  it('hydrates a legacy disk snapshot with manual origins', () => {
+    const queue = [makeChild('legacy-a'), makeChild('legacy-b')];
+    kvStorage.setItem(
+      'substreamer-persisted-queue',
+      JSON.stringify({ queue, currentTrackIndex: 1 }),
+    );
+    expect(getPersistedQueue()?.origins).toEqual(['manual', 'manual']);
+  });
   it('round-trips queue data through SQLite', () => {
     const queue = [makeChild('a'), makeChild('b'), makeChild('c')];
     persistQueue(queue, 1);

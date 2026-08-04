@@ -10,6 +10,7 @@ beforeEach(() => {
     currentTrackIndex: null,
     playbackState: 'idle',
     queue: [],
+    queueOrigins: [],
     position: 0,
     duration: 0,
     bufferedPosition: 0,
@@ -49,6 +50,15 @@ describe('playerStore', () => {
     const queue = [mockTrack];
     playerStore.getState().setQueue(queue);
     expect(playerStore.getState().queue).toBe(queue);
+    expect(playerStore.getState().queueOrigins).toEqual(['manual']);
+  });
+
+  it('sets aligned origins atomically and normalizes malformed arrays', () => {
+    const queue = [mockTrack, { ...mockTrack, id: 't2' }];
+    playerStore.getState().setQueue(queue, ['manual', 'autoplay']);
+    expect(playerStore.getState().queueOrigins).toEqual(['manual', 'autoplay']);
+    playerStore.getState().setQueue(queue, ['autoplay']);
+    expect(playerStore.getState().queueOrigins).toEqual(['manual', 'manual']);
   });
 
   describe('setProgress', () => {

@@ -15,6 +15,8 @@ import { usePlayerLyrics } from '@/hooks/usePlayerLyrics';
 import { type Child } from '@/services/subsonicService';
 import { sanitizeBiographyText } from '@/utils/formatters';
 
+import type { QueueTrackOrigin } from '@/store/playerStore';
+
 export type PlayerMode = 'queue' | 'info' | 'lyrics';
 
 export interface PlayerModeContentProps {
@@ -22,6 +24,7 @@ export interface PlayerModeContentProps {
   mode: PlayerMode;
   currentTrack: Child;
   queue: Child[];
+  queueOrigins: QueueTrackOrigin[];
   currentTrackIndex: number | null;
   colors: ThemeColors;
   /** Muted-primary variant for the active queue row highlight. */
@@ -43,6 +46,7 @@ export const PlayerModeContent = memo(function PlayerModeContent({
   mode,
   currentTrack,
   queue,
+  queueOrigins,
   currentTrackIndex,
   colors,
   queueColors,
@@ -92,12 +96,13 @@ export const PlayerModeContent = memo(function PlayerModeContent({
         track={item}
         index={index}
         isActive={index === currentTrackIndex}
+        isAutoplay={queueOrigins[index] === 'autoplay'}
         colors={queueColors}
         onPress={onQueueItemPress}
         onLongPress={onQueueItemLongPress}
       />
     ),
-    [currentTrackIndex, queueColors, onQueueItemPress, onQueueItemLongPress],
+    [currentTrackIndex, queueOrigins, queueColors, onQueueItemPress, onQueueItemLongPress],
   );
 
   const keyExtractor = useCallback(

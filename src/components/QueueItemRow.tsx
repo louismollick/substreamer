@@ -33,6 +33,7 @@ export interface QueueItemRowProps {
   track: Child;
   index: number;
   isActive: boolean;
+  isAutoplay?: boolean;
   colors: Pick<ThemeColors, 'textPrimary' | 'textSecondary' | 'primary' | 'border' | 'red'>;
   onPress: (index: number) => void;
   onLongPress?: (track: Child) => void;
@@ -46,6 +47,7 @@ export const QueueItemRow = memo(function QueueItemRow({
   track,
   index,
   isActive,
+  isAutoplay = false,
   colors,
   onPress,
   onLongPress,
@@ -166,6 +168,16 @@ export const QueueItemRow = memo(function QueueItemRow({
               // status icons don't shift up onto the title line.
               <View style={styles.artistPlaceholder} />
             )}
+            {isAutoplay && (
+              <View
+                style={[styles.autoplayBadge, { borderColor: colors.primary }]}
+                accessibilityLabel={t('infinitePlay')}
+              >
+                <Text style={[styles.autoplayBadgeText, { color: colors.primary }]}>
+                  {`● ${t('infinitePlay')}`}
+                </Text>
+              </View>
+            )}
             <RowMetaLine
               slots={['rating', 'download', 'heart']}
               rating={rating}
@@ -246,4 +258,12 @@ const styles = StyleSheet.create({
     minWidth: 0,
     height: 18,
   },
+  autoplayBadge: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    marginRight: 6,
+  },
+  autoplayBadgeText: { fontSize: 10, fontWeight: '600' },
 });

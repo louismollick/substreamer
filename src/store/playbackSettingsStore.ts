@@ -179,6 +179,8 @@ export interface PlaybackSettingsState {
 
   /** ReplayGain loudness normalisation: off / track / album. */
   replayGainMode: ReplayGainModeSetting;
+  /** Whether related tracks are staged when the queue reaches its final track. */
+  infinitePlayEnabled: boolean;
 
   setMaxBitRate: (bitRate: MaxBitRate) => void;
   setStreamFormat: (format: StreamFormat) => void;
@@ -200,6 +202,7 @@ export interface PlaybackSettingsState {
   setPlaybackMode: (mode: PlaybackModeSetting) => void;
   setCrossfadeDurationMs: (ms: CrossfadeDurationMs) => void;
   setReplayGainMode: (mode: ReplayGainModeSetting) => void;
+  setInfinitePlayEnabled: (enabled: boolean) => void;
 }
 
 const PERSIST_KEY = 'substreamer-playback-settings';
@@ -246,6 +249,7 @@ export const playbackSettingsStore = create<PlaybackSettingsState>()(
       playbackMode: 'gapless',
       crossfadeDurationMs: 5000,
       replayGainMode: 'off',
+      infinitePlayEnabled: false,
 
       setMaxBitRate: (maxBitRate) => set({ maxBitRate }),
       setStreamFormat: (streamFormat) => set({ streamFormat: normalizeFormat(streamFormat) }),
@@ -267,6 +271,7 @@ export const playbackSettingsStore = create<PlaybackSettingsState>()(
       setPlaybackMode: (playbackMode) => set({ playbackMode }),
       setCrossfadeDurationMs: (crossfadeDurationMs) => set({ crossfadeDurationMs }),
       setReplayGainMode: (replayGainMode) => set({ replayGainMode }),
+      setInfinitePlayEnabled: (infinitePlayEnabled) => set({ infinitePlayEnabled }),
     }),
     {
       name: PERSIST_KEY,
@@ -294,6 +299,7 @@ export const playbackSettingsStore = create<PlaybackSettingsState>()(
         playbackMode: state.playbackMode,
         crossfadeDurationMs: state.crossfadeDurationMs,
         replayGainMode: state.replayGainMode,
+        infinitePlayEnabled: state.infinitePlayEnabled,
       }),
     }
   )

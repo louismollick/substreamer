@@ -94,6 +94,7 @@ export function PlayerPhonePortrait() {
   const songCoverArtId = useSongCoverArt(currentTrack);
   const currentTrackIndex = playerStore((s) => s.currentTrackIndex);
   const queue = playerStore((s) => s.queue);
+  const queueOrigins = playerStore((s) => s.queueOrigins);
   const queueLoading = playerStore((s) => s.queueLoading);
 
   const onClose = useCallback(() => router.back(), [router]);
@@ -248,12 +249,13 @@ export function PlayerPhonePortrait() {
         track={item}
         index={index}
         isActive={index === currentTrackIndex}
+        isAutoplay={queueOrigins[index] === 'autoplay'}
         colors={queueColors}
         onPress={handleQueueItemPress}
         onLongPress={handleQueueItemLongPress}
       />
     ),
-    [currentTrackIndex, queueColors, handleQueueItemPress, handleQueueItemLongPress],
+    [currentTrackIndex, queueOrigins, queueColors, handleQueueItemPress, handleQueueItemLongPress],
   );
 
   const keyExtractor = useCallback(

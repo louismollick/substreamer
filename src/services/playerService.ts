@@ -23,6 +23,7 @@ import {
 import { backgroundPlaybackPromptStore } from '../store/backgroundPlaybackPromptStore';
 import { playbackToastStore } from '../store/playbackToastStore';
 import { playerStore } from '../store/playerStore';
+import { offlineModeStore } from '../store/offlineModeStore';
 import { appStateStore } from '../store/appStateStore';
 import { equalizerSettingsStore, EQ_CUSTOM_PRESET_LABEL } from '../store/equalizerSettingsStore';
 import { sleepTimerStore } from '../store/sleepTimerStore';
@@ -50,6 +51,9 @@ import {
   stampQueueFormat,
 } from './playerHelpers';
 import { isFireOS } from '../utils/isFireOS';
+import { buildInfinitePlayQueue } from './relatedTracksService';
+
+import type { QueueTrackOrigin } from '../store/playerStore';
 
 /** The RNQP player singleton. Safe to hold — `getTrackPlayer()` always returns
  *  the same instance; the engine is configured in `playerBootstrap.ts`. */
@@ -76,6 +80,12 @@ function maybePromptFireBackgroundPlayback(): void {
 let isPlayerReady = false;
 /** The Child[] backing the current native queue, indexed by position. */
 let currentChildQueue: Child[] = [];
+let currentQueueOrigins: QueueTrackOrigin[] = [];
+let queueGeneration = 0;
+let infinitePlayRequestId = 0;
+let infinitePlayPromise: Promise<void> | null = null;
+let infiniteNativeMutationPromise: Promise<void> | null = null;
+let queueEndedWhileLoading = false;
 /** Maps trackId → playlistId for tracks that originated from a playlist. */
 const trackPlaylistMap = new Map<string, string>();
 /**
@@ -104,6 +114,143 @@ function reportPlay(trackIndex: number): void {
   const child = currentChildQueue[trackIndex];
   if (child) addCompletedScrobble(child, trackPlaylistMap.get(child.id));
 }
+
+function invalidateQueueWork(): void {
+  queueGeneration += 1;
+  infinitePlayRequestId += 1;
+  infinitePlayPromise = null;
+  queueEndedWhileLoading = false;
+}
+
+async function awaitInfiniteNativeMutation(): Promise<void> {
+  if (infiniteNativeMutationPromise) await infiniteNativeMutationPromise;
+}
+
+function setQueueState(queue: Child[], origins?: QueueTrackOrigin[]): void {
+  currentChildQueue = queue;
+  currentQueueOrigins = origins?.length === queue.length ? origins : queue.map(() => 'manual');
+  playerStore.getState().setQueue(currentChildQueue, currentQueueOrigins);
+}
+
+function persistCurrentQueue(index = playerStore.getState().currentTrackIndex ?? 0): void {
+  persistQueue(currentChildQueue, index, currentQueueOrigins);
+}
+
+function filteredOrigins(
+  source: readonly Child[],
+  origins: readonly QueueTrackOrigin[],
+  filtered: readonly Child[],
+): QueueTrackOrigin[] {
+  const used = new Set<number>();
+  return filtered.map((track) => {
+    const index = source.findIndex((candidate, i) => !used.has(i) && candidate.id === track.id);
+    if (index < 0) return 'manual';
+    used.add(index);
+    return origins[index] ?? 'manual';
+  });
+}
+
+function shouldLoadInfinitePlay(): boolean {
+  const settings = playbackSettingsStore.getState();
+  const state = playerStore.getState();
+  return settings.infinitePlayEnabled && settings.repeatMode === 'off' &&
+    state.currentTrackIndex != null && state.currentTrackIndex === currentChildQueue.length - 1 &&
+    currentChildQueue.length > 0;
+}
+
+function getManualFutureTrackIds(startIndex: number): Set<string> {
+  return new Set(
+    currentChildQueue
+      .slice(startIndex + 1)
+      .filter((_, offset) => currentQueueOrigins[startIndex + 1 + offset] === 'manual')
+      .map((track) => track.id),
+  );
+}
+
+function isInfinitePlayRequestCurrent(
+  requestId: number,
+  generation: number,
+  offline: boolean,
+): boolean {
+  return requestId === infinitePlayRequestId && generation === queueGeneration &&
+    offline === offlineModeStore.getState().offlineMode && shouldLoadInfinitePlay();
+}
+
+function preloadInfinitePlay(): Promise<void> | null {
+  if (!shouldLoadInfinitePlay()) return null;
+  if (infinitePlayPromise) return infinitePlayPromise;
+
+  const generation = queueGeneration;
+  const requestId = ++infinitePlayRequestId;
+  const offline = offlineModeStore.getState().offlineMode;
+  const sourceIndex = playerStore.getState().currentTrackIndex!;
+  const source = currentChildQueue[sourceIndex];
+  const manualFutureTrackIds = getManualFutureTrackIds(sourceIndex);
+
+  const request = (async () => {
+    const candidates = await buildInfinitePlayQueue(source, {
+      currentQueue: currentChildQueue,
+      manualFutureTrackIds,
+    });
+    if (!isInfinitePlayRequestCurrent(requestId, generation, offline)) return;
+
+    const excluded = getManualFutureTrackIds(playerStore.getState().currentTrackIndex ?? -1);
+    const deduped = candidates.filter((track, index) =>
+      track.id !== source.id && !excluded.has(track.id) &&
+      candidates.findIndex((candidate) => candidate.id === track.id) === index,
+    );
+    if (deduped.length === 0) return;
+
+    const { rnTracks, filteredQueue } = await buildPlayableQueue(deduped);
+    if (rnTracks.length === 0 || !isInfinitePlayRequestCurrent(requestId, generation, offline)) return;
+
+    const firstAddedIndex = currentChildQueue.length;
+    let appended = true;
+    const nativeMutation = (async () => {
+      await tp.addToQueue(rnTracks);
+      if (!isInfinitePlayRequestCurrent(requestId, generation, offline)) {
+        appended = false;
+        await tp.removeFromQueue(
+          rnTracks.map((_, offset) => firstAddedIndex + offset),
+        );
+      }
+    })();
+    infiniteNativeMutationPromise = nativeMutation;
+    try {
+      await nativeMutation;
+    } finally {
+      if (infiniteNativeMutationPromise === nativeMutation) {
+        infiniteNativeMutationPromise = null;
+      }
+    }
+    if (!appended) return;
+    setQueueState(
+      [...currentChildQueue, ...filteredQueue],
+      [...currentQueueOrigins, ...filteredQueue.map(() => 'autoplay' as const)],
+    );
+    for (const child of filteredQueue) {
+      playerStore.getState().addQueueFormat(child.id, stampQueueFormat(child));
+    }
+    persistCurrentQueue();
+    if (queueEndedWhileLoading) {
+      await tp.skipToIndex(firstAddedIndex);
+      await tp.play();
+    }
+  })().catch(() => {
+    // Infinite Play is best-effort; normal playback owns all user-facing errors.
+  }).finally(() => {
+    if (requestId === infinitePlayRequestId) {
+      infinitePlayPromise = null;
+      queueEndedWhileLoading = false;
+    }
+  });
+  infinitePlayPromise = request;
+  return request;
+}
+
+offlineModeStore.subscribe((state, previous) => {
+  if (state.offlineMode !== previous.offlineMode) invalidateQueueWork();
+});
 
 /* ------------------------------------------------------------------ */
 /*  Init                                                               */
@@ -181,7 +328,8 @@ export async function initPlayer(): Promise<void> {
       const child = currentChildQueue.find((c) => c.id === track.id) ?? null;
       playerStore.getState().setCurrentTrack(child, index ?? null);
       if (child) sendNowPlaying(child, trackPlaylistMap.get(child.id));
-      if (index != null && index >= 0) persistQueue(currentChildQueue, index);
+      if (index != null && index >= 0) persistCurrentQueue(index);
+      if (index === currentChildQueue.length - 1) void preloadInfinitePlay();
     } else {
       playerStore.getState().setCurrentTrack(null, null);
     }
@@ -230,6 +378,10 @@ export async function initPlayer(): Promise<void> {
     const endDuration = currentTrack?.duration ?? 0;
     if (endDuration > 0) {
       playerStore.getState().setProgress(endDuration, endDuration, endDuration);
+    }
+    if (infinitePlayPromise || shouldLoadInfinitePlay()) {
+      queueEndedWhileLoading = true;
+      void preloadInfinitePlay();
     }
   });
 
@@ -327,7 +479,7 @@ function adoptLiveEngineSession(): void {
   const liveIndex = tp.getCurrentTrackIndex();
   const store = playerStore.getState();
   if (currentChildQueue.length > 0) {
-    store.setQueue(currentChildQueue);
+    store.setQueue(currentChildQueue, currentQueueOrigins);
     const formats: Record<string, EffectiveFormat> = {};
     for (const child of currentChildQueue) formats[child.id] = stampQueueFormat(child);
     store.setQueueFormats(formats);
@@ -371,12 +523,11 @@ function restorePersistedQueue(): boolean {
     const persisted = getPersistedQueue();
     if (!persisted) return false;
 
-    const { queue, currentTrackIndex } = persisted;
+    const { queue, currentTrackIndex, origins } = persisted;
     if (queue.length === 0) return false;
     const clampedIndex = Math.min(currentTrackIndex, queue.length - 1);
 
-    currentChildQueue = queue;
-    playerStore.getState().setQueue(queue);
+    setQueueState(queue, origins);
 
     const formats: Record<string, EffectiveFormat> = {};
     for (const child of queue) formats[child.id] = stampQueueFormat(child);
@@ -443,8 +594,8 @@ async function hydrateRestoredQueue(): Promise<void> {
 
     const pruned = filteredQueue.length !== currentChildQueue.length;
     if (pruned) {
-      currentChildQueue = filteredQueue;
-      playerStore.getState().setQueue(filteredQueue);
+      const origins = filteredOrigins(currentChildQueue, currentQueueOrigins, filteredQueue);
+      setQueueState(filteredQueue, origins);
     }
 
     // Translate the restored current track onto the filtered queue.
@@ -463,7 +614,7 @@ async function hydrateRestoredQueue(): Promise<void> {
       await tp.seekTo(resume.position);
     }
 
-    if (pruned) persistQueue(filteredQueue, startIndex);
+    if (pruned) persistCurrentQueue(startIndex);
   } catch (e) {
     console.warn('[Player] Queue hydration failed:', e);
     throw e;
@@ -498,6 +649,8 @@ export async function playTrack(
   sourcePlaylistId?: string | null,
 ): Promise<void> {
   await awaitHydration();
+  invalidateQueueWork();
+  await awaitInfiniteNativeMutation();
   maybePromptFireBackgroundPlayback();
   pendingResumePosition = null;
   playerStore.getState().setQueueLoading(true);
@@ -515,12 +668,11 @@ export async function playTrack(
       return;
     }
 
-    currentChildQueue = filteredQueue;
+    setQueueState(filteredQueue, filteredQueue.map(() => 'manual'));
     trackPlaylistMap.clear();
     if (sourcePlaylistId) {
       for (const child of filteredQueue) trackPlaylistMap.set(child.id, sourcePlaylistId);
     }
-    playerStore.getState().setQueue(filteredQueue);
 
     const formats: Record<string, EffectiveFormat> = {};
     for (const child of filteredQueue) formats[child.id] = stampQueueFormat(child);
@@ -532,7 +684,7 @@ export async function playTrack(
 
     await tp.setQueue(rnTracks, startIndex);
     await tp.play();
-    persistQueue(filteredQueue, startIndex);
+    persistCurrentQueue(startIndex);
   } catch {
     playbackToastStore.getState().fail();
   } finally {
@@ -745,8 +897,11 @@ export function clearSleepTimer(): void {
 
 /** Internal clear-state helper (does not await hydration — hydrate calls it). */
 async function clearPlayerStateInternal(): Promise<void> {
+  invalidateQueueWork();
+  await awaitInfiniteNativeMutation();
   pendingResumePosition = null;
   currentChildQueue = [];
+  currentQueueOrigins = [];
   trackPlaylistMap.clear();
 
   await tp.clearQueue();
@@ -754,7 +909,7 @@ async function clearPlayerStateInternal(): Promise<void> {
 
   const store = playerStore.getState();
   store.setCurrentTrack(null);
-  store.setQueue([]);
+  store.setQueue([], []);
   store.setPlaybackState('idle');
   store.setProgress(0, 0, 0);
   store.setError(null);
@@ -777,6 +932,8 @@ export async function clearQueue(): Promise<void> {
  */
 export async function rebuildQueueForServerSwitch(): Promise<void> {
   await awaitHydration();
+  invalidateQueueWork();
+  await awaitInfiniteNativeMutation();
   const queue = currentChildQueue;
   if (queue.length === 0) return;
 
@@ -800,9 +957,9 @@ export async function rebuildQueueForServerSwitch(): Promise<void> {
     if (position > 0) await tp.seekTo(position);
     if (wasPlaying) await tp.play();
 
-    currentChildQueue = filteredQueue;
-    playerStore.getState().setQueue(filteredQueue);
-    persistQueue(filteredQueue, safeIdx);
+    const origins = filteredOrigins(currentChildQueue, currentQueueOrigins, filteredQueue);
+    setQueueState(filteredQueue, origins);
+    persistCurrentQueue(safeIdx);
   } catch {
     // Best-effort — a failed switch leaves the prior queue loaded.
   }
@@ -833,7 +990,15 @@ export async function addToQueue(
     return;
   }
 
-  await tp.addToQueue(rnTracks);
+  const currentIndex = playerStore.getState().currentTrackIndex ?? 0;
+  const firstFutureAutoplay = currentQueueOrigins.findIndex(
+    (origin, index) => index > currentIndex && origin === 'autoplay',
+  );
+  const insertBefore = firstFutureAutoplay === -1 ? currentChildQueue.length : firstFutureAutoplay;
+  invalidateQueueWork();
+  await awaitInfiniteNativeMutation();
+  if (insertBefore === currentChildQueue.length) await tp.addToQueue(rnTracks);
+  else await tp.addToQueue(rnTracks, insertBefore);
 
   if (sourcePlaylistId) {
     for (const child of playable) trackPlaylistMap.set(child.id, sourcePlaylistId);
@@ -842,9 +1007,12 @@ export async function addToQueue(
     playerStore.getState().addQueueFormat(child.id, stampQueueFormat(child));
   }
 
-  currentChildQueue = [...currentChildQueue, ...playable];
-  playerStore.getState().setQueue(currentChildQueue);
-  persistQueue(currentChildQueue, playerStore.getState().currentTrackIndex ?? 0);
+  const newQueue = [...currentChildQueue];
+  const newOrigins = [...currentQueueOrigins];
+  newQueue.splice(insertBefore, 0, ...playable);
+  newOrigins.splice(insertBefore, 0, ...playable.map(() => 'manual' as const));
+  setQueueState(newQueue, newOrigins);
+  persistCurrentQueue();
 }
 
 /**
@@ -872,6 +1040,8 @@ export async function playSongNext(song: Child): Promise<void> {
   const insertBefore = Math.min(currentIndex + 1, currentChildQueue.length);
 
   // addToQueue(tracks, insertBefore) inserts BEFORE the given index.
+  invalidateQueueWork();
+  await awaitInfiniteNativeMutation();
   await tp.addToQueue(rnTracks, insertBefore);
 
   for (const child of playable) {
@@ -879,11 +1049,12 @@ export async function playSongNext(song: Child): Promise<void> {
   }
 
   const newQueue = [...currentChildQueue];
+  const newOrigins = [...currentQueueOrigins];
   newQueue.splice(insertBefore, 0, ...playable);
-  currentChildQueue = newQueue;
-  playerStore.getState().setQueue(currentChildQueue);
+  newOrigins.splice(insertBefore, 0, ...playable.map(() => 'manual' as const));
+  setQueueState(newQueue, newOrigins);
   // Re-read the index AFTER the awaited add in case an auto-advance moved it.
-  persistQueue(currentChildQueue, playerStore.getState().currentTrackIndex ?? 0);
+  persistCurrentQueue();
 }
 
 /**
@@ -901,11 +1072,15 @@ export async function removeFromQueue(index: number): Promise<void> {
   }
 
   const removedChild = currentChildQueue[index];
+  invalidateQueueWork();
+  await awaitInfiniteNativeMutation();
   await tp.removeFromQueue([index]);
 
   trackPlaylistMap.delete(removedChild.id);
-  currentChildQueue = currentChildQueue.filter((_, i) => i !== index);
-  playerStore.getState().setQueue(currentChildQueue);
+  setQueueState(
+    currentChildQueue.filter((_, i) => i !== index),
+    currentQueueOrigins.filter((_, i) => i !== index),
+  );
 
   // Re-sync the active index from native (recomputed on removal).
   const nativeIndex = tp.getCurrentTrackIndex();
@@ -913,7 +1088,7 @@ export async function removeFromQueue(index: number): Promise<void> {
     playerStore.getState().currentTrack,
     nativeIndex >= 0 ? nativeIndex : null,
   );
-  persistQueue(currentChildQueue, playerStore.getState().currentTrackIndex ?? 0);
+  persistCurrentQueue();
 }
 
 /**
@@ -951,6 +1126,31 @@ export async function cycleRepeatMode(): Promise<void> {
     current === 'off' ? 'all' : current === 'all' ? 'one' : 'off';
   playbackSettingsStore.getState().setRepeatMode(next);
   await tp.setRepeatMode(mapRepeatMode(next));
+  if (next === 'off') void preloadInfinitePlay();
+}
+
+/** Persist the preference and apply its queue-side effects. */
+export async function setInfinitePlayEnabled(enabled: boolean): Promise<void> {
+  playbackSettingsStore.getState().setInfinitePlayEnabled(enabled);
+  if (enabled) {
+    if (playerStore.getState().playbackState === 'playing') void preloadInfinitePlay();
+    return;
+  }
+  invalidateQueueWork();
+  await awaitInfiniteNativeMutation();
+  const currentIndex = playerStore.getState().currentTrackIndex ?? -1;
+  const indices = currentQueueOrigins
+    .map((origin, index) => ({ origin, index }))
+    .filter(({ origin, index }) => origin === 'autoplay' && index > currentIndex)
+    .map(({ index }) => index);
+  if (indices.length === 0) return;
+  await tp.removeFromQueue(indices);
+  const remove = new Set(indices);
+  setQueueState(
+    currentChildQueue.filter((_, index) => !remove.has(index)),
+    currentQueueOrigins.filter((_, index) => !remove.has(index)),
+  );
+  persistCurrentQueue();
 }
 
 /** Set the playback rate (persisted store + native engine). */
@@ -1021,7 +1221,12 @@ export async function shuffleQueue(): Promise<void> {
   if (currentChildQueue.length < 2) return;
 
   try {
-    const shuffled = shuffleArray(currentChildQueue);
+    invalidateQueueWork();
+    await awaitInfiniteNativeMutation();
+    const shuffledPairs = shuffleArray(
+      currentChildQueue.map((track, index) => ({ track, origin: currentQueueOrigins[index] })),
+    );
+    const shuffled = shuffledPairs.map(({ track }) => track);
     const { rnTracks, filteredQueue } = await buildPlayableQueue(shuffled);
     if (rnTracks.length === 0) {
       playbackToastStore.getState().fail();
@@ -1029,12 +1234,14 @@ export async function shuffleQueue(): Promise<void> {
       return;
     }
 
-    currentChildQueue = filteredQueue;
-    playerStore.getState().setQueue(filteredQueue);
+    setQueueState(
+      filteredQueue,
+      filteredOrigins(shuffled, shuffledPairs.map(({ origin }) => origin), filteredQueue),
+    );
 
     await tp.setQueue(rnTracks, 0);
     await tp.play();
-    persistQueue(filteredQueue, 0);
+    persistCurrentQueue(0);
   } catch {
     playbackToastStore.getState().fail();
   }

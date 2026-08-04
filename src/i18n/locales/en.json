@@ -212,6 +212,8 @@
   "playerControls": "Player Controls",
   "skipIntervals": "Skip Intervals",
   "playbackMode": "Playback Mode",
+  "infinitePlay": "Infinite Play",
+  "infinitePlayHint": "Adds related tracks near the end of the queue. Uses downloaded music while offline.",
   "playbackModeLabel": "Track transitions",
   "playbackModeGapless": "Gapless",
   "playbackModeCrossfade": "Crossfade",

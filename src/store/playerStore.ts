@@ -20,6 +20,8 @@ export type PlaybackStatus =
   | 'loading'
   | 'stopped';
 
+export type QueueTrackOrigin = 'manual' | 'autoplay';
+
 export interface PlayerState {
   /** The currently active track, or null when nothing is loaded. */
   currentTrack: Child | null;
@@ -29,6 +31,8 @@ export interface PlayerState {
   playbackState: PlaybackStatus;
   /** The full queue of Child objects currently loaded. */
   queue: Child[];
+  /** Origin metadata aligned one-to-one with `queue`. */
+  queueOrigins: QueueTrackOrigin[];
   /** Current playback position in seconds. */
   position: number;
   /** Duration of the current track in seconds. */
@@ -49,7 +53,7 @@ export interface PlayerState {
   /* ---- Setters (called by playerService) ---- */
   setCurrentTrack: (track: Child | null, index?: number | null) => void;
   setPlaybackState: (state: PlaybackStatus) => void;
-  setQueue: (queue: Child[]) => void;
+  setQueue: (queue: Child[], origins?: QueueTrackOrigin[]) => void;
   setProgress: (position: number, duration: number, buffered: number) => void;
   setError: (error: string | null) => void;
   setRetrying: (retrying: boolean) => void;
@@ -65,6 +69,7 @@ export const playerStore = create<PlayerState>()((set) => ({
   currentTrackIndex: null,
   playbackState: 'idle',
   queue: [],
+  queueOrigins: [],
   position: 0,
   duration: 0,
   bufferedPosition: 0,
@@ -81,7 +86,12 @@ export const playerStore = create<PlayerState>()((set) => ({
       ...(track ? {} : { trackSource: null }),
     }),
   setPlaybackState: (playbackState) => set({ playbackState }),
-  setQueue: (queue) => set({ queue }),
+  setQueue: (queue, origins) =>
+    set({
+      queue,
+      queueOrigins:
+        origins?.length === queue.length ? origins : queue.map(() => 'manual'),
+    }),
   setProgress: (position, duration, buffered) =>
     set((state) => ({
       position,

@@ -137,7 +137,11 @@ jest.mock('@/components/SkipIntervalButton', () => {
 
 jest.mock('@/components/QueueItemRow', () => {
   const { Text } = require('react-native');
-  return { QueueItemRow: ({ track }: { track: { title: string } }) => <Text>{track.title}</Text> };
+  return {
+    QueueItemRow: ({ track, isAutoplay }: { track: { title: string }; isAutoplay: boolean }) => (
+      <Text>{isAutoplay ? `${track.title} — Infinite Play` : track.title}</Text>
+    ),
+  };
 });
 
 jest.mock('@/components/SwipeableRow', () => ({
@@ -265,6 +269,7 @@ beforeEach(() => {
     currentTrack: MOCK_TRACK,
     currentTrackIndex: 0,
     queue: MOCK_QUEUE,
+    queueOrigins: ['manual', 'manual', 'manual'],
     queueLoading: false,
     playbackState: 'playing',
     position: 30,
@@ -488,6 +493,14 @@ describe('PlayerPhonePortrait', () => {
     // Track titles appear in queue (first track may also appear in player content)
     expect(getAllByText('Test Song').length).toBeGreaterThanOrEqual(1);
     expect(getByText('Second Song')).toBeTruthy();
+    expect(getByText('Third Song')).toBeTruthy();
+  });
+
+  it('passes aligned autoplay origins to queue rows', () => {
+    playerStore.setState({ queueOrigins: ['manual', 'autoplay', 'manual'] });
+    const { getByLabelText, getByText } = render(<PlayerPhonePortrait />);
+    act(() => fireEvent.press(getByLabelText('Queue')));
+    expect(getByText('Second Song — Infinite Play')).toBeTruthy();
     expect(getByText('Third Song')).toBeTruthy();
   });
 

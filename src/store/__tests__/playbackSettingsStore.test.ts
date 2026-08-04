@@ -17,6 +17,7 @@ beforeEach(() => {
     skipForwardInterval: 30,
     remoteControlMode: 'skip-track',
     artistPlayMode: 'topSongs',
+    infinitePlayEnabled: false,
   });
 });
 
@@ -96,6 +97,12 @@ describe('playbackSettingsStore', () => {
     playbackSettingsStore.getState().setArtistPlayMode('allSongs');
     playbackSettingsStore.getState().setArtistPlayMode('topSongs');
     expect(playbackSettingsStore.getState().artistPlayMode).toBe('topSongs');
+  });
+
+  it('defaults Infinite Play off and updates it explicitly', () => {
+    expect(playbackSettingsStore.getState().infinitePlayEnabled).toBe(false);
+    playbackSettingsStore.getState().setInfinitePlayEnabled(true);
+    expect(playbackSettingsStore.getState().infinitePlayEnabled).toBe(true);
   });
 
   it('defaults for skip interval fields', () => {
