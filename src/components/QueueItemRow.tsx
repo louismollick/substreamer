@@ -33,7 +33,7 @@ export interface QueueItemRowProps {
   track: Child;
   index: number;
   isActive: boolean;
-  isAutoplay?: boolean;
+  startsInfinitePlaySection?: boolean;
   colors: Pick<ThemeColors, 'textPrimary' | 'textSecondary' | 'primary' | 'border' | 'red'>;
   onPress: (index: number) => void;
   onLongPress?: (track: Child) => void;
@@ -47,7 +47,7 @@ export const QueueItemRow = memo(function QueueItemRow({
   track,
   index,
   isActive,
-  isAutoplay = false,
+  startsInfinitePlaySection = false,
   colors,
   onPress,
   onLongPress,
@@ -120,8 +120,19 @@ export const QueueItemRow = memo(function QueueItemRow({
   );
 
   return (
-    <SwipeableRow rightActions={rightActions} leftActions={leftActions} enableFullSwipeRight enableFullSwipeLeft={!offlineMode} restingBackgroundColor="transparent" onPress={handlePress} onLongPress={onLongPress ? handleLongPress : undefined}>
-      <View style={[styles.row, { borderBottomColor: colors.border }]}>
+    <>
+      {startsInfinitePlaySection && (
+        <View style={styles.sectionHeader}>
+          <Text
+            accessibilityRole="header"
+            style={[styles.sectionHeaderText, { color: colors.textPrimary }]}
+          >
+            {t('nextUp')}
+          </Text>
+        </View>
+      )}
+      <SwipeableRow rightActions={rightActions} leftActions={leftActions} enableFullSwipeRight enableFullSwipeLeft={!offlineMode} restingBackgroundColor="transparent" onPress={handlePress} onLongPress={onLongPress ? handleLongPress : undefined}>
+        <View style={[styles.row, { borderBottomColor: colors.border }]}>
         {/* Cover art with now-playing overlay */}
         <View style={styles.coverWrap}>
           <CachedImage
@@ -168,16 +179,6 @@ export const QueueItemRow = memo(function QueueItemRow({
               // status icons don't shift up onto the title line.
               <View style={styles.artistPlaceholder} />
             )}
-            {isAutoplay && (
-              <View
-                style={[styles.autoplayBadge, { borderColor: colors.primary }]}
-                accessibilityLabel={t('infinitePlay')}
-              >
-                <Text style={[styles.autoplayBadgeText, { color: colors.primary }]}>
-                  {`● ${t('infinitePlay')}`}
-                </Text>
-              </View>
-            )}
             <RowMetaLine
               slots={['rating', 'download', 'heart']}
               rating={rating}
@@ -190,8 +191,9 @@ export const QueueItemRow = memo(function QueueItemRow({
             />
           </View>
         </View>
-      </View>
-    </SwipeableRow>
+        </View>
+      </SwipeableRow>
+    </>
   );
 });
 
@@ -206,6 +208,15 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  sectionHeader: {
+    paddingTop: 18,
+    paddingBottom: 4,
+    paddingHorizontal: 16,
+  },
+  sectionHeaderText: {
+    fontSize: 14,
+    fontWeight: '700',
   },
   coverWrap: {
     width: COVER_SIZE,
@@ -258,12 +269,4 @@ const styles = StyleSheet.create({
     minWidth: 0,
     height: 18,
   },
-  autoplayBadge: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 8,
-    paddingHorizontal: 5,
-    paddingVertical: 1,
-    marginRight: 6,
-  },
-  autoplayBadgeText: { fontSize: 10, fontWeight: '600' },
 });

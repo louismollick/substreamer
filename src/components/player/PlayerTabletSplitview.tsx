@@ -28,6 +28,7 @@ import { type ThemeColors } from '@/constants/theme';
 import { useCanSkip } from '@/hooks/useCanSkip';
 import { useSongCoverArt } from '@/hooks/useSongCoverArt';
 import { mixHexColors } from '@/utils/colors';
+import { isInfinitePlaySectionStart } from '@/utils/queueOrigins';
 import { usePlayerActions } from '@/hooks/usePlayerActions';
 import { usePlaybackState } from '@/hooks/usePlaybackState';
 import { useShuffleOverlay } from '@/hooks/useShuffleOverlay';
@@ -91,7 +92,11 @@ export function PlayerTabletSplitview() {
         track={item}
         index={index}
         isActive={index === currentTrackIndex}
-        isAutoplay={queueOrigins[index] === 'autoplay'}
+        startsInfinitePlaySection={isInfinitePlaySectionStart(
+          queueOrigins,
+          currentTrackIndex,
+          index,
+        )}
         colors={queueColors}
         onPress={handleQueueItemPress}
         onLongPress={handleQueueItemLongPress}

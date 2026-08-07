@@ -214,6 +214,7 @@
   "playbackMode": "Playback Mode",
   "infinitePlay": "Infinite Play",
   "infinitePlayHint": "Adds related tracks near the end of the queue. Uses downloaded music while offline.",
+  "nextUp": "Next up",
   "playbackModeLabel": "Track transitions",
   "playbackModeGapless": "Gapless",
   "playbackModeCrossfade": "Crossfade",

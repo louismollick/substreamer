@@ -14,6 +14,7 @@ import { usePlayerAlbumInfo } from '@/hooks/usePlayerAlbumInfo';
 import { usePlayerLyrics } from '@/hooks/usePlayerLyrics';
 import { type Child } from '@/services/subsonicService';
 import { sanitizeBiographyText } from '@/utils/formatters';
+import { isInfinitePlaySectionStart } from '@/utils/queueOrigins';
 
 import type { QueueTrackOrigin } from '@/store/playerStore';
 
@@ -96,7 +97,11 @@ export const PlayerModeContent = memo(function PlayerModeContent({
         track={item}
         index={index}
         isActive={index === currentTrackIndex}
-        isAutoplay={queueOrigins[index] === 'autoplay'}
+        startsInfinitePlaySection={isInfinitePlaySectionStart(
+          queueOrigins,
+          currentTrackIndex,
+          index,
+        )}
         colors={queueColors}
         onPress={onQueueItemPress}
         onLongPress={onQueueItemLongPress}
