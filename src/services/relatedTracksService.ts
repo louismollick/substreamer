@@ -98,7 +98,7 @@ async function buildFromSources(
   if (offlineModeStore.getState().offlineMode) {
     const all = downloadedSongs();
     const genre = sourceGenre(source);
-    push(shuffleArray(all.filter((song) => genre && sourceGenre(song) === genre)));
+    if (genre) push(shuffleArray(all.filter((song) => sourceGenre(song) === genre)));
     push(shuffleArray(all));
   } else {
     push(await safely(() => getSimilarSongs(source.id, target)));

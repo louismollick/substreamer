@@ -89,10 +89,14 @@ jest.mock('../../store/musicCacheStore', () => ({
 }));
 
 const mockOfflineMode = { offlineMode: false };
+let mockOfflineModeSubscriber: ((state: typeof mockOfflineMode, previous: typeof mockOfflineMode) => void) | undefined;
 jest.mock('../../store/offlineModeStore', () => ({
   offlineModeStore: {
     getState: jest.fn(() => mockOfflineMode),
-    subscribe: jest.fn(() => jest.fn()),
+    subscribe: jest.fn((subscriber) => {
+      mockOfflineModeSubscriber = subscriber;
+      return jest.fn();
+    }),
   },
 }));
 
@@ -300,6 +304,49 @@ describe('Infinite Play', () => {
     resolve([makeChild('stale')]);
     await new Promise((done) => setImmediate(done));
     expect(mockTP.addToQueue).not.toHaveBeenCalled();
+  });
+
+  it('discards recommendation results when offline mode changes', async () => {
+    const queue = [makeChild('offline-race-source')];
+    await playTrack(queue[0], queue);
+    (require('../../store/playerStore').playerStore.getState as jest.Mock)
+      .mockReturnValue(playingFinalState(queue));
+    let resolve!: (tracks: Child[]) => void;
+    mockBuildInfinitePlayQueue.mockReturnValue(new Promise((done) => { resolve = done; }));
+    await setInfinitePlayEnabled(true);
+
+    mockOfflineMode.offlineMode = true;
+    mockOfflineModeSubscriber?.(mockOfflineMode, { offlineMode: false });
+    resolve([makeChild('stale-online-result')]);
+    await new Promise((done) => setImmediate(done));
+
+    expect(mockTP.addToQueue).not.toHaveBeenCalled();
+    mockOfflineMode.offlineMode = false;
+  });
+
+  it('refills autoplay when re-enabled during a pending disable removal', async () => {
+    const queue = [makeChild('toggle-source')];
+    await playTrack(queue[0], queue);
+    (require('../../store/playerStore').playerStore.getState as jest.Mock)
+      .mockReturnValue(playingFinalState(queue));
+    mockBuildInfinitePlayQueue.mockResolvedValue([makeChild('toggle-auto')]);
+    await setInfinitePlayEnabled(true);
+    await new Promise((done) => setImmediate(done));
+
+    let finishRemoval!: () => void;
+    mockTP.removeFromQueue.mockReturnValueOnce(new Promise<void>((resolve) => {
+      finishRemoval = resolve;
+    }));
+    const disable = setInfinitePlayEnabled(false);
+    await new Promise((done) => setImmediate(done));
+    await setInfinitePlayEnabled(true);
+    expect(mockBuildInfinitePlayQueue).toHaveBeenCalledTimes(1);
+
+    finishRemoval();
+    await disable;
+    await new Promise((done) => setImmediate(done));
+
+    expect(mockBuildInfinitePlayQueue).toHaveBeenCalledTimes(2);
   });
 });
 
