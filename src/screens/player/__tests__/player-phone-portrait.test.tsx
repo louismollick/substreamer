@@ -138,8 +138,8 @@ jest.mock('@/components/SkipIntervalButton', () => {
 jest.mock('@/components/QueueItemRow', () => {
   const { Text } = require('react-native');
   return {
-    QueueItemRow: ({ track, startsInfinitePlaySection }: { track: { title: string }; startsInfinitePlaySection: boolean }) => (
-      <Text>{startsInfinitePlaySection ? `Next up: ${track.title}` : track.title}</Text>
+    QueueItemRow: ({ track, startsAutoplaySection }: { track: { title: string }; startsAutoplaySection: boolean }) => (
+      <Text>{startsAutoplaySection ? `Autoplay: ${track.title}` : track.title}</Text>
     ),
   };
 });
@@ -496,20 +496,20 @@ describe('PlayerPhonePortrait', () => {
     expect(getByText('Third Song')).toBeTruthy();
   });
 
-  it('moves the Infinite Play section heading past an autoplay track once it starts', () => {
+  it('moves the Autoplay section heading past an autoplay track once it starts', () => {
     playerStore.setState({ queueOrigins: ['manual', 'autoplay', 'autoplay'] });
     const { getByLabelText, getByText, getAllByText, queryByText } = render(<PlayerPhonePortrait />);
     act(() => fireEvent.press(getByLabelText('Queue')));
-    expect(getByText('Next up: Second Song')).toBeTruthy();
+    expect(getByText('Autoplay: Second Song')).toBeTruthy();
     expect(getByText('Third Song')).toBeTruthy();
 
     act(() => {
       playerStore.setState({ currentTrack: MOCK_QUEUE[1], currentTrackIndex: 1 });
     });
 
-    expect(queryByText('Next up: Second Song')).toBeNull();
+    expect(queryByText('Autoplay: Second Song')).toBeNull();
     expect(getAllByText('Second Song').length).toBeGreaterThanOrEqual(1);
-    expect(getByText('Next up: Third Song')).toBeTruthy();
+    expect(getByText('Autoplay: Third Song')).toBeTruthy();
   });
 
   it('auto-dismisses when currentTrack becomes null after being populated', () => {

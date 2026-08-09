@@ -23,7 +23,7 @@ import {
   getTopSongs,
   type Child,
 } from '../subsonicService';
-import { buildInfinitePlayQueue } from '../relatedTracksService';
+import { buildAutoplayQueue } from '../relatedTracksService';
 
 const song = (id: string, fields: Partial<Child> = {}) => ({ id, title: id, ...fields } as Child);
 const options = (queue: Child[] = [song('source')]) => ({
@@ -48,7 +48,7 @@ it('uses online fallback order and stops once full', async () => {
   (getSimilarSongs as jest.Mock).mockResolvedValue([song('similar')]);
   (getSimilarSongs2 as jest.Mock).mockResolvedValue([song('artist')]);
   (getRandomSongsFiltered as jest.Mock).mockResolvedValue([song('genre')]);
-  const result = await buildInfinitePlayQueue(
+  const result = await buildAutoplayQueue(
     song('source', { artistId: 'artist-id', artist: 'Artist', genre: 'Rock' }),
     options(),
   );
@@ -65,7 +65,7 @@ it('uses downloaded genre tracks first, then all downloads', async () => {
     rock: song('rock', { genre: 'Rock' }),
     other: song('other'),
   });
-  const result = await buildInfinitePlayQueue(song('source', { genre: 'Rock' }), options());
+  const result = await buildAutoplayQueue(song('source', { genre: 'Rock' }), options());
   expect(result.map((track) => track.id)).toEqual(['rock', 'jazz', 'other']);
   expect(getSimilarSongs).not.toHaveBeenCalled();
 });
@@ -74,7 +74,7 @@ it('excludes source, manual future tracks, duplicates, then recycles played trac
   (getSimilarSongs as jest.Mock).mockResolvedValue([
     song('source'), song('manual'), song('played'), song('fresh'), song('fresh'),
   ]);
-  const result = await buildInfinitePlayQueue(song('source'), {
+  const result = await buildAutoplayQueue(song('source'), {
     ...options([song('played'), song('source')]),
     manualFutureTrackIds: new Set(['manual']),
   });
@@ -84,7 +84,7 @@ it('excludes source, manual future tracks, duplicates, then recycles played trac
 it('continues after failed sources and returns empty when all fail', async () => {
   (getSimilarSongs as jest.Mock).mockRejectedValue(new Error('nope'));
   (getRandomSongs as jest.Mock).mockResolvedValue([song('fallback')]);
-  await expect(buildInfinitePlayQueue(song('source'), options())).resolves.toEqual([song('fallback')]);
+  await expect(buildAutoplayQueue(song('source'), options())).resolves.toEqual([song('fallback')]);
   (getRandomSongs as jest.Mock).mockRejectedValue(new Error('nope'));
-  await expect(buildInfinitePlayQueue(song('source'), options())).resolves.toEqual([]);
+  await expect(buildAutoplayQueue(song('source'), options())).resolves.toEqual([]);
 });

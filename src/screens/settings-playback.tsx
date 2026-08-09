@@ -10,7 +10,6 @@ import { BackgroundPlaybackCard } from '../components/settings/BackgroundPlaybac
 import { DownloadingCard } from '../components/settings/DownloadingCard';
 import { EqualizerCard } from '../components/settings/EqualizerCard';
 import { LookaheadCacheCard } from '../components/settings/LookaheadCacheCard';
-import { InfinitePlayCard } from '../components/settings/InfinitePlayCard';
 import { PlaybackModeCard } from '../components/settings/PlaybackModeCard';
 import { PlayerControlsCard } from '../components/settings/PlayerControlsCard';
 import { RemoteControlsCard } from '../components/settings/RemoteControlsCard';
@@ -20,7 +19,7 @@ import { StreamingCard } from '../components/settings/StreamingCard';
 import { StreamFormatSheet } from '../components/StreamFormatSheet';
 import { useTheme } from '../hooks/useTheme';
 import { useThemedAlert } from '../hooks/useThemedAlert';
-import { applyLookaheadCacheConfig, applyPlaybackMode, applyReplayGain, setInfinitePlayEnabled, updateRemoteCapabilities } from '../services/playerService';
+import { applyLookaheadCacheConfig, applyPlaybackMode, applyReplayGain, setAutoplayEnabled, updateRemoteCapabilities } from '../services/playerService';
 import { playbackSettingsStore } from '../store/playbackSettingsStore';
 import { settingsStyles } from '../styles/settingsStyles';
 
@@ -48,7 +47,7 @@ export function SettingsPlaybackScreen() {
   const playbackMode = playbackSettingsStore((s) => s.playbackMode);
   const crossfadeDurationMs = playbackSettingsStore((s) => s.crossfadeDurationMs);
   const replayGainMode = playbackSettingsStore((s) => s.replayGainMode);
-  const infinitePlayEnabled = playbackSettingsStore((s) => s.infinitePlayEnabled);
+  const autoplayEnabled = playbackSettingsStore((s) => s.autoplayEnabled);
 
   const isDefault =
     maxBitRate === null &&
@@ -66,7 +65,7 @@ export function SettingsPlaybackScreen() {
     playbackMode === 'gapless' &&
     crossfadeDurationMs === 5000 &&
     replayGainMode === 'off' &&
-    !infinitePlayEnabled;
+    !autoplayEnabled;
 
   const handleResetDefaults = useCallback(() => {
     confirm({
@@ -91,7 +90,7 @@ export function SettingsPlaybackScreen() {
         s.setPlaybackMode('gapless');
         s.setCrossfadeDurationMs(5000);
         s.setReplayGainMode('off');
-        void setInfinitePlayEnabled(false);
+        void setAutoplayEnabled(false);
         updateRemoteCapabilities();
         void applyLookaheadCacheConfig();
         void applyPlaybackMode();
@@ -113,7 +112,6 @@ export function SettingsPlaybackScreen() {
           <EqualizerCard />
           <ReplayGainCard />
           <PlaybackModeCard />
-          <InfinitePlayCard />
           <LookaheadCacheCard />
           <PlayerControlsCard />
           <SkipIntervalsCard />

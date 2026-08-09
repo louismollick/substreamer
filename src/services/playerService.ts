@@ -51,7 +51,7 @@ import {
   stampQueueFormat,
 } from './playerHelpers';
 import { isFireOS } from '../utils/isFireOS';
-import { buildInfinitePlayQueue } from './relatedTracksService';
+import { buildAutoplayQueue } from './relatedTracksService';
 
 import type { QueueTrackOrigin } from '../store/playerStore';
 
@@ -82,10 +82,10 @@ let isPlayerReady = false;
 let currentChildQueue: Child[] = [];
 let currentQueueOrigins: QueueTrackOrigin[] = [];
 let queueGeneration = 0;
-let infinitePlayRequestId = 0;
-let infinitePlaySettingGeneration = 0;
-let infinitePlayPromise: Promise<void> | null = null;
-let infiniteNativeMutationPromise: Promise<void> | null = null;
+let autoplayRequestId = 0;
+let autoplaySettingGeneration = 0;
+let autoplayPromise: Promise<void> | null = null;
+let autoplayNativeMutationPromise: Promise<void> | null = null;
 let queueEndedWhileLoading = false;
 /** Maps trackId → playlistId for tracks that originated from a playlist. */
 const trackPlaylistMap = new Map<string, string>();
@@ -118,13 +118,13 @@ function reportPlay(trackIndex: number): void {
 
 function invalidateQueueWork(): void {
   queueGeneration += 1;
-  infinitePlayRequestId += 1;
-  infinitePlayPromise = null;
+  autoplayRequestId += 1;
+  autoplayPromise = null;
   queueEndedWhileLoading = false;
 }
 
-async function awaitInfiniteNativeMutation(): Promise<void> {
-  if (infiniteNativeMutationPromise) await infiniteNativeMutationPromise;
+async function awaitAutoplayNativeMutation(): Promise<void> {
+  if (autoplayNativeMutationPromise) await autoplayNativeMutationPromise;
 }
 
 function setQueueState(queue: Child[], origins?: QueueTrackOrigin[]): void {
@@ -155,11 +155,13 @@ function filteredOrigins(
   });
 }
 
-function shouldLoadInfinitePlay(): boolean {
+function shouldLoadAutoplay(): boolean {
   const settings = playbackSettingsStore.getState();
   const state = playerStore.getState();
-  return settings.infinitePlayEnabled && settings.repeatMode === 'off' &&
-    state.currentTrackIndex != null && state.currentTrackIndex === currentChildQueue.length - 1 &&
+  const preloadIndex = Math.max(0, currentChildQueue.length - 2);
+  return settings.autoplayEnabled && settings.repeatMode === 'off' &&
+    !currentQueueOrigins.includes('autoplay') &&
+    state.currentTrackIndex != null && state.currentTrackIndex === preloadIndex &&
     currentChildQueue.length > 0;
 }
 
@@ -172,32 +174,32 @@ function getManualFutureTrackIds(startIndex: number): Set<string> {
   );
 }
 
-function isInfinitePlayRequestCurrent(
+function isAutoplayRequestCurrent(
   requestId: number,
   generation: number,
   offline: boolean,
 ): boolean {
-  return requestId === infinitePlayRequestId && generation === queueGeneration &&
-    offline === offlineModeStore.getState().offlineMode && shouldLoadInfinitePlay();
+  return requestId === autoplayRequestId && generation === queueGeneration &&
+    offline === offlineModeStore.getState().offlineMode && shouldLoadAutoplay();
 }
 
-function preloadInfinitePlay(): Promise<void> | null {
-  if (!shouldLoadInfinitePlay()) return null;
-  if (infinitePlayPromise) return infinitePlayPromise;
+function preloadAutoplay(): Promise<void> | null {
+  if (!shouldLoadAutoplay()) return null;
+  if (autoplayPromise) return autoplayPromise;
 
   const generation = queueGeneration;
-  const requestId = ++infinitePlayRequestId;
+  const requestId = ++autoplayRequestId;
   const offline = offlineModeStore.getState().offlineMode;
   const sourceIndex = playerStore.getState().currentTrackIndex!;
   const source = currentChildQueue[sourceIndex];
   const manualFutureTrackIds = getManualFutureTrackIds(sourceIndex);
 
   const request = (async () => {
-    const candidates = await buildInfinitePlayQueue(source, {
+    const candidates = await buildAutoplayQueue(source, {
       currentQueue: currentChildQueue,
       manualFutureTrackIds,
     });
-    if (!isInfinitePlayRequestCurrent(requestId, generation, offline)) return;
+    if (!isAutoplayRequestCurrent(requestId, generation, offline)) return;
 
     const excluded = getManualFutureTrackIds(playerStore.getState().currentTrackIndex ?? -1);
     const deduped = candidates.filter((track, index) =>
@@ -207,25 +209,25 @@ function preloadInfinitePlay(): Promise<void> | null {
     if (deduped.length === 0) return;
 
     const { rnTracks, filteredQueue } = await buildPlayableQueue(deduped);
-    if (rnTracks.length === 0 || !isInfinitePlayRequestCurrent(requestId, generation, offline)) return;
+    if (rnTracks.length === 0 || !isAutoplayRequestCurrent(requestId, generation, offline)) return;
 
     const firstAddedIndex = currentChildQueue.length;
     let appended = true;
     const nativeMutation = (async () => {
       await tp.addToQueue(rnTracks);
-      if (!isInfinitePlayRequestCurrent(requestId, generation, offline)) {
+      if (!isAutoplayRequestCurrent(requestId, generation, offline)) {
         appended = false;
         await tp.removeFromQueue(
           rnTracks.map((_, offset) => firstAddedIndex + offset),
         );
       }
     })();
-    infiniteNativeMutationPromise = nativeMutation;
+    autoplayNativeMutationPromise = nativeMutation;
     try {
       await nativeMutation;
     } finally {
-      if (infiniteNativeMutationPromise === nativeMutation) {
-        infiniteNativeMutationPromise = null;
+      if (autoplayNativeMutationPromise === nativeMutation) {
+        autoplayNativeMutationPromise = null;
       }
     }
     if (!appended) return;
@@ -242,14 +244,14 @@ function preloadInfinitePlay(): Promise<void> | null {
       await tp.play();
     }
   })().catch(() => {
-    // Infinite Play is best-effort; normal playback owns all user-facing errors.
+    // Autoplay is best-effort; normal playback owns all user-facing errors.
   }).finally(() => {
-    if (requestId === infinitePlayRequestId) {
-      infinitePlayPromise = null;
+    if (requestId === autoplayRequestId) {
+      autoplayPromise = null;
       queueEndedWhileLoading = false;
     }
   });
-  infinitePlayPromise = request;
+  autoplayPromise = request;
   return request;
 }
 
@@ -334,7 +336,7 @@ export async function initPlayer(): Promise<void> {
       playerStore.getState().setCurrentTrack(child, index ?? null);
       if (child) sendNowPlaying(child, trackPlaylistMap.get(child.id));
       if (index != null && index >= 0) persistCurrentQueue(index);
-      if (index === currentChildQueue.length - 1) void preloadInfinitePlay();
+      if (index === Math.max(0, currentChildQueue.length - 2)) void preloadAutoplay();
     } else {
       playerStore.getState().setCurrentTrack(null, null);
     }
@@ -384,9 +386,9 @@ export async function initPlayer(): Promise<void> {
     if (endDuration > 0) {
       playerStore.getState().setProgress(endDuration, endDuration, endDuration);
     }
-    if (infinitePlayPromise || shouldLoadInfinitePlay()) {
+    if (autoplayPromise || shouldLoadAutoplay()) {
       queueEndedWhileLoading = true;
-      void preloadInfinitePlay();
+      void preloadAutoplay();
     }
   });
 
@@ -655,7 +657,7 @@ export async function playTrack(
 ): Promise<void> {
   await awaitHydration();
   invalidateQueueWork();
-  await awaitInfiniteNativeMutation();
+  await awaitAutoplayNativeMutation();
   maybePromptFireBackgroundPlayback();
   pendingResumePosition = null;
   playerStore.getState().setQueueLoading(true);
@@ -903,7 +905,7 @@ export function clearSleepTimer(): void {
 /** Internal clear-state helper (does not await hydration — hydrate calls it). */
 async function clearPlayerStateInternal(): Promise<void> {
   invalidateQueueWork();
-  await awaitInfiniteNativeMutation();
+  await awaitAutoplayNativeMutation();
   pendingResumePosition = null;
   currentChildQueue = [];
   currentQueueOrigins = [];
@@ -938,7 +940,7 @@ export async function clearQueue(): Promise<void> {
 export async function rebuildQueueForServerSwitch(): Promise<void> {
   await awaitHydration();
   invalidateQueueWork();
-  await awaitInfiniteNativeMutation();
+  await awaitAutoplayNativeMutation();
   const queue = currentChildQueue;
   if (queue.length === 0) return;
 
@@ -996,7 +998,7 @@ export async function addToQueue(
   }
 
   invalidateQueueWork();
-  await awaitInfiniteNativeMutation();
+  await awaitAutoplayNativeMutation();
   const currentIndex = playerStore.getState().currentTrackIndex ?? 0;
   const firstFutureAutoplay = currentQueueOrigins.findIndex(
     (origin, index) => index > currentIndex && origin === 'autoplay',
@@ -1046,7 +1048,7 @@ export async function playSongNext(song: Child): Promise<void> {
 
   // addToQueue(tracks, insertBefore) inserts BEFORE the given index.
   invalidateQueueWork();
-  await awaitInfiniteNativeMutation();
+  await awaitAutoplayNativeMutation();
   await tp.addToQueue(rnTracks, insertBefore);
 
   for (const child of playable) {
@@ -1078,7 +1080,7 @@ export async function removeFromQueue(index: number): Promise<void> {
 
   const removedChild = currentChildQueue[index];
   invalidateQueueWork();
-  await awaitInfiniteNativeMutation();
+  await awaitAutoplayNativeMutation();
   await tp.removeFromQueue([index]);
 
   trackPlaylistMap.delete(removedChild.id);
@@ -1131,20 +1133,20 @@ export async function cycleRepeatMode(): Promise<void> {
     current === 'off' ? 'all' : current === 'all' ? 'one' : 'off';
   playbackSettingsStore.getState().setRepeatMode(next);
   await tp.setRepeatMode(mapRepeatMode(next));
-  if (next === 'off') void preloadInfinitePlay();
+  if (next === 'off') void preloadAutoplay();
 }
 
 /** Persist the preference and apply its queue-side effects. */
-export async function setInfinitePlayEnabled(enabled: boolean): Promise<void> {
-  const settingGeneration = ++infinitePlaySettingGeneration;
-  playbackSettingsStore.getState().setInfinitePlayEnabled(enabled);
+export async function setAutoplayEnabled(enabled: boolean): Promise<void> {
+  const settingGeneration = ++autoplaySettingGeneration;
+  playbackSettingsStore.getState().setAutoplayEnabled(enabled);
   if (enabled) {
-    if (playerStore.getState().playbackState === 'playing') void preloadInfinitePlay();
+    if (playerStore.getState().playbackState === 'playing') void preloadAutoplay();
     return;
   }
   invalidateQueueWork();
-  await awaitInfiniteNativeMutation();
-  if (settingGeneration !== infinitePlaySettingGeneration) return;
+  await awaitAutoplayNativeMutation();
+  if (settingGeneration !== autoplaySettingGeneration) return;
   const currentIndex = playerStore.getState().currentTrackIndex ?? -1;
   const indices = currentQueueOrigins
     .map((origin, index) => ({ origin, index }))
@@ -1158,9 +1160,9 @@ export async function setInfinitePlayEnabled(enabled: boolean): Promise<void> {
     currentQueueOrigins.filter((_, index) => !remove.has(index)),
   );
   persistCurrentQueue();
-  if (settingGeneration !== infinitePlaySettingGeneration &&
-      playbackSettingsStore.getState().infinitePlayEnabled) {
-    void preloadInfinitePlay();
+  if (settingGeneration !== autoplaySettingGeneration &&
+      playbackSettingsStore.getState().autoplayEnabled) {
+    void preloadAutoplay();
   }
 }
 
@@ -1233,7 +1235,7 @@ export async function shuffleQueue(): Promise<void> {
 
   try {
     invalidateQueueWork();
-    await awaitInfiniteNativeMutation();
+    await awaitAutoplayNativeMutation();
     const shuffledPairs = shuffleArray(
       currentChildQueue.map((track, index) => ({ track, origin: currentQueueOrigins[index] })),
     );

@@ -51,9 +51,9 @@ it('shows one plain section heading instead of a per-track autoplay badge', () =
   expect(manual.queryByRole('header')).toBeNull();
   manual.unmount();
 
-  const autoplay = render(<QueueItemRow {...props} startsInfinitePlaySection />);
-  expect(autoplay.getByRole('header')).toHaveTextContent('Next up');
-  expect(autoplay.queryByText('● Infinite Play')).toBeNull();
+  const autoplay = render(<QueueItemRow {...props} startsAutoplaySection />);
+  expect(autoplay.getByRole('header')).toHaveTextContent('Autoplay');
+  expect(autoplay.queryByText('● Autoplay')).toBeNull();
 });
 
 it('preserves queue press, long-press, remove, favorite, and playlist actions', () => {

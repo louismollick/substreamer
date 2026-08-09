@@ -57,16 +57,16 @@ export async function buildMoreLikeThisQueue(
   return output;
 }
 
-export interface InfinitePlayOptions {
+export interface AutoplayOptions {
   currentQueue: readonly Child[];
   manualFutureTrackIds: ReadonlySet<string>;
   target?: number;
 }
 
-/** Construct one Infinite Play batch, preserving source priority. */
-export async function buildInfinitePlayQueue(
+/** Construct one Autoplay batch, preserving source priority. */
+export async function buildAutoplayQueue(
   source: Child,
-  options: InfinitePlayOptions,
+  options: AutoplayOptions,
 ): Promise<Child[]> {
   const target = options.target ?? layoutPreferencesStore.getState().listLength;
   const queuedIds = new Set(options.currentQueue.map((track) => track.id));

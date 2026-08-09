@@ -1,6 +1,6 @@
 import type { QueueTrackOrigin } from '../store/playerStore';
 
-export function isInfinitePlaySectionStart(
+export function isAutoplaySectionStart(
   origins: QueueTrackOrigin[],
   currentTrackIndex: number | null,
   index: number,

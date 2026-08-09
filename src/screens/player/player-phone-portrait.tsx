@@ -69,7 +69,7 @@ import { playbackSettingsStore } from '@/store/playbackSettingsStore';
 import { moreOptionsStore } from '@/store/moreOptionsStore';
 import { playerStore } from '@/store/playerStore';
 import { mixHexColors } from '@/utils/colors';
-import { isInfinitePlaySectionStart } from '@/utils/queueOrigins';
+import { isAutoplaySectionStart } from '@/utils/queueOrigins';
 
 
 import { absoluteFill } from '@/utils/styles';
@@ -250,7 +250,7 @@ export function PlayerPhonePortrait() {
         track={item}
         index={index}
         isActive={index === currentTrackIndex}
-        startsInfinitePlaySection={isInfinitePlaySectionStart(
+        startsAutoplaySection={isAutoplaySectionStart(
           queueOrigins,
           currentTrackIndex,
           index,

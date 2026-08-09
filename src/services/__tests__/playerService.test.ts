@@ -102,9 +102,9 @@ jest.mock('../../store/offlineModeStore', () => ({
 
 jest.mock('../subsonicService');
 
-const mockBuildInfinitePlayQueue = jest.fn().mockResolvedValue([]);
+const mockBuildAutoplayQueue = jest.fn().mockResolvedValue([]);
 jest.mock('../relatedTracksService', () => ({
-  buildInfinitePlayQueue: (...args: unknown[]) => mockBuildInfinitePlayQueue(...args),
+  buildAutoplayQueue: (...args: unknown[]) => mockBuildAutoplayQueue(...args),
 }));
 
 const mockPersistQueue = jest.fn();
@@ -157,7 +157,7 @@ import {
   resetEqualizer,
   saveEqualizerPreset,
   deleteEqualizerPreset,
-  setInfinitePlayEnabled,
+  setAutoplayEnabled,
 } from '../playerService';
 import { equalizerSettingsStore, EQ_CUSTOM_PRESET_LABEL } from '../../store/equalizerSettingsStore';
 
@@ -201,7 +201,7 @@ const defaultPlayerState = () => ({
   setTrackSource: mockSetTrackSource,
 });
 
-describe('Infinite Play', () => {
+describe('Autoplay', () => {
   const playingFinalState = (queue: Child[]) => ({
     ...defaultPlayerState(),
     playbackState: 'playing',
@@ -210,24 +210,28 @@ describe('Infinite Play', () => {
     queue,
   });
 
-  it('preloads once on the final track and marks persisted origins', async () => {
-    const queue = [makeChild('source')];
+  it('preloads once on the second-to-last track and marks persisted origins', async () => {
+    const queue = [makeChild('first'), makeChild('source'), makeChild('final')];
     await playTrack(queue[0], queue);
-    const state = playingFinalState(queue);
+    const state = {
+      ...playingFinalState(queue),
+      currentTrack: queue[1],
+      currentTrackIndex: 1,
+    };
     (require('../../store/playerStore').playerStore.getState as jest.Mock).mockReturnValue(state);
-    mockBuildInfinitePlayQueue.mockResolvedValue([makeChild('auto')]);
+    mockBuildAutoplayQueue.mockResolvedValue([makeChild('auto')]);
 
-    await setInfinitePlayEnabled(true);
+    await setAutoplayEnabled(true);
     await new Promise((resolve) => setImmediate(resolve));
-    await setInfinitePlayEnabled(true);
+    await setAutoplayEnabled(true);
     await new Promise((resolve) => setImmediate(resolve));
 
-    expect(mockBuildInfinitePlayQueue).toHaveBeenCalledTimes(1);
+    expect(mockBuildAutoplayQueue).toHaveBeenCalledTimes(1);
     expect(mockTP.addToQueue).toHaveBeenCalledTimes(1);
     expect(mockPersistQueue).toHaveBeenLastCalledWith(
       expect.arrayContaining([expect.objectContaining({ id: 'auto' })]),
-      0,
-      ['manual', 'autoplay'],
+      1,
+      ['manual', 'manual', 'manual', 'autoplay'],
     );
   });
 
@@ -237,9 +241,9 @@ describe('Infinite Play', () => {
     const state = playingFinalState(queue);
     (require('../../store/playerStore').playerStore.getState as jest.Mock).mockReturnValue(state);
     let resolve!: (tracks: Child[]) => void;
-    mockBuildInfinitePlayQueue.mockReturnValue(new Promise((done) => { resolve = done; }));
+    mockBuildAutoplayQueue.mockReturnValue(new Promise((done) => { resolve = done; }));
 
-    await setInfinitePlayEnabled(true);
+    await setAutoplayEnabled(true);
     emit('queueEnd');
     resolve([makeChild('late-auto')]);
     await new Promise((done) => setImmediate(done));
@@ -254,12 +258,12 @@ describe('Infinite Play', () => {
     (require('../../store/playerStore').playerStore.getState as jest.Mock)
       .mockReturnValue(playingFinalState(queue));
     playbackSettingsStore.setState({ repeatMode: 'all' });
-    await setInfinitePlayEnabled(true);
-    expect(mockBuildInfinitePlayQueue).not.toHaveBeenCalled();
+    await setAutoplayEnabled(true);
+    expect(mockBuildAutoplayQueue).not.toHaveBeenCalled();
 
     playbackSettingsStore.setState({ repeatMode: 'off' });
-    mockBuildInfinitePlayQueue.mockRejectedValue(new Error('recommendations unavailable'));
-    await setInfinitePlayEnabled(true);
+    mockBuildAutoplayQueue.mockRejectedValue(new Error('recommendations unavailable'));
+    await setAutoplayEnabled(true);
     await new Promise((resolve) => setImmediate(resolve));
     expect(mockTP.addToQueue).not.toHaveBeenCalled();
     expect(mockToastFail).not.toHaveBeenCalled();
@@ -270,8 +274,8 @@ describe('Infinite Play', () => {
     await playTrack(queue[0], queue);
     (require('../../store/playerStore').playerStore.getState as jest.Mock)
       .mockReturnValue(playingFinalState(queue));
-    mockBuildInfinitePlayQueue.mockResolvedValue([makeChild('staged')]);
-    await setInfinitePlayEnabled(true);
+    mockBuildAutoplayQueue.mockResolvedValue([makeChild('staged')]);
+    await setAutoplayEnabled(true);
     await new Promise((resolve) => setImmediate(resolve));
 
     mockTP.addToQueue.mockClear();
@@ -284,7 +288,7 @@ describe('Infinite Play', () => {
       expect.any(Array), 0, ['manual', 'manual', 'autoplay'],
     );
 
-    await setInfinitePlayEnabled(false);
+    await setAutoplayEnabled(false);
     expect(mockTP.removeFromQueue).toHaveBeenCalledWith([2]);
     expect(mockPersistQueue).toHaveBeenLastCalledWith(
       expect.any(Array), 0, ['manual', 'manual'],
@@ -297,8 +301,8 @@ describe('Infinite Play', () => {
     (require('../../store/playerStore').playerStore.getState as jest.Mock)
       .mockReturnValue(playingFinalState(queue));
     let resolve!: (tracks: Child[]) => void;
-    mockBuildInfinitePlayQueue.mockReturnValue(new Promise((done) => { resolve = done; }));
-    await setInfinitePlayEnabled(true);
+    mockBuildAutoplayQueue.mockReturnValue(new Promise((done) => { resolve = done; }));
+    await setAutoplayEnabled(true);
     await clearQueue();
     mockTP.addToQueue.mockClear();
     resolve([makeChild('stale')]);
@@ -312,8 +316,8 @@ describe('Infinite Play', () => {
     (require('../../store/playerStore').playerStore.getState as jest.Mock)
       .mockReturnValue(playingFinalState(queue));
     let resolve!: (tracks: Child[]) => void;
-    mockBuildInfinitePlayQueue.mockReturnValue(new Promise((done) => { resolve = done; }));
-    await setInfinitePlayEnabled(true);
+    mockBuildAutoplayQueue.mockReturnValue(new Promise((done) => { resolve = done; }));
+    await setAutoplayEnabled(true);
 
     mockOfflineMode.offlineMode = true;
     mockOfflineModeSubscriber?.(mockOfflineMode, { offlineMode: false });
@@ -329,24 +333,24 @@ describe('Infinite Play', () => {
     await playTrack(queue[0], queue);
     (require('../../store/playerStore').playerStore.getState as jest.Mock)
       .mockReturnValue(playingFinalState(queue));
-    mockBuildInfinitePlayQueue.mockResolvedValue([makeChild('toggle-auto')]);
-    await setInfinitePlayEnabled(true);
+    mockBuildAutoplayQueue.mockResolvedValue([makeChild('toggle-auto')]);
+    await setAutoplayEnabled(true);
     await new Promise((done) => setImmediate(done));
 
     let finishRemoval!: () => void;
     mockTP.removeFromQueue.mockReturnValueOnce(new Promise<void>((resolve) => {
       finishRemoval = resolve;
     }));
-    const disable = setInfinitePlayEnabled(false);
+    const disable = setAutoplayEnabled(false);
     await new Promise((done) => setImmediate(done));
-    await setInfinitePlayEnabled(true);
-    expect(mockBuildInfinitePlayQueue).toHaveBeenCalledTimes(1);
+    await setAutoplayEnabled(true);
+    expect(mockBuildAutoplayQueue).toHaveBeenCalledTimes(1);
 
     finishRemoval();
     await disable;
     await new Promise((done) => setImmediate(done));
 
-    expect(mockBuildInfinitePlayQueue).toHaveBeenCalledTimes(2);
+    expect(mockBuildAutoplayQueue).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -379,9 +383,9 @@ beforeEach(async () => {
     remoteControlMode: 'skip-track',
     skipForwardInterval: 15,
     skipBackwardInterval: 15,
-    infinitePlayEnabled: false,
+    autoplayEnabled: false,
   } as any);
-  mockBuildInfinitePlayQueue.mockResolvedValue([]);
+  mockBuildAutoplayQueue.mockResolvedValue([]);
 
   (getCoverArtUrl as jest.Mock).mockReturnValue('https://example.com/art.jpg');
   (getStreamUrl as jest.Mock).mockReturnValue('https://example.com/stream.mp3');

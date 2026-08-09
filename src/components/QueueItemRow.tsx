@@ -33,7 +33,7 @@ export interface QueueItemRowProps {
   track: Child;
   index: number;
   isActive: boolean;
-  startsInfinitePlaySection?: boolean;
+  startsAutoplaySection?: boolean;
   colors: Pick<ThemeColors, 'textPrimary' | 'textSecondary' | 'primary' | 'border' | 'red'>;
   onPress: (index: number) => void;
   onLongPress?: (track: Child) => void;
@@ -47,7 +47,7 @@ export const QueueItemRow = memo(function QueueItemRow({
   track,
   index,
   isActive,
-  startsInfinitePlaySection = false,
+  startsAutoplaySection = false,
   colors,
   onPress,
   onLongPress,
@@ -121,13 +121,13 @@ export const QueueItemRow = memo(function QueueItemRow({
 
   return (
     <>
-      {startsInfinitePlaySection && (
+      {startsAutoplaySection && (
         <View style={styles.sectionHeader}>
           <Text
             accessibilityRole="header"
             style={[styles.sectionHeaderText, { color: colors.textPrimary }]}
           >
-            {t('nextUp')}
+            {t('autoplay')}
           </Text>
         </View>
       )}
@@ -215,8 +215,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   sectionHeaderText: {
-    fontSize: 14,
-    fontWeight: '700',
+    fontSize: 12,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
   coverWrap: {
     width: COVER_SIZE,

@@ -41,7 +41,7 @@ import { useCanSkip } from '@/hooks/useCanSkip';
 import { useCoverGradient } from '@/hooks/useCoverGradient';
 import { useSongCoverArt } from '@/hooks/useSongCoverArt';
 import { mixHexColors } from '@/utils/colors';
-import { isInfinitePlaySectionStart } from '@/utils/queueOrigins';
+import { isAutoplaySectionStart } from '@/utils/queueOrigins';
 import { usePlayerActions } from '@/hooks/usePlayerActions';
 import { usePlaybackState } from '@/hooks/usePlaybackState';
 import { useShuffleOverlay } from '@/hooks/useShuffleOverlay';
@@ -224,7 +224,7 @@ export function PlayerTabletLandscape({
         track={item}
         index={index}
         isActive={index === currentTrackIndex}
-        startsInfinitePlaySection={isInfinitePlaySectionStart(
+        startsAutoplaySection={isAutoplaySectionStart(
           queueOrigins,
           currentTrackIndex,
           index,
