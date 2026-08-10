@@ -133,6 +133,14 @@ function setQueueState(queue: Child[], origins?: QueueTrackOrigin[]): void {
   playerStore.getState().setQueue(currentChildQueue, currentQueueOrigins);
 }
 
+function markQueueHistoryThrough(index: number): void {
+  if (index < 0 || currentQueueOrigins.every((origin, i) => i > index || origin === 'manual')) return;
+  setQueueState(
+    currentChildQueue,
+    currentQueueOrigins.map((origin, i) => i <= index ? 'manual' : origin),
+  );
+}
+
 function persistCurrentQueue(index = playerStore.getState().currentTrackIndex ?? 0): void {
   persistQueue(currentChildQueue, index, currentQueueOrigins);
 }
@@ -333,6 +341,7 @@ export async function initPlayer(): Promise<void> {
     }
     if (track?.id) {
       const child = currentChildQueue.find((c) => c.id === track.id) ?? null;
+      if (index != null) markQueueHistoryThrough(index);
       playerStore.getState().setCurrentTrack(child, index ?? null);
       if (child) sendNowPlaying(child, trackPlaylistMap.get(child.id));
       if (index != null && index >= 0) persistCurrentQueue(index);

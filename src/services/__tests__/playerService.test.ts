@@ -269,29 +269,44 @@ describe('Autoplay', () => {
     expect(mockToastFail).not.toHaveBeenCalled();
   });
 
-  it('inserts manual additions before staged autoplay and disable removes only autoplay', async () => {
+  it('keeps played autoplay in history after a manual addition and backward jump', async () => {
     const queue = [makeChild('priority-source')];
     await playTrack(queue[0], queue);
-    (require('../../store/playerStore').playerStore.getState as jest.Mock)
-      .mockReturnValue(playingFinalState(queue));
-    mockBuildAutoplayQueue.mockResolvedValue([makeChild('staged')]);
+    const playerStoreMock = require('../../store/playerStore').playerStore.getState as jest.Mock;
+    playerStoreMock.mockReturnValue(playingFinalState(queue));
+    mockBuildAutoplayQueue.mockResolvedValue([makeChild('played-auto'), makeChild('future-auto')]);
     await setAutoplayEnabled(true);
     await new Promise((resolve) => setImmediate(resolve));
 
+    emit('trackChange', { id: 'played-auto' }, 1, 'auto-advance');
+    expect(mockSetQueue).toHaveBeenLastCalledWith(
+      expect.any(Array), ['manual', 'manual', 'autoplay'],
+    );
+
+    playerStoreMock.mockReturnValue({
+      ...playingFinalState(queue),
+      currentTrack: makeChild('played-auto'),
+      currentTrackIndex: 1,
+    });
     mockTP.addToQueue.mockClear();
     await addToQueue([makeChild('manual')]);
     expect(mockTP.addToQueue).toHaveBeenCalledWith(
       [expect.objectContaining({ id: 'manual' })],
-      1,
+      2,
     );
     expect(mockPersistQueue).toHaveBeenLastCalledWith(
-      expect.any(Array), 0, ['manual', 'manual', 'autoplay'],
+      expect.any(Array), 1, ['manual', 'manual', 'manual', 'autoplay'],
+    );
+
+    emit('trackChange', { id: 'priority-source' }, 0, 'user-skip-previous');
+    expect(mockPersistQueue).toHaveBeenLastCalledWith(
+      expect.any(Array), 0, ['manual', 'manual', 'manual', 'autoplay'],
     );
 
     await setAutoplayEnabled(false);
-    expect(mockTP.removeFromQueue).toHaveBeenCalledWith([2]);
+    expect(mockTP.removeFromQueue).toHaveBeenCalledWith([3]);
     expect(mockPersistQueue).toHaveBeenLastCalledWith(
-      expect.any(Array), 0, ['manual', 'manual'],
+      expect.any(Array), 1, ['manual', 'manual', 'manual'],
     );
   });
 
