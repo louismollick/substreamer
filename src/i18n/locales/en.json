@@ -666,6 +666,7 @@
   "queue": "Queue",
   "shareQueue": "Share queue",
   "loading": "Loading…",
+  "buildingAutoplayQueue": "Building your autoplay queue…",
   "removeFromFavorites": "Remove from Favorites",
   "addToFavorites": "Add to Favorites",
   "speed": "speed",

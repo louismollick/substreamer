@@ -216,10 +216,11 @@ jest.mock('@shopify/flash-list', () => {
   const { View } = require('react-native');
   return {
     FlashList: React.forwardRef(function MockFlashList(
-      { data, renderItem, ListHeaderComponent, keyExtractor }: {
+      { data, renderItem, ListHeaderComponent, ListFooterComponent, keyExtractor }: {
         data: unknown[];
         renderItem: (info: { item: unknown; index: number }) => React.ReactNode;
         ListHeaderComponent?: React.ReactNode;
+        ListFooterComponent?: React.ComponentType;
         keyExtractor?: (item: unknown, index: number) => string;
       },
       _ref: unknown,
@@ -232,6 +233,7 @@ jest.mock('@shopify/flash-list', () => {
               {renderItem({ item, index })}
             </View>
           ))}
+          {ListFooterComponent ? <ListFooterComponent /> : null}
         </View>
       );
     }),
@@ -271,6 +273,7 @@ beforeEach(() => {
     queue: MOCK_QUEUE,
     queueOrigins: ['manual', 'manual', 'manual'],
     queueLoading: false,
+    autoplayLoading: false,
     playbackState: 'playing',
     position: 30,
     duration: 180,
@@ -324,6 +327,17 @@ describe('PlayerPhonePortrait', () => {
 
     expect(getByLabelText('Share queue')).toBeTruthy();
     expect(getByLabelText('Clear Queue')).toBeTruthy();
+  });
+
+  it('shows the Autoplay loading footer at the end of the queue', () => {
+    playerStore.setState({ autoplayLoading: true });
+    const { getByLabelText, getByText } = render(<PlayerPhonePortrait />);
+
+    act(() => {
+      fireEvent.press(getByLabelText('Queue'));
+    });
+
+    expect(getByText('Building your autoplay queue…')).toBeTruthy();
   });
 
   it('switches to lyrics tab and mounts LyricsContent', () => {

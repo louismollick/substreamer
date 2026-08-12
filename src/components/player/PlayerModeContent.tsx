@@ -6,6 +6,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AlbumInfoContent } from '@/components/AlbumInfoContent';
+import { AutoplayQueueFooter } from '@/components/AutoplayQueueFooter';
 import { LyricsContent } from '@/components/LyricsContent';
 import { QueueItemRow } from '@/components/QueueItemRow';
 import { closeOpenRow } from '@/components/SwipeableRow';
@@ -157,6 +158,7 @@ export const PlayerModeContent = memo(function PlayerModeContent({
             data={queue}
             renderItem={renderQueueItem}
             keyExtractor={keyExtractor}
+            ListFooterComponent={AutoplayQueueFooter}
             onScrollBeginDrag={closeOpenRow}
             drawDistance={300}
             showsVerticalScrollIndicator={false}

@@ -17,6 +17,7 @@ beforeEach(() => {
     error: null,
     retrying: false,
     queueLoading: false,
+    autoplayLoading: false,
     queueFormats: {},
   });
 });
@@ -101,6 +102,11 @@ describe('playerStore', () => {
   it('setQueueLoading updates queueLoading', () => {
     playerStore.getState().setQueueLoading(true);
     expect(playerStore.getState().queueLoading).toBe(true);
+  });
+
+  it('setAutoplayLoading updates autoplayLoading', () => {
+    playerStore.getState().setAutoplayLoading(true);
+    expect(playerStore.getState().autoplayLoading).toBe(true);
   });
 
   describe('queueFormats', () => {

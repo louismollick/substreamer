@@ -45,6 +45,8 @@ export interface PlayerState {
   retrying: boolean;
   /** True while `playTrack()` is loading the queue and skipping to the start index. */
   queueLoading: boolean;
+  /** True while a background Autoplay request is building the next queue segment. */
+  autoplayLoading: boolean;
   /** Effective post-transcode format for each track in the current queue, keyed by song ID. */
   queueFormats: Record<string, EffectiveFormat>;
   /** Where the active track is playing from: local file, lookahead cache, or live stream. */
@@ -58,6 +60,7 @@ export interface PlayerState {
   setError: (error: string | null) => void;
   setRetrying: (retrying: boolean) => void;
   setQueueLoading: (loading: boolean) => void;
+  setAutoplayLoading: (loading: boolean) => void;
   setQueueFormats: (formats: Record<string, EffectiveFormat>) => void;
   addQueueFormat: (songId: string, fmt: EffectiveFormat) => void;
   clearQueueFormats: () => void;
@@ -76,6 +79,7 @@ export const playerStore = create<PlayerState>()((set) => ({
   error: null,
   retrying: false,
   queueLoading: false,
+  autoplayLoading: false,
   queueFormats: {},
   trackSource: null,
 
@@ -101,6 +105,7 @@ export const playerStore = create<PlayerState>()((set) => ({
   setError: (error) => set({ error }),
   setRetrying: (retrying) => set({ retrying }),
   setQueueLoading: (loading) => set({ queueLoading: loading }),
+  setAutoplayLoading: (loading) => set({ autoplayLoading: loading }),
   setQueueFormats: (queueFormats) => set({ queueFormats }),
   addQueueFormat: (songId, fmt) =>
     set((state) => ({ queueFormats: { ...state.queueFormats, [songId]: fmt } })),

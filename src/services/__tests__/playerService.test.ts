@@ -25,6 +25,7 @@ const mockSetProgress = jest.fn();
 const mockSetError = jest.fn();
 const mockSetRetrying = jest.fn();
 const mockSetQueueLoading = jest.fn();
+const mockSetAutoplayLoading = jest.fn();
 const mockSetQueueFormats = jest.fn();
 const mockAddQueueFormat = jest.fn();
 const mockClearQueueFormats = jest.fn();
@@ -50,6 +51,7 @@ jest.mock('../../store/playerStore', () => ({
       setError: mockSetError,
       setRetrying: mockSetRetrying,
       setQueueLoading: mockSetQueueLoading,
+      setAutoplayLoading: mockSetAutoplayLoading,
       setQueueFormats: mockSetQueueFormats,
       addQueueFormat: mockAddQueueFormat,
       clearQueueFormats: mockClearQueueFormats,
@@ -195,6 +197,7 @@ const defaultPlayerState = () => ({
   setError: mockSetError,
   setRetrying: mockSetRetrying,
   setQueueLoading: mockSetQueueLoading,
+  setAutoplayLoading: mockSetAutoplayLoading,
   setQueueFormats: mockSetQueueFormats,
   addQueueFormat: mockAddQueueFormat,
   clearQueueFormats: mockClearQueueFormats,
@@ -233,6 +236,49 @@ describe('Autoplay', () => {
       1,
       ['manual', 'manual', 'manual', 'autoplay'],
     );
+    expect(mockSetAutoplayLoading).toHaveBeenCalledWith(true);
+    expect(mockSetAutoplayLoading).toHaveBeenLastCalledWith(false);
+  });
+
+  it('exposes loading until an empty recommendation request finishes', async () => {
+    const queue = [makeChild('loading-source')];
+    await playTrack(queue[0], queue);
+    (require('../../store/playerStore').playerStore.getState as jest.Mock)
+      .mockReturnValue(playingFinalState(queue));
+    let resolve!: (tracks: Child[]) => void;
+    mockBuildAutoplayQueue.mockReturnValue(new Promise((done) => { resolve = done; }));
+
+    await setAutoplayEnabled(true);
+    expect(mockSetAutoplayLoading).toHaveBeenLastCalledWith(true);
+
+    resolve([]);
+    await new Promise((done) => setImmediate(done));
+    expect(mockSetAutoplayLoading).toHaveBeenLastCalledWith(false);
+  });
+
+  it('does not let a stale request hide a newer Autoplay request', async () => {
+    const queue = [makeChild('restart-source')];
+    await playTrack(queue[0], queue);
+    (require('../../store/playerStore').playerStore.getState as jest.Mock)
+      .mockReturnValue(playingFinalState(queue));
+    let resolveFirst!: (tracks: Child[]) => void;
+    let resolveSecond!: (tracks: Child[]) => void;
+    mockBuildAutoplayQueue
+      .mockReturnValueOnce(new Promise((done) => { resolveFirst = done; }))
+      .mockReturnValueOnce(new Promise((done) => { resolveSecond = done; }));
+
+    await setAutoplayEnabled(true);
+    await setAutoplayEnabled(false);
+    await setAutoplayEnabled(true);
+    expect(mockSetAutoplayLoading).toHaveBeenLastCalledWith(true);
+
+    resolveFirst([]);
+    await new Promise((done) => setImmediate(done));
+    expect(mockSetAutoplayLoading).toHaveBeenLastCalledWith(true);
+
+    resolveSecond([]);
+    await new Promise((done) => setImmediate(done));
+    expect(mockSetAutoplayLoading).toHaveBeenLastCalledWith(false);
   });
 
   it('resumes the first appended track when loading finishes after queue end', async () => {

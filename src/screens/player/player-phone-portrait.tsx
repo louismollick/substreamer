@@ -24,6 +24,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTranslation } from 'react-i18next';
 
 import { AlbumInfoContent } from '@/components/AlbumInfoContent';
+import { AutoplayQueueFooter } from '@/components/AutoplayQueueFooter';
 import { LyricsContent } from '@/components/LyricsContent';
 import { BookmarkButton } from '@/components/BookmarkButton';
 import { CachedImage } from '@/components/CachedImage';
@@ -366,6 +367,7 @@ export function PlayerPhonePortrait() {
                 renderItem={renderQueueItem}
                 keyExtractor={keyExtractor}
                 ListHeaderComponent={queueListHeader}
+                ListFooterComponent={AutoplayQueueFooter}
                 onScrollBeginDrag={closeOpenRow}
                 drawDistance={200}
                 showsVerticalScrollIndicator={false}

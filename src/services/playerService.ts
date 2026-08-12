@@ -121,6 +121,7 @@ function invalidateQueueWork(): void {
   autoplayRequestId += 1;
   autoplayPromise = null;
   queueEndedWhileLoading = false;
+  playerStore.getState().setAutoplayLoading(false);
 }
 
 async function awaitAutoplayNativeMutation(): Promise<void> {
@@ -201,6 +202,7 @@ function preloadAutoplay(): Promise<void> | null {
   const sourceIndex = playerStore.getState().currentTrackIndex!;
   const source = currentChildQueue[sourceIndex];
   const manualFutureTrackIds = getManualFutureTrackIds(sourceIndex);
+  playerStore.getState().setAutoplayLoading(true);
 
   const request = (async () => {
     const candidates = await buildAutoplayQueue(source, {
@@ -257,6 +259,7 @@ function preloadAutoplay(): Promise<void> | null {
     if (requestId === autoplayRequestId) {
       autoplayPromise = null;
       queueEndedWhileLoading = false;
+      playerStore.getState().setAutoplayLoading(false);
     }
   });
   autoplayPromise = request;

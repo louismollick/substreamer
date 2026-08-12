@@ -12,6 +12,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { GradientBackground } from '@/components/GradientBackground';
+import { AutoplayQueueFooter } from '@/components/AutoplayQueueFooter';
 import { CachedImage } from '@/components/CachedImage';
 import { FavoriteButton } from '@/components/FavoriteButton';
 import { MarqueeText } from '@/components/MarqueeText';
@@ -188,6 +189,7 @@ export function PlayerTabletSplitview() {
           data={queue}
           renderItem={renderQueueItem}
           keyExtractor={keyExtractor}
+          ListFooterComponent={AutoplayQueueFooter}
           onScrollBeginDrag={closeOpenRow}
           drawDistance={200}
           showsVerticalScrollIndicator={false}

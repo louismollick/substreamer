@@ -21,6 +21,7 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AlbumInfoContent } from '@/components/AlbumInfoContent';
+import { AutoplayQueueFooter } from '@/components/AutoplayQueueFooter';
 import { LyricsContent } from '@/components/LyricsContent';
 import { BookmarkButton } from '@/components/BookmarkButton';
 import { CachedImage } from '@/components/CachedImage';
@@ -505,6 +506,7 @@ export function PlayerTabletLandscape({
                       data={queue}
                       renderItem={renderQueueItem}
                       keyExtractor={keyExtractor}
+                      ListFooterComponent={AutoplayQueueFooter}
                       onScrollBeginDrag={closeOpenRow}
                       drawDistance={200}
                       showsVerticalScrollIndicator={false}

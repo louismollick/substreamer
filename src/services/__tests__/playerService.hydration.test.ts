@@ -59,6 +59,7 @@ const mockSetPlaybackState = jest.fn();
 const mockSetError = jest.fn();
 const mockSetRetrying = jest.fn();
 const mockSetQueueLoading = jest.fn();
+const mockSetAutoplayLoading = jest.fn();
 const mockSetQueueFormats = jest.fn();
 const mockClearQueueFormats = jest.fn();
 const mockAddQueueFormat = jest.fn();
@@ -72,6 +73,7 @@ const buildPlayerState = () => ({
   setError: mockSetError,
   setRetrying: mockSetRetrying,
   setQueueLoading: mockSetQueueLoading,
+  setAutoplayLoading: mockSetAutoplayLoading,
   setQueueFormats: mockSetQueueFormats,
   addQueueFormat: mockAddQueueFormat,
   clearQueueFormats: mockClearQueueFormats,
