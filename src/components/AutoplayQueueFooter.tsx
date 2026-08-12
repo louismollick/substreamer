@@ -4,11 +4,17 @@ import { useTranslation } from 'react-i18next';
 
 import { useTheme } from '@/hooks/useTheme';
 import { playerStore } from '@/store/playerStore';
+import { isAutoplaySectionStart } from '@/utils/queueOrigins';
 
 export const AutoplayQueueFooter = memo(function AutoplayQueueFooter() {
   const { t } = useTranslation();
   const { colors } = useTheme();
   const autoplayLoading = playerStore((state) => state.autoplayLoading);
+  const currentTrackIndex = playerStore((state) => state.currentTrackIndex);
+  const queueOrigins = playerStore((state) => state.queueOrigins);
+  const hasAutoplayHeading = queueOrigins.some((_, index) =>
+    isAutoplaySectionStart(queueOrigins, currentTrackIndex, index),
+  );
 
   if (!autoplayLoading) return null;
 
@@ -18,14 +24,16 @@ export const AutoplayQueueFooter = memo(function AutoplayQueueFooter() {
       accessibilityRole="progressbar"
       accessibilityLabel={t('buildingAutoplayQueue')}
     >
-      <View style={styles.sectionHeader}>
-        <Text
-          accessibilityRole="header"
-          style={[styles.sectionHeaderText, { color: colors.textPrimary }]}
-        >
-          {t('autoplay')}
-        </Text>
-      </View>
+      {!hasAutoplayHeading && (
+        <View style={styles.sectionHeader}>
+          <Text
+            accessibilityRole="header"
+            style={[styles.sectionHeaderText, { color: colors.textPrimary }]}
+          >
+            {t('autoplay')}
+          </Text>
+        </View>
+      )}
       <View style={styles.loadingRow}>
         <ActivityIndicator size="small" color={colors.textSecondary} />
         <Text style={[styles.loadingText, { color: colors.textSecondary }]}>
