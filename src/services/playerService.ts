@@ -86,6 +86,7 @@ let autoplayRequestId = 0;
 let autoplaySettingGeneration = 0;
 let autoplayPromise: Promise<void> | null = null;
 let autoplayNativeMutationPromise: Promise<void> | null = null;
+let autoplayRemovalCount = 0;
 let queueEndedWhileLoading = false;
 /** Maps trackId → playlistId for tracks that originated from a playlist. */
 const trackPlaylistMap = new Map<string, string>();
@@ -167,11 +168,11 @@ function filteredOrigins(
 function shouldLoadAutoplay(): boolean {
   const settings = playbackSettingsStore.getState();
   const state = playerStore.getState();
-  const preloadIndex = Math.max(0, currentChildQueue.length - 2);
-  return settings.autoplayEnabled && settings.repeatMode === 'off' &&
-    !currentQueueOrigins.includes('autoplay') &&
-    state.currentTrackIndex != null && state.currentTrackIndex === preloadIndex &&
-    currentChildQueue.length > 0;
+  const currentIndex = state.currentTrackIndex;
+  return autoplayRemovalCount === 0 &&
+    settings.autoplayEnabled && settings.repeatMode === 'off' &&
+    currentIndex != null && currentIndex >= Math.max(0, currentChildQueue.length - 2) &&
+    currentIndex < currentChildQueue.length;
 }
 
 function getManualFutureTrackIds(startIndex: number): Set<string> {
@@ -347,8 +348,10 @@ export async function initPlayer(): Promise<void> {
       if (index != null) markQueueHistoryThrough(index);
       playerStore.getState().setCurrentTrack(child, index ?? null);
       if (child) sendNowPlaying(child, trackPlaylistMap.get(child.id));
-      if (index != null && index >= 0) persistCurrentQueue(index);
-      if (index === Math.max(0, currentChildQueue.length - 2)) void preloadAutoplay();
+      if (index != null && index >= 0) {
+        persistCurrentQueue(index);
+        void preloadAutoplay();
+      }
     } else {
       playerStore.getState().setCurrentTrack(null, null);
     }
@@ -1156,25 +1159,29 @@ export async function setAutoplayEnabled(enabled: boolean): Promise<void> {
     if (playerStore.getState().playbackState === 'playing') void preloadAutoplay();
     return;
   }
-  invalidateQueueWork();
-  await awaitAutoplayNativeMutation();
-  if (settingGeneration !== autoplaySettingGeneration) return;
-  const currentIndex = playerStore.getState().currentTrackIndex ?? -1;
-  const indices = currentQueueOrigins
-    .map((origin, index) => ({ origin, index }))
-    .filter(({ origin, index }) => origin === 'autoplay' && index > currentIndex)
-    .map(({ index }) => index);
-  if (indices.length === 0) return;
-  await tp.removeFromQueue(indices);
-  const remove = new Set(indices);
-  setQueueState(
-    currentChildQueue.filter((_, index) => !remove.has(index)),
-    currentQueueOrigins.filter((_, index) => !remove.has(index)),
-  );
-  persistCurrentQueue();
-  if (settingGeneration !== autoplaySettingGeneration &&
-      playbackSettingsStore.getState().autoplayEnabled) {
-    void preloadAutoplay();
+  autoplayRemovalCount += 1;
+  try {
+    invalidateQueueWork();
+    await awaitAutoplayNativeMutation();
+    if (settingGeneration !== autoplaySettingGeneration) return;
+    const currentIndex = playerStore.getState().currentTrackIndex ?? -1;
+    const indices = currentQueueOrigins
+      .map((origin, index) => ({ origin, index }))
+      .filter(({ origin, index }) => origin === 'autoplay' && index > currentIndex)
+      .map(({ index }) => index);
+    if (indices.length === 0) return;
+    await tp.removeFromQueue(indices);
+    const remove = new Set(indices);
+    setQueueState(
+      currentChildQueue.filter((_, index) => !remove.has(index)),
+      currentQueueOrigins.filter((_, index) => !remove.has(index)),
+    );
+    persistCurrentQueue();
+  } finally {
+    autoplayRemovalCount -= 1;
+    if (autoplayRemovalCount === 0 && playbackSettingsStore.getState().autoplayEnabled) {
+      void preloadAutoplay();
+    }
   }
 }
 

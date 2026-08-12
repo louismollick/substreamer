@@ -213,31 +213,57 @@ describe('Autoplay', () => {
     queue,
   });
 
-  it('preloads once on the second-to-last track and marks persisted origins', async () => {
+  it('refills again when an Autoplay batch reaches its second-to-last track', async () => {
     const queue = [makeChild('first'), makeChild('source'), makeChild('final')];
     await playTrack(queue[0], queue);
+    const playerStoreMock = require('../../store/playerStore').playerStore.getState as jest.Mock;
     const state = {
       ...playingFinalState(queue),
       currentTrack: queue[1],
       currentTrackIndex: 1,
     };
-    (require('../../store/playerStore').playerStore.getState as jest.Mock).mockReturnValue(state);
-    mockBuildAutoplayQueue.mockResolvedValue([makeChild('auto')]);
+    playerStoreMock.mockReturnValue(state);
+    mockBuildAutoplayQueue
+      .mockResolvedValueOnce([makeChild('auto-1'), makeChild('auto-2')])
+      .mockResolvedValueOnce([makeChild('auto-3'), makeChild('auto-4')]);
 
     await setAutoplayEnabled(true);
     await new Promise((resolve) => setImmediate(resolve));
-    await setAutoplayEnabled(true);
+    playerStoreMock.mockReturnValue({
+      ...state,
+      currentTrack: makeChild('auto-1'),
+      currentTrackIndex: 3,
+    });
+    emit('trackChange', { id: 'auto-1' }, 3, 'auto-advance');
     await new Promise((resolve) => setImmediate(resolve));
 
-    expect(mockBuildAutoplayQueue).toHaveBeenCalledTimes(1);
-    expect(mockTP.addToQueue).toHaveBeenCalledTimes(1);
+    expect(mockBuildAutoplayQueue).toHaveBeenCalledTimes(2);
+    expect(mockTP.addToQueue).toHaveBeenCalledTimes(2);
     expect(mockPersistQueue).toHaveBeenLastCalledWith(
-      expect.arrayContaining([expect.objectContaining({ id: 'auto' })]),
-      1,
-      ['manual', 'manual', 'manual', 'autoplay'],
+      expect.arrayContaining([expect.objectContaining({ id: 'auto-4' })]),
+      3,
+      ['manual', 'manual', 'manual', 'manual', 'autoplay', 'autoplay', 'autoplay'],
     );
     expect(mockSetAutoplayLoading).toHaveBeenCalledWith(true);
     expect(mockSetAutoplayLoading).toHaveBeenLastCalledWith(false);
+  });
+
+  it('deduplicates refill triggers while recommendation loading is pending', async () => {
+    const queue = [makeChild('first'), makeChild('pending-source')];
+    await playTrack(queue[0], queue);
+    const state = playingFinalState(queue);
+    (require('../../store/playerStore').playerStore.getState as jest.Mock).mockReturnValue(state);
+    let resolve!: (tracks: Child[]) => void;
+    mockBuildAutoplayQueue.mockReturnValue(new Promise((done) => { resolve = done; }));
+
+    await setAutoplayEnabled(true);
+    emit('trackChange', { id: 'pending-source' }, 1, 'user-skip-next');
+    emit('queueEnd');
+
+    expect(mockBuildAutoplayQueue).toHaveBeenCalledTimes(1);
+    resolve([makeChild('deduped-auto')]);
+    await new Promise((done) => setImmediate(done));
+    expect(mockTP.addToQueue).toHaveBeenCalledTimes(1);
   });
 
   it('exposes loading until an empty recommendation request finishes', async () => {
@@ -294,6 +320,22 @@ describe('Autoplay', () => {
     resolve([makeChild('late-auto')]);
     await new Promise((done) => setImmediate(done));
 
+    expect(mockTP.skipToIndex).toHaveBeenCalledWith(1);
+    expect(mockTP.play).toHaveBeenCalled();
+  });
+
+  it('starts a final refill attempt when the queue ends without one pending', async () => {
+    const queue = [makeChild('ended-source')];
+    await playTrack(queue[0], queue);
+    (require('../../store/playerStore').playerStore.getState as jest.Mock)
+      .mockReturnValue(playingFinalState(queue));
+    playbackSettingsStore.setState({ autoplayEnabled: true });
+    mockBuildAutoplayQueue.mockResolvedValue([makeChild('queue-end-auto')]);
+
+    emit('queueEnd');
+    await new Promise((done) => setImmediate(done));
+
+    expect(mockBuildAutoplayQueue).toHaveBeenCalledTimes(1);
     expect(mockTP.skipToIndex).toHaveBeenCalledWith(1);
     expect(mockTP.play).toHaveBeenCalled();
   });
