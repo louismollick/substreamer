@@ -316,6 +316,10 @@ describe('cache-update recovery', () => {
     mockGetCachedImageUri.mockReturnValue('file:///cache/abc/600.jpg');
     await fireCacheUpdate();
     const firstLocal = findImage(tree);
+    expect(firstLocal).toEqual({
+      uri: 'file:///cache/abc/600.jpg',
+      recyclingKey: expect.any(String),
+    });
 
     // The 300px and 150px variants notify this 50px image, but it continues
     // displaying the 600px source fallback until its exact variant lands.
@@ -352,6 +356,7 @@ describe('decode errors', () => {
     // remote URL.
     const after = findImage(tree);
     expect(after?.uri).toContain('id=abc');
+    expect(after?.recyclingKey).toEqual(expect.any(String));
     expect(after?.recyclingKey).not.toBe(recyclingKeyBeforeError);
   });
 
