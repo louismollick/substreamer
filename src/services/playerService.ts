@@ -78,9 +78,13 @@ function maybePromptFireBackgroundPlayback(): void {
 /* ------------------------------------------------------------------ */
 
 let isPlayerReady = false;
-/** The Child[] backing the current native queue, indexed by position. */
-let currentChildQueue: Child[] = [];
-let currentQueueOrigins: QueueTrackOrigin[] = [];
+interface QueueEntry {
+  track: Child;
+  origin: QueueTrackOrigin;
+}
+
+/** The entries backing the current native queue, indexed by position. */
+let currentQueue: QueueEntry[] = [];
 let queueGeneration = 0;
 let autoplayRequestId = 0;
 let autoplaySettingGeneration = 0;
@@ -113,7 +117,7 @@ let lastMilestoneValue = 0;
 function reportPlay(trackIndex: number): void {
   if (activeScrobbleDone) return;
   activeScrobbleDone = true;
-  const child = currentChildQueue[trackIndex];
+  const child = currentQueue[trackIndex]?.track;
   if (child) addCompletedScrobble(child, trackPlaylistMap.get(child.id));
 }
 
@@ -129,39 +133,48 @@ async function awaitAutoplayNativeMutation(): Promise<void> {
   if (autoplayNativeMutationPromise) await autoplayNativeMutationPromise;
 }
 
+function queueTracks(entries = currentQueue): Child[] {
+  return entries.map(({ track }) => track);
+}
+
+function queueOrigins(entries = currentQueue): QueueTrackOrigin[] {
+  return entries.map(({ origin }) => origin);
+}
+
+function setQueueEntries(entries: QueueEntry[]): void {
+  currentQueue = entries;
+  playerStore.getState().setQueue(queueTracks(), queueOrigins());
+}
+
 function setQueueState(queue: Child[], origins?: QueueTrackOrigin[]): void {
-  currentChildQueue = queue;
-  currentQueueOrigins = origins?.length === queue.length ? origins : queue.map(() => 'manual');
-  playerStore.getState().setQueue(currentChildQueue, currentQueueOrigins);
+  const resolvedOrigins = origins?.length === queue.length ? origins : queue.map(() => 'manual' as const);
+  setQueueEntries(queue.map((track, index) => ({ track, origin: resolvedOrigins[index] })));
 }
 
 function markQueueHistoryThrough(index: number): void {
-  if (index < 0 || currentQueueOrigins.every((origin, i) => i > index || origin === 'manual')) return;
-  setQueueState(
-    currentChildQueue,
-    currentQueueOrigins.map((origin, i) => i <= index ? 'manual' : origin),
+  if (index < 0 || currentQueue.every((entry, i) => i > index || entry.origin === 'manual')) return;
+  setQueueEntries(
+    currentQueue.map((entry, i) => i <= index ? { ...entry, origin: 'manual' } : entry),
   );
 }
 
 function persistCurrentQueue(index = playerStore.getState().currentTrackIndex ?? 0): void {
-  persistQueue(currentChildQueue, index, currentQueueOrigins);
+  persistQueue(queueTracks(), index, queueOrigins());
 }
 
-function filteredOrigins(
-  source: readonly Child[],
-  origins: readonly QueueTrackOrigin[],
+function filteredQueueEntries(
+  source: readonly QueueEntry[],
   filtered: readonly Child[],
-): QueueTrackOrigin[] {
+): QueueEntry[] {
   const indicesById = new Map<string, number[]>();
-  source.forEach((track, index) => {
-    const indices = indicesById.get(track.id);
+  source.forEach((entry, index) => {
+    const indices = indicesById.get(entry.track.id);
     if (indices) indices.push(index);
-    else indicesById.set(track.id, [index]);
+    else indicesById.set(entry.track.id, [index]);
   });
   return filtered.map((track) => {
     const index = indicesById.get(track.id)?.shift();
-    if (index == null) return 'manual';
-    return origins[index] ?? 'manual';
+    return { track, origin: index == null ? 'manual' : source[index].origin };
   });
 }
 
@@ -171,16 +184,16 @@ function shouldLoadAutoplay(): boolean {
   const currentIndex = state.currentTrackIndex;
   return autoplayRemovalCount === 0 &&
     settings.autoplayEnabled && settings.repeatMode === 'off' &&
-    currentIndex != null && currentIndex >= Math.max(0, currentChildQueue.length - 2) &&
-    currentIndex < currentChildQueue.length;
+    currentIndex != null && currentIndex >= Math.max(0, currentQueue.length - 2) &&
+    currentIndex < currentQueue.length;
 }
 
 function getManualFutureTrackIds(startIndex: number): Set<string> {
   return new Set(
-    currentChildQueue
+    currentQueue
       .slice(startIndex + 1)
-      .filter((_, offset) => currentQueueOrigins[startIndex + 1 + offset] === 'manual')
-      .map((track) => track.id),
+      .filter(({ origin }) => origin === 'manual')
+      .map(({ track }) => track.id),
   );
 }
 
@@ -201,13 +214,13 @@ function preloadAutoplay(): Promise<void> | null {
   const requestId = ++autoplayRequestId;
   const offline = offlineModeStore.getState().offlineMode;
   const sourceIndex = playerStore.getState().currentTrackIndex!;
-  const source = currentChildQueue[sourceIndex];
+  const source = currentQueue[sourceIndex].track;
   const manualFutureTrackIds = getManualFutureTrackIds(sourceIndex);
   playerStore.getState().setAutoplayLoading(true);
 
   const request = (async () => {
     const candidates = await buildAutoplayQueue(source, {
-      currentQueue: currentChildQueue,
+      currentQueue: queueTracks(),
       manualFutureTrackIds,
     });
     if (!isAutoplayRequestCurrent(requestId, generation, offline)) return;
@@ -222,7 +235,7 @@ function preloadAutoplay(): Promise<void> | null {
     const { rnTracks, filteredQueue } = await buildPlayableQueue(deduped);
     if (rnTracks.length === 0 || !isAutoplayRequestCurrent(requestId, generation, offline)) return;
 
-    const firstAddedIndex = currentChildQueue.length;
+    const firstAddedIndex = currentQueue.length;
     let appended = true;
     const nativeMutation = (async () => {
       await tp.addToQueue(rnTracks);
@@ -242,9 +255,11 @@ function preloadAutoplay(): Promise<void> | null {
       }
     }
     if (!appended) return;
-    setQueueState(
-      [...currentChildQueue, ...filteredQueue],
-      [...currentQueueOrigins, ...filteredQueue.map(() => 'autoplay' as const)],
+    setQueueEntries(
+      [
+        ...currentQueue,
+        ...filteredQueue.map((track) => ({ track, origin: 'autoplay' as const })),
+      ],
     );
     for (const child of filteredQueue) {
       playerStore.getState().addQueueFormat(child.id, stampQueueFormat(child));
@@ -268,7 +283,14 @@ function preloadAutoplay(): Promise<void> | null {
 }
 
 offlineModeStore.subscribe((state, previous) => {
-  if (state.offlineMode !== previous.offlineMode) invalidateQueueWork();
+  if (state.offlineMode === previous.offlineMode) return;
+  const shouldRestart = autoplayPromise !== null || queueEndedWhileLoading;
+  const shouldResumeEndedQueue = queueEndedWhileLoading;
+  invalidateQueueWork();
+  if (shouldRestart && shouldLoadAutoplay()) {
+    queueEndedWhileLoading = shouldResumeEndedQueue;
+    void preloadAutoplay();
+  }
 });
 
 /* ------------------------------------------------------------------ */
@@ -344,7 +366,7 @@ export async function initPlayer(): Promise<void> {
       reportPlay(activeScrobbleIndex);
     }
     if (track?.id) {
-      const child = currentChildQueue.find((c) => c.id === track.id) ?? null;
+      const child = currentQueue.find((entry) => entry.track.id === track.id)?.track ?? null;
       if (index != null) markQueueHistoryThrough(index);
       playerStore.getState().setCurrentTrack(child, index ?? null);
       if (child) sendNowPlaying(child, trackPlaylistMap.get(child.id));
@@ -491,7 +513,7 @@ function hasLiveEngineSession(): boolean {
 
 /**
  * Adopt a live car/Siri session on phone-app open: read-only reconcile of the
- * store to the live engine, WITHOUT touching the engine. `currentChildQueue` is
+ * store to the live engine, WITHOUT touching the engine. `currentQueue` is
  * authoritative (the car's `playTrack` set it); align the current index to the
  * engine's truth so a headless auto-advance doesn't leave the mini-player a
  * track behind. Never setQueue/seekTo/play, never set `hydrationPromise`, never
@@ -500,12 +522,13 @@ function hasLiveEngineSession(): boolean {
 function adoptLiveEngineSession(): void {
   const liveIndex = tp.getCurrentTrackIndex();
   const store = playerStore.getState();
-  if (currentChildQueue.length > 0) {
-    store.setQueue(currentChildQueue, currentQueueOrigins);
+  if (currentQueue.length > 0) {
+    const tracks = queueTracks();
+    store.setQueue(tracks, queueOrigins());
     const formats: Record<string, EffectiveFormat> = {};
-    for (const child of currentChildQueue) formats[child.id] = stampQueueFormat(child);
+    for (const child of tracks) formats[child.id] = stampQueueFormat(child);
     store.setQueueFormats(formats);
-    const liveChild = currentChildQueue[liveIndex] ?? store.currentTrack ?? null;
+    const liveChild = currentQueue[liveIndex]?.track ?? store.currentTrack ?? null;
     store.setCurrentTrack(liveChild, liveIndex >= 0 ? liveIndex : null);
   }
   store.setTrackSource(tp.getCurrentTrackSource() ?? null);
@@ -535,7 +558,7 @@ export function restorePersistedQueueAfterBoot(): void {
 }
 
 /**
- * Seed the Zustand store + module `currentChildQueue` from the persisted queue
+ * Seed the Zustand store + module `currentQueue` from the persisted queue
  * so the mini player renders immediately. Does NOT touch the native engine —
  * that's `hydrateRestoredQueue()`. Returns true when a non-empty queue was
  * restored (caller should hydrate).
@@ -602,11 +625,12 @@ async function hydrateRestoredQueue(): Promise<void> {
     }
 
     const originalIndex = playerStore.getState().currentTrackIndex ?? 0;
-    const originalChild = currentChildQueue[originalIndex] ?? null;
+    const originalChild = currentQueue[originalIndex]?.track ?? null;
     const resume = pendingResumePosition;
     pendingResumePosition = null;
 
-    const { rnTracks, filteredQueue } = await buildPlayableQueue(currentChildQueue);
+    const sourceQueue = queueTracks();
+    const { rnTracks, filteredQueue } = await buildPlayableQueue(sourceQueue);
     if (rnTracks.length === 0) {
       // Nothing playable (offline + no cached files) — clear the stale queue.
       playbackToastStore.getState().fail();
@@ -614,10 +638,9 @@ async function hydrateRestoredQueue(): Promise<void> {
       return;
     }
 
-    const pruned = filteredQueue.length !== currentChildQueue.length;
+    const pruned = filteredQueue.length !== currentQueue.length;
     if (pruned) {
-      const origins = filteredOrigins(currentChildQueue, currentQueueOrigins, filteredQueue);
-      setQueueState(filteredQueue, origins);
+      setQueueEntries(filteredQueueEntries(currentQueue, filteredQueue));
     }
 
     // Translate the restored current track onto the filtered queue.
@@ -922,8 +945,7 @@ async function clearPlayerStateInternal(): Promise<void> {
   invalidateQueueWork();
   await awaitAutoplayNativeMutation();
   pendingResumePosition = null;
-  currentChildQueue = [];
-  currentQueueOrigins = [];
+  currentQueue = [];
   trackPlaylistMap.clear();
 
   await tp.clearQueue();
@@ -956,7 +978,8 @@ export async function rebuildQueueForServerSwitch(): Promise<void> {
   await awaitHydration();
   invalidateQueueWork();
   await awaitAutoplayNativeMutation();
-  const queue = currentChildQueue;
+  const sourceEntries = currentQueue;
+  const queue = queueTracks(sourceEntries);
   if (queue.length === 0) return;
 
   const idx = playerStore.getState().currentTrackIndex ?? 0;
@@ -979,8 +1002,7 @@ export async function rebuildQueueForServerSwitch(): Promise<void> {
     if (position > 0) await tp.seekTo(position);
     if (wasPlaying) await tp.play();
 
-    const origins = filteredOrigins(currentChildQueue, currentQueueOrigins, filteredQueue);
-    setQueueState(filteredQueue, origins);
+    setQueueEntries(filteredQueueEntries(sourceEntries, filteredQueue));
     persistCurrentQueue(safeIdx);
   } catch {
     // Best-effort — a failed switch leaves the prior queue loaded.
@@ -998,7 +1020,7 @@ export async function addToQueue(
   if (tracks.length === 0) return;
   await awaitHydration();
 
-  if (currentChildQueue.length === 0) {
+  if (currentQueue.length === 0) {
     await playTrack(tracks[0], tracks, sourcePlaylistId);
     return;
   }
@@ -1015,11 +1037,11 @@ export async function addToQueue(
   invalidateQueueWork();
   await awaitAutoplayNativeMutation();
   const currentIndex = playerStore.getState().currentTrackIndex ?? 0;
-  const firstFutureAutoplay = currentQueueOrigins.findIndex(
-    (origin, index) => index > currentIndex && origin === 'autoplay',
+  const firstFutureAutoplay = currentQueue.findIndex(
+    (entry, index) => index > currentIndex && entry.origin === 'autoplay',
   );
-  const insertBefore = firstFutureAutoplay === -1 ? currentChildQueue.length : firstFutureAutoplay;
-  if (insertBefore === currentChildQueue.length) await tp.addToQueue(rnTracks);
+  const insertBefore = firstFutureAutoplay === -1 ? currentQueue.length : firstFutureAutoplay;
+  if (insertBefore === currentQueue.length) await tp.addToQueue(rnTracks);
   else await tp.addToQueue(rnTracks, insertBefore);
 
   if (sourcePlaylistId) {
@@ -1029,11 +1051,13 @@ export async function addToQueue(
     playerStore.getState().addQueueFormat(child.id, stampQueueFormat(child));
   }
 
-  const newQueue = [...currentChildQueue];
-  const newOrigins = [...currentQueueOrigins];
-  newQueue.splice(insertBefore, 0, ...playable);
-  newOrigins.splice(insertBefore, 0, ...playable.map(() => 'manual' as const));
-  setQueueState(newQueue, newOrigins);
+  const newQueue = [...currentQueue];
+  newQueue.splice(
+    insertBefore,
+    0,
+    ...playable.map((track) => ({ track, origin: 'manual' as const })),
+  );
+  setQueueEntries(newQueue);
   persistCurrentQueue();
 }
 
@@ -1044,7 +1068,7 @@ export async function addToQueue(
 export async function playSongNext(song: Child): Promise<void> {
   await awaitHydration();
 
-  if (currentChildQueue.length === 0) {
+  if (currentQueue.length === 0) {
     await playTrack(song, [song]);
     return;
   }
@@ -1058,24 +1082,24 @@ export async function playSongNext(song: Child): Promise<void> {
     return;
   }
 
-  const currentIndex = playerStore.getState().currentTrackIndex ?? 0;
-  const insertBefore = Math.min(currentIndex + 1, currentChildQueue.length);
-
   // addToQueue(tracks, insertBefore) inserts BEFORE the given index.
   invalidateQueueWork();
   await awaitAutoplayNativeMutation();
+  const currentIndex = playerStore.getState().currentTrackIndex ?? 0;
+  const insertBefore = Math.min(currentIndex + 1, currentQueue.length);
   await tp.addToQueue(rnTracks, insertBefore);
 
   for (const child of playable) {
     playerStore.getState().addQueueFormat(child.id, stampQueueFormat(child));
   }
 
-  const newQueue = [...currentChildQueue];
-  const newOrigins = [...currentQueueOrigins];
-  newQueue.splice(insertBefore, 0, ...playable);
-  newOrigins.splice(insertBefore, 0, ...playable.map(() => 'manual' as const));
-  setQueueState(newQueue, newOrigins);
-  // Re-read the index AFTER the awaited add in case an auto-advance moved it.
+  const newQueue = [...currentQueue];
+  newQueue.splice(
+    insertBefore,
+    0,
+    ...playable.map((track) => ({ track, origin: 'manual' as const })),
+  );
+  setQueueEntries(newQueue);
   persistCurrentQueue();
 }
 
@@ -1087,22 +1111,19 @@ export async function playSongNext(song: Child): Promise<void> {
 export async function removeFromQueue(index: number): Promise<void> {
   await awaitHydration();
 
-  if (index < 0 || index >= currentChildQueue.length) return;
-  if (currentChildQueue.length === 1) {
+  if (index < 0 || index >= currentQueue.length) return;
+  if (currentQueue.length === 1) {
     await clearQueue();
     return;
   }
 
-  const removedChild = currentChildQueue[index];
+  const removedChild = currentQueue[index].track;
   invalidateQueueWork();
   await awaitAutoplayNativeMutation();
   await tp.removeFromQueue([index]);
 
   trackPlaylistMap.delete(removedChild.id);
-  setQueueState(
-    currentChildQueue.filter((_, i) => i !== index),
-    currentQueueOrigins.filter((_, i) => i !== index),
-  );
+  setQueueEntries(currentQueue.filter((_, i) => i !== index));
 
   // Re-sync the active index from native (recomputed on removal).
   const nativeIndex = tp.getCurrentTrackIndex();
@@ -1121,17 +1142,17 @@ export async function removeFromQueue(index: number): Promise<void> {
 export async function removeNonDownloadedTracks(): Promise<void> {
   await awaitHydration();
 
-  if (currentChildQueue.length === 0) return;
+  if (currentQueue.length === 0) return;
 
   const indicesToRemove: number[] = [];
-  for (let i = currentChildQueue.length - 1; i >= 0; i--) {
-    if (!getLocalTrackUri(currentChildQueue[i].id)) {
+  for (let i = currentQueue.length - 1; i >= 0; i--) {
+    if (!getLocalTrackUri(currentQueue[i].track.id)) {
       indicesToRemove.push(i);
     }
   }
 
   if (indicesToRemove.length === 0) return;
-  if (indicesToRemove.length === currentChildQueue.length) {
+  if (indicesToRemove.length === currentQueue.length) {
     await clearQueue();
     return;
   }
@@ -1165,17 +1186,14 @@ export async function setAutoplayEnabled(enabled: boolean): Promise<void> {
     await awaitAutoplayNativeMutation();
     if (settingGeneration !== autoplaySettingGeneration) return;
     const currentIndex = playerStore.getState().currentTrackIndex ?? -1;
-    const indices = currentQueueOrigins
-      .map((origin, index) => ({ origin, index }))
+    const indices = currentQueue
+      .map(({ origin }, index) => ({ origin, index }))
       .filter(({ origin, index }) => origin === 'autoplay' && index > currentIndex)
       .map(({ index }) => index);
     if (indices.length === 0) return;
     await tp.removeFromQueue(indices);
     const remove = new Set(indices);
-    setQueueState(
-      currentChildQueue.filter((_, index) => !remove.has(index)),
-      currentQueueOrigins.filter((_, index) => !remove.has(index)),
-    );
+    setQueueEntries(currentQueue.filter((_, index) => !remove.has(index)));
     persistCurrentQueue();
   } finally {
     autoplayRemovalCount -= 1;
@@ -1211,18 +1229,21 @@ export async function applyReplayGain(): Promise<void> {
 
 /**
  * Eagerly bump local play stats for a just-scrobbled song on the ephemeral
- * player copies (module `currentChildQueue` + `playerStore.currentTrack`), so
+ * player copies (module `currentQueue` + `playerStore.currentTrack`), so
  * the player-view info panel reflects the new count before any server call.
  * Called from `playStatsService.applyLocalPlay`.
  */
 export function applyLocalPlayToPlayer(songId: string, now: string): void {
-  for (let i = 0; i < currentChildQueue.length; i++) {
-    const t = currentChildQueue[i];
+  for (let i = 0; i < currentQueue.length; i++) {
+    const t = currentQueue[i].track;
     if (t.id === songId) {
-      currentChildQueue[i] = {
-        ...t,
-        playCount: (t.playCount ?? 0) + 1,
-        played: now,
+      currentQueue[i] = {
+        ...currentQueue[i],
+        track: {
+          ...t,
+          playCount: (t.playCount ?? 0) + 1,
+          played: now,
+        },
       };
     }
   }
@@ -1250,15 +1271,13 @@ registerPlayerPlayStatListener(applyLocalPlayToPlayer);
  */
 export async function shuffleQueue(): Promise<void> {
   await awaitHydration();
-  if (currentChildQueue.length < 2) return;
+  if (currentQueue.length < 2) return;
 
   try {
     invalidateQueueWork();
     await awaitAutoplayNativeMutation();
-    const shuffledPairs = shuffleArray(
-      currentChildQueue.map((track, index) => ({ track, origin: currentQueueOrigins[index] })),
-    );
-    const shuffled = shuffledPairs.map(({ track }) => track);
+    const shuffledEntries = shuffleArray(currentQueue);
+    const shuffled = queueTracks(shuffledEntries);
     const { rnTracks, filteredQueue } = await buildPlayableQueue(shuffled);
     if (rnTracks.length === 0) {
       playbackToastStore.getState().fail();
@@ -1266,10 +1285,7 @@ export async function shuffleQueue(): Promise<void> {
       return;
     }
 
-    setQueueState(
-      filteredQueue,
-      filteredOrigins(shuffled, shuffledPairs.map(({ origin }) => origin), filteredQueue),
-    );
+    setQueueEntries(filteredQueueEntries(shuffledEntries, filteredQueue));
 
     await tp.setQueue(rnTracks, 0);
     await tp.play();

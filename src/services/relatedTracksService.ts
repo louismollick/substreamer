@@ -31,6 +31,28 @@ function downloadedSongs(): Child[] {
     .filter((song): song is Child => song !== null);
 }
 
+function onlineRecommendationSources(
+  source: Child,
+  target: number,
+): Array<() => Promise<Child[] | null>> {
+  const sources: Array<() => Promise<Child[] | null>> = [
+    () => getSimilarSongs(source.id, target),
+  ];
+  if (source.artistId) {
+    const artistId = source.artistId;
+    sources.push(() => getSimilarSongs2(artistId, target));
+  }
+  const genre = sourceGenre(source);
+  if (genre) {
+    sources.push(() => getRandomSongsFiltered({ size: target * 2, genre }));
+  }
+  if (source.artist) {
+    const artist = source.artist;
+    sources.push(() => getTopSongs(artist, target));
+  }
+  return sources;
+}
+
 /** Existing one-shot “Play more like this” construction. */
 export async function buildMoreLikeThisQueue(
   source: Child,
@@ -46,14 +68,10 @@ export async function buildMoreLikeThisQueue(
       output.push(track);
     }
   };
-  push(await getSimilarSongs(source.id, target));
-  if (output.length >= target) return output;
-  if (source.artistId) push(await getSimilarSongs2(source.artistId, target));
-  if (output.length >= target) return output;
-  const genre = sourceGenre(source);
-  if (genre) push(await getRandomSongsFiltered({ size: target * 2, genre }));
-  if (output.length >= target) return output;
-  if (source.artist) push(await getTopSongs(source.artist, target));
+  for (const load of onlineRecommendationSources(source, target)) {
+    push(await load());
+    if (output.length >= target) return output;
+  }
   return output;
 }
 
@@ -101,17 +119,10 @@ async function buildFromSources(
     if (genre) push(shuffleArray(all.filter((song) => sourceGenre(song) === genre)));
     push(shuffleArray(all));
   } else {
-    push(await safely(() => getSimilarSongs(source.id, target)));
-    if (fresh.length >= target) return fresh.slice(0, target);
-    if (source.artistId) push(await safely(() => getSimilarSongs2(source.artistId!, target)));
-    if (fresh.length >= target) return fresh.slice(0, target);
-    const genre = sourceGenre(source);
-    if (genre) {
-      push(await safely(() => getRandomSongsFiltered({ size: target * 2, genre })));
+    for (const load of onlineRecommendationSources(source, target)) {
+      push(await safely(load));
+      if (fresh.length >= target) return fresh.slice(0, target);
     }
-    if (fresh.length >= target) return fresh.slice(0, target);
-    if (source.artist) push(await safely(() => getTopSongs(source.artist!, target)));
-    if (fresh.length >= target) return fresh.slice(0, target);
     push(await safely(() => getRandomSongs(target * 2)));
   }
   return [...fresh, ...recycled].slice(0, target);

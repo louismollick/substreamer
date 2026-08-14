@@ -2,6 +2,7 @@ import { memo } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { useTranslation } from 'react-i18next';
 
+import { AutoplayQueueHeading } from '@/components/AutoplayQueueHeading';
 import { useTheme } from '@/hooks/useTheme';
 import { playerStore } from '@/store/playerStore';
 import { isAutoplaySectionStart } from '@/utils/queueOrigins';
@@ -25,14 +26,7 @@ export const AutoplayQueueFooter = memo(function AutoplayQueueFooter() {
       accessibilityLabel={t('buildingAutoplayQueue')}
     >
       {!hasAutoplayHeading && (
-        <View style={styles.sectionHeader}>
-          <Text
-            accessibilityRole="header"
-            style={[styles.sectionHeaderText, { color: colors.textPrimary }]}
-          >
-            {t('autoplay')}
-          </Text>
-        </View>
+        <AutoplayQueueHeading color={colors.textPrimary} />
       )}
       <View style={styles.loadingRow}>
         <ActivityIndicator size="small" color={colors.textSecondary} />
@@ -45,17 +39,6 @@ export const AutoplayQueueFooter = memo(function AutoplayQueueFooter() {
 });
 
 const styles = StyleSheet.create({
-  sectionHeader: {
-    paddingTop: 18,
-    paddingBottom: 4,
-    paddingHorizontal: 16,
-  },
-  sectionHeaderText: {
-    fontSize: 12,
-    fontWeight: '600',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
   loadingRow: {
     flexDirection: 'row',
     alignItems: 'center',

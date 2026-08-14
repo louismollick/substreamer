@@ -431,6 +431,36 @@ describe('Autoplay', () => {
     mockOfflineMode.offlineMode = false;
   });
 
+  it('restarts an ended queue with recommendations from the new offline mode', async () => {
+    const queue = [makeChild('connectivity-source')];
+    await playTrack(queue[0], queue);
+    (require('../../store/playerStore').playerStore.getState as jest.Mock)
+      .mockReturnValue(playingFinalState(queue));
+    let resolveOnline!: (tracks: Child[]) => void;
+    mockBuildAutoplayQueue
+      .mockReturnValueOnce(new Promise((done) => { resolveOnline = done; }))
+      .mockResolvedValueOnce([makeChild('offline-auto')]);
+    const { getLocalTrackUri } = require('../musicCacheService');
+    (getLocalTrackUri as jest.Mock).mockImplementation((id: string) =>
+      id === 'offline-auto' ? '/local/offline-auto.mp3' : null,
+    );
+
+    await setAutoplayEnabled(true);
+    emit('queueEnd');
+    mockOfflineMode.offlineMode = true;
+    mockOfflineModeSubscriber?.(mockOfflineMode, { offlineMode: false });
+    await new Promise((done) => setImmediate(done));
+    await new Promise((done) => setImmediate(done));
+
+    expect(mockBuildAutoplayQueue).toHaveBeenCalledTimes(2);
+    expect(mockTP.skipToIndex).toHaveBeenCalledWith(1);
+    expect(mockTP.play).toHaveBeenCalled();
+
+    resolveOnline([makeChild('stale-online-result')]);
+    await new Promise((done) => setImmediate(done));
+    mockOfflineMode.offlineMode = false;
+  });
+
   it('refills autoplay when re-enabled during a pending disable removal', async () => {
     const queue = [makeChild('toggle-source')];
     await playTrack(queue[0], queue);
@@ -761,6 +791,39 @@ describe('playSongNext', () => {
     await playSongNext(makeChild('next'));
     expect(mockTP.setQueue).not.toHaveBeenCalled();
     expect(mockTP.play).not.toHaveBeenCalled();
+  });
+
+  it('inserts after the active track when playback advances during an Autoplay mutation', async () => {
+    const queue = [makeChild('a'), makeChild('b')];
+    await playTrack(queue[0], queue);
+    const { playerStore } = require('../../store/playerStore');
+    const state = {
+      ...defaultPlayerState(),
+      playbackState: 'playing',
+      currentTrack: queue[0],
+      currentTrackIndex: 0,
+      queue,
+    };
+    (playerStore.getState as jest.Mock).mockImplementation(() => state);
+    mockBuildAutoplayQueue.mockResolvedValue([makeChild('auto')]);
+    let finishAutoplayMutation!: () => void;
+    mockTP.addToQueue.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      finishAutoplayMutation = resolve;
+    }));
+
+    await setAutoplayEnabled(true);
+    await new Promise((done) => setImmediate(done));
+    const insertion = playSongNext(makeChild('manual-next'));
+    await new Promise((done) => setImmediate(done));
+    state.currentTrack = queue[1];
+    state.currentTrackIndex = 1;
+    finishAutoplayMutation();
+    await insertion;
+
+    expect(mockTP.addToQueue).toHaveBeenLastCalledWith(
+      [expect.objectContaining({ id: 'manual-next' })],
+      2,
+    );
   });
 });
 
