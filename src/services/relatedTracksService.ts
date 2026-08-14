@@ -53,7 +53,25 @@ function onlineRecommendationSources(
   return sources;
 }
 
-/** Existing one-shot “Play more like this” construction. */
+/**
+ * Build a "more like this" play queue for a given source song.
+ *
+ * Many Subsonic servers (Navidrome in particular) lean on last.fm
+ * metadata for `getSimilarSongs`, so the result is often just 2-3 tracks
+ * for less-popular artists — way short of the user's list-length setting.
+ * To keep the queue useful we top up via a layered fallback chain,
+ * stopping as soon as we reach the target:
+ *
+ *   1. `getSimilarSongs(id)`          — per-song similarity (highest signal)
+ *   2. `getSimilarSongs2(artistId)`   — artist-level similarity
+ *   3. `getRandomSongsFiltered(genre)`— same-genre random
+ *   4. `getTopSongs(artist)`          — same artist's top tracks
+ *
+ * Each layer is deduped against the running set (and the source song),
+ * preserving layer order so the highest-signal tracks play first.
+ *
+ * Exported for unit tests. Used by `playMoreLikeThis`.
+ */
 export async function buildMoreLikeThisQueue(
   source: Child,
   target = layoutPreferencesStore.getState().listLength,
