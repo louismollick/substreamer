@@ -139,6 +139,9 @@ export const CachedImage = memo(function CachedImage({
   // variant OR a failedRemoteIds flip) and by onError, to re-run the async
   // cover-art resolution below.
   const [resolveToken, bumpResolve] = useReducer((x: number) => x + 1, 0);
+  // Native reload token. Only image decode/load errors bump this; ordinary
+  // cache updates may resolve to the same URI and must not clear a visible image.
+  const [reloadToken, bumpReload] = useReducer((x: number) => x + 1, 0);
 
   // Resolved display target, filled asynchronously via the shared resolver
   // (`resolveDisplayImage` — the single source of truth also used by the CarPlay
@@ -222,6 +225,7 @@ export const CachedImage = memo(function CachedImage({
     } else if (resolved?.isRemote) {
       void reportBadRemote(coverArtId);
     }
+    bumpReload();
     bumpResolve();
   }, [coverArtId, size, resolved]);
 
@@ -284,10 +288,10 @@ export const CachedImage = memo(function CachedImage({
           // PipelineDraweeController recycle/re-attach crashes. Both fetch via
           // our trusted OkHttp / URLSession, so self-signed servers still load.
           transition={0}
-          // id+size for FlashList recycling; resolveToken forces a reload when
+          // id+size for FlashList recycling; reloadToken forces a reload when
           // reportBadCache re-downloads the same file:// path (expo-image has
           // no per-key memory eviction).
-          recyclingKey={`${rawCoverArtId}:${size}:${resolveToken}`}
+          recyclingKey={`${rawCoverArtId}:${size}:${reloadToken}`}
           // We own resize (pre-sized variants) + disk cache (imageCacheService),
           // so expo-image retains nothing.
           cachePolicy="none"
