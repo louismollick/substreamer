@@ -294,6 +294,51 @@ describe('Autoplay', () => {
     expect(mockPersistQueue).toHaveBeenLastCalledWith([queue[0]], 0, ['manual']);
   });
 
+  it('does not leak receiver-sync errors from stale-track rollback', async () => {
+    const queue = [makeChild('source')];
+    const autoplayTrack = makeChild('auto');
+    await playTrack(queue[0], queue);
+    (require('../../store/playerStore').playerStore.getState as jest.Mock)
+      .mockReturnValue(playingAtEnd(queue));
+    mockBuildAutoplayQueue.mockResolvedValue([autoplayTrack]);
+    let resolveAdd!: () => void;
+    mockTP.addToQueue.mockReturnValueOnce(new Promise<void>((resolve) => { resolveAdd = resolve; }));
+
+    await setAutoplayEnabled(true);
+    await new Promise((done) => setImmediate(done));
+    mockTP.removeFromQueue.mockRejectedValueOnce(new Error('native removal failed'));
+    const clearPromise = clearQueue();
+    resolveAdd();
+
+    await expect(clearPromise).resolves.toBeUndefined();
+    expect(mockTP.removeFromQueue).toHaveBeenCalledWith([1]);
+    expect(mockSetQueue).not.toHaveBeenCalledWith(
+      [expect.objectContaining({ id: 'source' }), expect.objectContaining({ id: 'auto' })],
+      ['manual', 'autoplay'],
+    );
+  });
+
+  it('keeps app removal aligned when receiver sync fails while disabling', async () => {
+    const queue = [makeChild('source')];
+    await playTrack(queue[0], queue);
+    (require('../../store/playerStore').playerStore.getState as jest.Mock)
+      .mockReturnValue(playingAtEnd(queue));
+    mockBuildAutoplayQueue.mockResolvedValue([makeChild('auto')]);
+    await setAutoplayEnabled(true);
+    await new Promise((done) => setImmediate(done));
+    mockPersistQueue.mockClear();
+    mockTP.removeFromQueue.mockRejectedValueOnce(new Error('native removal failed'));
+
+    await expect(setAutoplayEnabled(false)).resolves.toBeUndefined();
+
+    expect(mockPersistQueue).toHaveBeenLastCalledWith([queue[0]], 0, ['manual']);
+    mockTP.addToQueue.mockClear();
+    await addToQueue([makeChild('manual')]);
+    expect(mockTP.addToQueue).toHaveBeenCalledWith(
+      [expect.objectContaining({ id: 'manual' })],
+    );
+  });
+
   it('discards a pending online result after offline mode changes', async () => {
     const queue = [makeChild('source')];
     await playTrack(queue[0], queue);

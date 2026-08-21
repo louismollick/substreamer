@@ -246,7 +246,11 @@ function preloadAutoplay(): Promise<void> | null {
       await tp.addToQueue(rnTracks);
       if (!isAutoplayRequestCurrent(requestId, generation, offline)) {
         appended = false;
-        await tp.removeFromQueue(rnTracks.map((_, offset) => firstAddedIndex + offset));
+        try {
+          await tp.removeFromQueue(rnTracks.map((_, offset) => firstAddedIndex + offset));
+        } catch {
+          // Queue Player removes locally before receiver synchronization can reject.
+        }
       }
     })();
     autoplayNativeMutationPromise = nativeMutation;
@@ -1185,7 +1189,11 @@ export async function setAutoplayEnabled(enabled: boolean): Promise<void> {
       .filter(({ origin, index }) => origin === 'autoplay' && index > currentIndex)
       .map(({ index }) => index);
     if (indices.length === 0) return;
-    await tp.removeFromQueue(indices);
+    try {
+      await tp.removeFromQueue(indices);
+    } catch {
+      // Queue Player removes locally before receiver synchronization can reject.
+    }
     const remove = new Set(indices);
     setQueueEntries(currentQueue.filter((_, index) => !remove.has(index)));
     persistCurrentQueue();
