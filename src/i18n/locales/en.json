@@ -219,7 +219,7 @@
   "playbackMode": "Playback Mode",
   "autoplay": "Autoplay",
   "autoplayHint": "Keep playing related music when your queue runs out.",
-  "buildingAutoplayQueue": "Finding related music…",
+  "buildingAutoplayQueue": "Building your autoplay queue…",
   "playbackModeLabel": "Track transitions",
   "playbackModeGapless": "Gapless",
   "playbackModeCrossfade": "Crossfade",

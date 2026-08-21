@@ -19,7 +19,9 @@ it('shows an accessible loading status and heading', () => {
   playerStore.setState({ autoplayLoading: true });
   const view = render(<AutoplayQueueFooter />);
   expect(view.getByRole('header')).toHaveTextContent('Autoplay');
-  expect(view.getByLabelText('Finding related music…').props.accessibilityLiveRegion).toBe('polite');
+  expect(
+    view.getByLabelText('Building your autoplay queue…').props.accessibilityLiveRegion,
+  ).toBe('polite');
 });
 
 it('does not repeat an existing upcoming autoplay heading', () => {
