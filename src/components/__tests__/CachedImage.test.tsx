@@ -335,6 +335,38 @@ describe('cache-update recovery', () => {
 /* ------------------------------------------------------------------ */
 
 describe('decode errors', () => {
+  it('stops rendering a failed fallback without starting a retry loop', async () => {
+    mockIsRemoteFailed.mockReturnValue(true);
+    const tree = render(
+      <CachedImage
+        coverArtId="abc"
+        size={150}
+        fallbackUri="https://ext.example/missing.jpg"
+      />,
+    );
+    await flush();
+
+    const img = tree.UNSAFE_queryAllByType(RNImage)[0];
+    await act(async () => {
+      img.props.onError();
+      await Promise.resolve();
+    });
+
+    expect(findImage(tree)).toBeNull();
+    expect(mockReportBadCache).not.toHaveBeenCalled();
+    expect(mockReportBadRemote).not.toHaveBeenCalled();
+
+    tree.rerender(
+      <CachedImage
+        coverArtId="abc"
+        size={150}
+        fallbackUri="https://ext.example/missing.jpg"
+        style={{ width: 150 }}
+      />,
+    );
+    expect(findImage(tree)).toBeNull();
+  });
+
   it('calls reportBadCache when a local URI fails to load, then falls through to REMOTE', async () => {
     mockGetCachedImageUri.mockReturnValue('file:///cache/abc/150.jpg');
     const tree = render(<CachedImage coverArtId="abc" size={150} />);

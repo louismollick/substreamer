@@ -142,6 +142,7 @@ export const CachedImage = memo(function CachedImage({
   // Native reload token. Only image decode/load errors bump this; ordinary
   // cache updates may resolve to the same URI and must not clear a visible image.
   const [reloadToken, bumpReload] = useReducer((x: number) => x + 1, 0);
+  const [failedFallbackKey, setFailedFallbackKey] = useState<string | undefined>();
 
   // Resolved display target, filled asynchronously via the shared resolver
   // (`resolveDisplayImage` — the single source of truth also used by the CarPlay
@@ -204,7 +205,8 @@ export const CachedImage = memo(function CachedImage({
   // offline + the remote-failed set); fall back to the bundled placeholder URI.
   let renderUri: string | undefined = resolved?.uri;
   const isRemote = resolved?.isRemote ?? false;
-  if (!renderUri && fallbackUri) renderUri = fallbackUri;
+  const fallbackKey = fallbackUri ? `${coverArtId ?? ''}:${fallbackUri}` : undefined;
+  if (!renderUri && fallbackUri && fallbackKey !== failedFallbackKey) renderUri = fallbackUri;
 
   // Subscribe — fires on file landed OR remote-failed flag flipped.
   useEffect(() => {
@@ -215,10 +217,14 @@ export const CachedImage = memo(function CachedImage({
     });
   }, [coverArtId]);
 
-  // Error handler — three branches, no retry tower.
+  // Error handler.
   const onError = useCallback(() => {
+    if (!resolved) {
+      setFailedFallbackKey(fallbackKey);
+      return;
+    }
     if (!coverArtId) return;
-    const hadCached = resolved != null && !resolved.isRemote; // was showing a file:// cache hit
+    const hadCached = !resolved.isRemote; // was showing a file:// cache hit
     if (hadCached) {
       localErroredRef.current = true;
       void reportBadCache(coverArtId, size);
@@ -227,7 +233,7 @@ export const CachedImage = memo(function CachedImage({
     }
     bumpReload();
     bumpResolve();
-  }, [coverArtId, size, resolved]);
+  }, [coverArtId, size, resolved, fallbackKey]);
 
   // Layout measurement for placeholder logo sizing.
   const [layoutSize, setLayoutSize] = useState<{ w: number; h: number } | null>(null);
