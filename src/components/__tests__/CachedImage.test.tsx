@@ -81,11 +81,12 @@ jest.mock('expo-image', () => {
   const RN = require('react-native');
   return {
     __esModule: true,
-    Image: (props: { source?: unknown; onError?: () => void; style?: unknown }) =>
+    Image: (props: { source?: unknown; onError?: () => void; style?: unknown; recyclingKey?: string }) =>
       ReactMock.createElement(RN.Image, {
         source: props.source,
         onError: props.onError,
         style: props.style,
+        recyclingKey: props.recyclingKey,
       }),
   };
 });
@@ -166,13 +167,15 @@ beforeEach(resetMocks);
 /** Find the Image layer in the rendered tree (if any). The placeholder
  *  is a View with testID; the Image is the only Image element in the
  *  output once the component renders one. */
-function findImage(tree: ReturnType<typeof render>): { uri: string } | null {
+function findImage(
+  tree: ReturnType<typeof render>,
+): { uri: string; recyclingKey: string | undefined } | null {
   const images = tree.UNSAFE_queryAllByType(RNImage);
   if (images.length === 0) return null;
   const last = images[images.length - 1];
   const src = last.props.source;
   if (typeof src === 'object' && src && 'uri' in src && typeof src.uri === 'string') {
-    return { uri: src.uri };
+    return { uri: src.uri, recyclingKey: last.props.recyclingKey };
   }
   return null;
 }
@@ -305,6 +308,26 @@ describe('cache-update recovery', () => {
     await fireCacheUpdate();
     expect(findImage(tree)?.uri).toBe('file:///cache/abc/150.jpg');
   });
+
+  it('keeps native image identity stable when cache updates resolve the same URI', async () => {
+    const tree = render(<CachedImage coverArtId="abc" size={50} />);
+    await flush();
+
+    mockGetCachedImageUri.mockReturnValue('file:///cache/abc/600.jpg');
+    await fireCacheUpdate();
+    const firstLocal = findImage(tree);
+    expect(firstLocal).toEqual({
+      uri: 'file:///cache/abc/600.jpg',
+      recyclingKey: expect.any(String),
+    });
+
+    // The 300px and 150px variants notify this 50px image, but it continues
+    // displaying the 600px source fallback until its exact variant lands.
+    await fireCacheUpdate();
+    await fireCacheUpdate();
+
+    expect(findImage(tree)).toEqual(firstLocal);
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -319,6 +342,7 @@ describe('decode errors', () => {
 
     // Simulate the Image layer failing to decode.
     const img = tree.UNSAFE_queryAllByType(RNImage)[0];
+    const recyclingKeyBeforeError = img.props.recyclingKey;
     await act(async () => {
       img.props.onError();
       await Promise.resolve();
@@ -332,6 +356,8 @@ describe('decode errors', () => {
     // remote URL.
     const after = findImage(tree);
     expect(after?.uri).toContain('id=abc');
+    expect(after?.recyclingKey).toEqual(expect.any(String));
+    expect(after?.recyclingKey).not.toBe(recyclingKeyBeforeError);
   });
 
   it('calls reportBadRemote when a remote URI fails to load', async () => {
