@@ -212,6 +212,13 @@ function isAutoplayRequestCurrent(
 }
 
 function preloadAutoplay(): Promise<void> | null {
+  if (hydrationPromise) {
+    const pendingHydration = hydrationPromise;
+    return pendingHydration.then(
+      () => preloadAutoplay() ?? undefined,
+      () => undefined,
+    );
+  }
   if (!shouldLoadAutoplay()) return null;
   if (autoplayPromise) return autoplayPromise;
 
@@ -1161,13 +1168,18 @@ export async function cycleRepeatMode(): Promise<void> {
     current === 'off' ? 'all' : current === 'all' ? 'one' : 'off';
   playbackSettingsStore.getState().setRepeatMode(next);
   await tp.setRepeatMode(mapRepeatMode(next));
-  if (next === 'off') void preloadAutoplay();
+  if (next === 'off') {
+    await awaitHydration();
+    void preloadAutoplay();
+  }
 }
 
 /** Persist the preference and apply its queue-side effects. */
 export async function setAutoplayEnabled(enabled: boolean): Promise<void> {
   const settingGeneration = ++autoplaySettingGeneration;
   playbackSettingsStore.getState().setAutoplayEnabled(enabled);
+  await awaitHydration();
+  if (settingGeneration !== autoplaySettingGeneration) return;
   if (enabled) {
     void preloadAutoplay();
     return;

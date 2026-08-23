@@ -117,6 +117,11 @@ jest.mock('../subsonicService', () => ({
   ensureCoverArtAuth: jest.fn(() => Promise.resolve()),
 }));
 
+const mockBuildAutoplayQueue = jest.fn().mockResolvedValue([]);
+jest.mock('../relatedTracksService', () => ({
+  buildAutoplayQueue: (...args: unknown[]) => mockBuildAutoplayQueue(...args),
+}));
+
 const mockGetPersistedQueue = jest.fn().mockReturnValue(null);
 const mockGetPersistedPosition = jest.fn().mockReturnValue(null);
 jest.mock('../queuePersistenceService', () => ({
@@ -130,12 +135,14 @@ jest.mock('../queuePersistenceService', () => ({
 }));
 
 import type { Child } from '../subsonicService';
+import { playbackSettingsStore } from '../../store/playbackSettingsStore';
 import {
   initPlayer,
   restorePersistedQueueAfterBoot,
   clearQueue,
   togglePlayPause,
   playTrack,
+  setAutoplayEnabled,
 } from '../playerService';
 
 const rnqp = require('react-native-queue-player');
@@ -172,6 +179,7 @@ beforeEach(async () => {
   mockGetPersistedQueue.mockReturnValue(null);
   mockGetPersistedPosition.mockReturnValue(null);
   mockOfflineMode.offlineMode = false;
+  playbackSettingsStore.setState({ autoplayEnabled: false, repeatMode: 'off' });
 
   playerStoreState.currentTrack = null;
   playerStoreState.currentTrackIndex = 0;
@@ -276,5 +284,64 @@ describe('hydration guard', () => {
     await playPromise;
     expect(mockTP.setQueue).toHaveBeenCalledTimes(2);
     expect(mockTP.play).toHaveBeenCalled();
+  });
+
+  it('awaits hydration before enabling autoplay can append recommendations', async () => {
+    const queue = [makeChild('source')];
+    mockGetPersistedQueue.mockReturnValue({
+      queue,
+      currentTrackIndex: 0,
+      origins: ['manual'],
+    });
+    mockBuildAutoplayQueue.mockResolvedValue([makeChild('autoplay')]);
+
+    let resolveSetQueue: () => void = () => {};
+    mockTP.setQueue.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveSetQueue = resolve; }),
+    );
+
+    restorePersistedQueueAfterBoot();
+    await drainHydration();
+
+    const enablePromise = setAutoplayEnabled(true);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(playbackSettingsStore.getState().autoplayEnabled).toBe(true);
+    expect(mockBuildAutoplayQueue).not.toHaveBeenCalled();
+    expect(mockTP.addToQueue).not.toHaveBeenCalled();
+
+    resolveSetQueue();
+    await enablePromise;
+    await drainHydration();
+    expect(mockBuildAutoplayQueue).toHaveBeenCalled();
+    expect(mockTP.addToQueue).toHaveBeenCalledWith([
+      expect.objectContaining({ id: 'autoplay' }),
+    ]);
+  });
+
+  it('awaits hydration before disabling autoplay removes restored rows', async () => {
+    const queue = [makeChild('source'), makeChild('autoplay')];
+    playbackSettingsStore.setState({ autoplayEnabled: true });
+    mockGetPersistedQueue.mockReturnValue({
+      queue,
+      currentTrackIndex: 0,
+      origins: ['manual', 'autoplay'],
+    });
+
+    let resolveSetQueue: () => void = () => {};
+    mockTP.setQueue.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveSetQueue = resolve; }),
+    );
+
+    restorePersistedQueueAfterBoot();
+    await drainHydration();
+
+    const disablePromise = setAutoplayEnabled(false);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(playbackSettingsStore.getState().autoplayEnabled).toBe(false);
+    expect(mockTP.removeFromQueue).not.toHaveBeenCalled();
+
+    resolveSetQueue();
+    await disablePromise;
+    expect(mockTP.removeFromQueue).toHaveBeenCalledWith([1]);
   });
 });
