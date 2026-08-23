@@ -12,15 +12,6 @@ import {
 
 import type { Child } from './subsonicService';
 
-async function safely(load: () => Promise<Child[] | null>): Promise<Child[]> {
-  try {
-    return (await load()) ?? [];
-  } catch {
-    // Recommendations are best-effort; another source may still fill the batch.
-    return [];
-  }
-}
-
 const sourceGenre = (source: Child): string | undefined =>
   source.genre ?? source.genres?.[0];
 
@@ -102,10 +93,10 @@ export async function buildAutoplayQueue(
     push(shuffleArray(all));
   } else {
     for (const load of onlineSources(source, target)) {
-      push(await safely(load));
+      push((await load()) ?? []);
       if (fresh.length >= target) return fresh.slice(0, target);
     }
-    push(await safely(() => getRandomSongs(target * 2)));
+    push((await getRandomSongs(target * 2)) ?? []);
   }
 
   return [...fresh, ...recycled].slice(0, target);

@@ -107,10 +107,12 @@ it('does not recycle an autoplay track that is still ahead in the queue', async 
   expect(result).toEqual([]);
 });
 
-it('continues after failed sources and returns empty when all fail', async () => {
-  (getSimilarSongs as jest.Mock).mockRejectedValue(new Error('nope'));
+it('continues past unavailable sources and returns empty when none yield tracks', async () => {
+  (getRandomSongsFiltered as jest.Mock).mockResolvedValue(null);
+  (getTopSongs as jest.Mock).mockResolvedValue(null);
   (getRandomSongs as jest.Mock).mockResolvedValue([song('fallback')]);
-  await expect(buildAutoplayQueue(song('source'), options())).resolves.toEqual([song('fallback')]);
-  (getRandomSongs as jest.Mock).mockRejectedValue(new Error('nope'));
+  const source = song('source', { artistId: 'artist-id', artist: 'Artist', genre: 'Rock' });
+  await expect(buildAutoplayQueue(source, options())).resolves.toEqual([song('fallback')]);
+  (getRandomSongs as jest.Mock).mockResolvedValue(null);
   await expect(buildAutoplayQueue(song('source'), options())).resolves.toEqual([]);
 });
