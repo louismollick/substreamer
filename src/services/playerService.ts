@@ -1149,6 +1149,9 @@ async function removeQueueIndicesNow(indices: readonly number[]): Promise<void> 
 
   // Re-sync the active index from native (recomputed on removal).
   const nativeIndex = tp.getCurrentTrackIndex();
+  if (activeScrobbleIndex != null) {
+    activeScrobbleIndex = nativeIndex >= 0 ? nativeIndex : null;
+  }
   const store = playerStore.getState();
   const activeTrack = removesActiveTrack && nativeIndex >= 0
     ? nextQueue[nativeIndex]?.track ?? null

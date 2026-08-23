@@ -1381,6 +1381,21 @@ describe('playback-report scrobble', () => {
     expect(addCompletedScrobble).toHaveBeenCalledWith(expect.objectContaining({ id: 't1' }), undefined);
   });
 
+  it('reports the retained active track after an earlier row is removed', async () => {
+    playbackSettingsStore.setState({ scrobbleTrigger: 100 } as any);
+    const before = makeChild('before');
+    const active = makeChild('active');
+    await playTrack(active, [before, active]);
+    emit('trackChange', { id: active.id }, 1, 'queue-replaced');
+    jest.clearAllMocks();
+    mockTP.getCurrentTrackIndex.mockReturnValueOnce(1).mockReturnValue(0);
+
+    await removeFromQueue(0);
+    emit('queueEnd');
+
+    expect(addCompletedScrobble).toHaveBeenCalledWith(active, undefined);
+  });
+
   it('re-scrobbles each repeat-one loop (milestone value wraps down)', async () => {
     await armPlay(50);
     emit('milestone', 50, 0); // loop 1
