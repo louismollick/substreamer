@@ -1191,6 +1191,8 @@ describe('removeFromQueue', () => {
   it('waits for a delayed active-track skip before removing the pinned row', async () => {
     const queue = [makeChild('a'), makeChild('b')];
     await playTrack(queue[0], queue);
+    emit('trackChange', { id: queue[0].id }, 0, 'queue-replaced');
+    jest.clearAllMocks();
     let nativeIndex = 0;
     mockTP.getCurrentTrackIndex.mockImplementation(() => nativeIndex);
     mockTP.removeFromQueue.mockImplementationOnce(async () => {
@@ -1206,9 +1208,10 @@ describe('removeFromQueue', () => {
     expect(mockTP.removeFromQueue).not.toHaveBeenCalled();
 
     nativeIndex = 1;
-    emit('trackChange', { id: queue[1].id }, 1, 'user-skip-to-index');
+    emit('trackChange', { id: queue[1].id }, 1, 'auto-advance');
     await removalPromise;
 
+    expect(addCompletedScrobble).not.toHaveBeenCalled();
     expect(mockTP.removeFromQueue).toHaveBeenCalledWith([0]);
     expect(mockPersistQueue).toHaveBeenLastCalledWith(
       [queue[1]],

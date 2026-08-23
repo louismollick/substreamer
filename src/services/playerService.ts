@@ -114,6 +114,7 @@ let pendingResumePosition: { trackId: string; position: number } | null = null;
 let activeScrobbleIndex: number | null = null;
 let activeScrobbleDone = false;
 let lastMilestoneValue = 0;
+let queueRemovalSkipTarget: number | null = null;
 
 /** Report a completed play once per playthrough, guarded by `activeScrobbleDone`. */
 function reportPlay(trackIndex: number): void {
@@ -375,7 +376,10 @@ export async function initPlayer(): Promise<void> {
     // Completion fallback: a natural auto-advance means the OUTGOING track
     // finished — report it if the configured milestone was missed (e.g. a seek
     // skipped it). User skips / queue replacement are NOT completion.
-    if (reason === 'auto-advance' && activeScrobbleIndex != null) {
+    if (
+      reason === 'auto-advance' && index !== queueRemovalSkipTarget &&
+      activeScrobbleIndex != null
+    ) {
       reportPlay(activeScrobbleIndex);
     }
     if (track?.id) {
@@ -1118,6 +1122,7 @@ export async function playSongNext(song: Child): Promise<void> {
 async function skipToConfirmedQueueIndex(index: number): Promise<boolean> {
   if (tp.getCurrentTrackIndex() === index) return true;
 
+  queueRemovalSkipTarget = index;
   let settle!: (confirmed: boolean) => void;
   let unsubscribe = (): void => {};
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1128,6 +1133,7 @@ async function skipToConfirmedQueueIndex(index: number): Promise<boolean> {
       settled = true;
       if (timer !== undefined) clearTimeout(timer);
       unsubscribe();
+      if (queueRemovalSkipTarget === index) queueRemovalSkipTarget = null;
       resolve(confirmed);
     };
     unsubscribe = tp.onTrackChange((_track, activeIndex) => {
