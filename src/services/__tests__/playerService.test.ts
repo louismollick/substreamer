@@ -470,6 +470,40 @@ describe('Autoplay', () => {
     );
   });
 
+  it('finishes Play Next before autoplay removal calculates native indices', async () => {
+    const source = makeChild('source');
+    const autoplay = makeChild('autoplay');
+    const manual = makeChild('manual');
+    await playTrack(source, [source]);
+    (playerStore.getState as jest.Mock).mockReturnValue(playingAtEnd([source]));
+    mockBuildAutoplayQueue.mockResolvedValue([autoplay]);
+    await setAutoplayEnabled(true);
+    await flush();
+
+    let resolveAddition!: () => void;
+    mockTP.addToQueue.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveAddition = resolve; }),
+    );
+    mockTP.removeFromQueue.mockClear();
+
+    const playNextPromise = playSongNext(manual);
+    await flush();
+    const disablePromise = setAutoplayEnabled(false);
+    await flush();
+
+    expect(mockTP.removeFromQueue).not.toHaveBeenCalled();
+
+    resolveAddition();
+    await playNextPromise;
+    await disablePromise;
+    expect(mockTP.removeFromQueue).toHaveBeenCalledWith([2]);
+    expect(mockPersistQueue).toHaveBeenLastCalledWith(
+      [source, manual],
+      0,
+      ['manual', 'manual'],
+    );
+  });
+
   it('does not mutate the native queue when disabling with no future autoplay tracks', async () => {
     const queue = [makeChild('source'), makeChild('manual')];
     await playTrack(queue[0], queue);
@@ -583,6 +617,30 @@ describe('Autoplay', () => {
     expect(mockTP.addToQueue).toHaveBeenCalledTimes(1);
     expect(mockTP.addToQueue).toHaveBeenCalledWith([
       expect.objectContaining({ id: 'offline' }),
+    ]);
+  });
+
+  it('retries a settled empty preload when switching back online', async () => {
+    const source = makeChild('source');
+    const online = makeChild('online');
+    await playTrack(source, [source]);
+    (playerStore.getState as jest.Mock).mockReturnValue(playingAtEnd([source]));
+    mockOfflineMode.offlineMode = true;
+    mockBuildAutoplayQueue.mockResolvedValueOnce([]);
+
+    await setAutoplayEnabled(true);
+    await flush();
+    expect(mockBuildAutoplayQueue).toHaveBeenCalledTimes(1);
+
+    mockBuildAutoplayQueue.mockResolvedValueOnce([online]);
+    mockOfflineMode.offlineMode = false;
+    mockOfflineModeSubscriber?.(mockOfflineMode, { offlineMode: true });
+    await flush();
+    await flush();
+
+    expect(mockBuildAutoplayQueue).toHaveBeenCalledTimes(2);
+    expect(mockTP.addToQueue).toHaveBeenCalledWith([
+      expect.objectContaining({ id: online.id }),
     ]);
   });
 });

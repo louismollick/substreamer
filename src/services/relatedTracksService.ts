@@ -41,7 +41,7 @@ function onlineSources(source: Child, target: number): Array<() => Promise<Child
 /** Build the ordered fallback queue used by the explicit "more like this" action. */
 export async function buildMoreLikeThisQueue(
   source: Child,
-  target: number = layoutPreferencesStore.getState().listLength,
+  target: number,
 ): Promise<Child[]> {
   const seen = new Set<string>([source.id]);
   const output: Child[] = [];
