@@ -134,6 +134,15 @@ async function awaitAutoplayNativeMutation(): Promise<void> {
   if (autoplayNativeMutationPromise) await autoplayNativeMutationPromise;
 }
 
+async function trackAutoplayNativeMutation(mutation: Promise<void>): Promise<void> {
+  autoplayNativeMutationPromise = mutation;
+  try {
+    await mutation;
+  } finally {
+    if (autoplayNativeMutationPromise === mutation) autoplayNativeMutationPromise = null;
+  }
+}
+
 function queueTracks(entries = currentQueue): Child[] {
   return entries.map(({ track }) => track);
 }
@@ -255,12 +264,7 @@ function preloadAutoplay(): Promise<void> | null {
         await tp.removeFromQueue(rnTracks.map((_, offset) => firstAddedIndex + offset));
       }
     })();
-    autoplayNativeMutationPromise = nativeMutation;
-    try {
-      await nativeMutation;
-    } finally {
-      if (autoplayNativeMutationPromise === nativeMutation) autoplayNativeMutationPromise = null;
-    }
+    await trackAutoplayNativeMutation(nativeMutation);
     if (!appended) return;
 
     setQueueEntries([
@@ -1196,7 +1200,7 @@ export async function setAutoplayEnabled(enabled: boolean): Promise<void> {
       .filter(({ origin, index }) => origin === 'autoplay' && index > currentIndex)
       .map(({ index }) => index);
     if (indices.length === 0) return;
-    await tp.removeFromQueue(indices);
+    await trackAutoplayNativeMutation(tp.removeFromQueue(indices));
     const remove = new Set(indices);
     setQueueEntries(currentQueue.filter((_, index) => !remove.has(index)));
     persistCurrentQueue();
