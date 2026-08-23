@@ -62,6 +62,7 @@ const tp = getTrackPlayer();
 
 /** The RNQP equalizer singleton. */
 const eq = getEqualizer();
+const QUEUE_SKIP_CONFIRMATION_TIMEOUT_MS = 5000;
 
 /**
  * One-time Fire-OS background-playback guidance. Fired the first time the user
@@ -1114,6 +1115,37 @@ export async function playSongNext(song: Child): Promise<void> {
   });
 }
 
+async function skipToConfirmedQueueIndex(index: number): Promise<boolean> {
+  if (tp.getCurrentTrackIndex() === index) return true;
+
+  let settle!: (confirmed: boolean) => void;
+  let unsubscribe = (): void => {};
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const confirmation = new Promise<boolean>((resolve) => {
+    let settled = false;
+    settle = (confirmed) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      unsubscribe();
+      resolve(confirmed);
+    };
+    unsubscribe = tp.onTrackChange((_track, activeIndex) => {
+      if (activeIndex === index) settle(true);
+    });
+    timer = setTimeout(() => settle(false), QUEUE_SKIP_CONFIRMATION_TIMEOUT_MS);
+  });
+
+  try {
+    await tp.skipToIndex(index);
+  } catch (error) {
+    settle(false);
+    throw error;
+  }
+  if (tp.getCurrentTrackIndex() === index) settle(true);
+  return confirmation;
+}
+
 async function removeQueueIndicesNow(indices: readonly number[]): Promise<void> {
   const validIndices = [...new Set(indices)]
     .filter((index) => index >= 0 && index < currentQueue.length)
@@ -1139,7 +1171,8 @@ async function removeQueueIndicesNow(indices: readonly number[]): Promise<void> 
         }
       }
     }
-    await tp.skipToIndex(replacementIndex);
+    const confirmed = await skipToConfirmedQueueIndex(replacementIndex);
+    if (!confirmed) return;
   }
 
   await tp.removeFromQueue(validIndices);

@@ -798,6 +798,9 @@ beforeEach(async () => {
   (getCoverArtUrl as jest.Mock).mockReturnValue('https://example.com/art.jpg');
   (getStreamUrl as jest.Mock).mockReturnValue('https://example.com/stream.mp3');
   (getLocalTrackUri as jest.Mock).mockReturnValue(null);
+  mockTP.getCurrentTrackIndex.mockReturnValue(-1);
+  mockTP.skipToIndex.mockResolvedValue(undefined);
+  mockTP.removeFromQueue.mockResolvedValue(undefined);
   mockGetPersistedQueue.mockReturnValue(null);
   mockGetPersistedPosition.mockReturnValue(null);
   mockOfflineMode.offlineMode = false;
@@ -1140,7 +1143,14 @@ describe('removeFromQueue', () => {
   it('skips off the active track before removing it', async () => {
     const queue = [makeChild('a'), makeChild('b')];
     await playTrack(queue[0], queue);
-    mockTP.getCurrentTrackIndex.mockReturnValue(0);
+    let nativeIndex = 0;
+    mockTP.getCurrentTrackIndex.mockImplementation(() => nativeIndex);
+    mockTP.skipToIndex.mockImplementationOnce(async (index: number) => {
+      nativeIndex = index;
+    });
+    mockTP.removeFromQueue.mockImplementationOnce(async () => {
+      nativeIndex = 0;
+    });
     mockTP.removeFromQueue.mockClear();
     mockTP.skipToIndex.mockClear();
     await removeFromQueue(0);
@@ -1158,7 +1168,11 @@ describe('removeFromQueue', () => {
   it('skips backward before removing the active last track', async () => {
     const queue = [makeChild('a'), makeChild('b')];
     await playTrack(queue[1], queue);
-    mockTP.getCurrentTrackIndex.mockReturnValueOnce(1).mockReturnValue(0);
+    let nativeIndex = 1;
+    mockTP.getCurrentTrackIndex.mockImplementation(() => nativeIndex);
+    mockTP.skipToIndex.mockImplementationOnce(async (index: number) => {
+      nativeIndex = index;
+    });
     mockTP.removeFromQueue.mockClear();
     mockTP.skipToIndex.mockClear();
 
@@ -1169,6 +1183,35 @@ describe('removeFromQueue', () => {
     expect(mockSetCurrentTrack).toHaveBeenLastCalledWith(queue[0], 0);
     expect(mockPersistQueue).toHaveBeenLastCalledWith(
       [queue[0]],
+      0,
+      ['manual'],
+    );
+  });
+
+  it('waits for a delayed active-track skip before removing the pinned row', async () => {
+    const queue = [makeChild('a'), makeChild('b')];
+    await playTrack(queue[0], queue);
+    let nativeIndex = 0;
+    mockTP.getCurrentTrackIndex.mockImplementation(() => nativeIndex);
+    mockTP.removeFromQueue.mockImplementationOnce(async () => {
+      nativeIndex = 0;
+    });
+    mockTP.removeFromQueue.mockClear();
+    mockTP.skipToIndex.mockClear();
+
+    const removalPromise = removeFromQueue(0);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(mockTP.skipToIndex).toHaveBeenCalledWith(1);
+    expect(mockTP.removeFromQueue).not.toHaveBeenCalled();
+
+    nativeIndex = 1;
+    emit('trackChange', { id: queue[1].id }, 1, 'user-skip-to-index');
+    await removalPromise;
+
+    expect(mockTP.removeFromQueue).toHaveBeenCalledWith([0]);
+    expect(mockPersistQueue).toHaveBeenLastCalledWith(
+      [queue[1]],
       0,
       ['manual'],
     );
