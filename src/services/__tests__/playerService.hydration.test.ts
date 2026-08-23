@@ -49,6 +49,7 @@ const mockSetPlaybackState = jest.fn();
 const mockSetError = jest.fn();
 const mockSetRetrying = jest.fn();
 const mockSetQueueLoading = jest.fn();
+const mockSetAutoplayLoading = jest.fn();
 const mockSetQueueFormats = jest.fn();
 const mockClearQueueFormats = jest.fn();
 const mockAddQueueFormat = jest.fn();
@@ -62,6 +63,7 @@ const buildPlayerState = () => ({
   setError: mockSetError,
   setRetrying: mockSetRetrying,
   setQueueLoading: mockSetQueueLoading,
+  setAutoplayLoading: mockSetAutoplayLoading,
   setQueueFormats: mockSetQueueFormats,
   addQueueFormat: mockAddQueueFormat,
   clearQueueFormats: mockClearQueueFormats,
@@ -99,7 +101,10 @@ jest.mock('../../store/musicCacheStore', () => ({
 
 const mockOfflineMode = { offlineMode: false };
 jest.mock('../../store/offlineModeStore', () => ({
-  offlineModeStore: { getState: jest.fn(() => mockOfflineMode) },
+  offlineModeStore: {
+    getState: jest.fn(() => mockOfflineMode),
+    subscribe: jest.fn(),
+  },
 }));
 
 const subsonicMocks = {
@@ -215,7 +220,7 @@ describe('cold-start hydration', () => {
     expect(mockToastFail).toHaveBeenCalled();
     expect(mockTP.setQueue).not.toHaveBeenCalled();
     expect(mockTP.clearQueue).toHaveBeenCalled();
-    expect(mockSetQueue).toHaveBeenCalledWith([]);
+    expect(mockSetQueue).toHaveBeenCalledWith([], []);
   });
 
   it('does nothing when there is no persisted queue', async () => {
