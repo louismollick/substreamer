@@ -143,6 +143,7 @@ import {
   clearQueue,
   addToQueue,
   removeFromQueue,
+  removeNonDownloadedTracks,
   cycleRepeatMode,
   applyPlaybackRate,
   shuffleQueue,
@@ -1136,11 +1137,72 @@ describe('removeFromQueue', () => {
     expect(mockTP.clearQueue).toHaveBeenCalled();
   });
 
-  it('removes by index batch when more than one track', async () => {
-    await playTrack(makeChild('a'), [makeChild('a'), makeChild('b')]);
+  it('skips off the active track before removing it', async () => {
+    const queue = [makeChild('a'), makeChild('b')];
+    await playTrack(queue[0], queue);
+    mockTP.getCurrentTrackIndex.mockReturnValue(0);
     mockTP.removeFromQueue.mockClear();
+    mockTP.skipToIndex.mockClear();
     await removeFromQueue(0);
+
+    expect(mockTP.skipToIndex).toHaveBeenCalledWith(1);
     expect(mockTP.removeFromQueue).toHaveBeenCalledWith([0]);
+    expect(mockSetCurrentTrack).toHaveBeenLastCalledWith(queue[1], 0);
+    expect(mockPersistQueue).toHaveBeenLastCalledWith(
+      [queue[1]],
+      0,
+      ['manual'],
+    );
+  });
+
+  it('skips backward before removing the active last track', async () => {
+    const queue = [makeChild('a'), makeChild('b')];
+    await playTrack(queue[1], queue);
+    mockTP.getCurrentTrackIndex.mockReturnValueOnce(1).mockReturnValue(0);
+    mockTP.removeFromQueue.mockClear();
+    mockTP.skipToIndex.mockClear();
+
+    await removeFromQueue(1);
+
+    expect(mockTP.skipToIndex).toHaveBeenCalledWith(0);
+    expect(mockTP.removeFromQueue).toHaveBeenCalledWith([1]);
+    expect(mockSetCurrentTrack).toHaveBeenLastCalledWith(queue[0], 0);
+    expect(mockPersistQueue).toHaveBeenLastCalledWith(
+      [queue[0]],
+      0,
+      ['manual'],
+    );
+  });
+
+  it('scans offline removals after a pending Play Next commits', async () => {
+    const active = makeChild('active');
+    const remote = makeChild('remote');
+    const manual = makeChild('manual');
+    await playTrack(active, [active, remote]);
+    mockTP.getCurrentTrackIndex.mockReturnValue(0);
+    (getLocalTrackUri as jest.Mock).mockImplementation((id: string) =>
+      id === remote.id ? null : `/local/${id}.mp3`,
+    );
+
+    let resolveAddition!: () => void;
+    mockTP.addToQueue.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveAddition = resolve; }),
+    );
+    const playNextPromise = playSongNext(manual);
+    await new Promise((resolve) => setImmediate(resolve));
+    const cleanupPromise = removeNonDownloadedTracks();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    resolveAddition();
+    await playNextPromise;
+    await cleanupPromise;
+
+    expect(mockTP.removeFromQueue).toHaveBeenLastCalledWith([2]);
+    expect(mockPersistQueue).toHaveBeenLastCalledWith(
+      [active, manual],
+      0,
+      ['manual', 'manual'],
+    );
   });
 });
 

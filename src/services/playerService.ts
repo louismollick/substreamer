@@ -1114,35 +1114,61 @@ export async function playSongNext(song: Child): Promise<void> {
   });
 }
 
+async function removeQueueIndicesNow(indices: readonly number[]): Promise<void> {
+  const validIndices = [...new Set(indices)]
+    .filter((index) => index >= 0 && index < currentQueue.length)
+    .sort((a, b) => a - b);
+  if (validIndices.length === 0) return;
+  if (validIndices.length === currentQueue.length) {
+    await clearPlayerStateNow();
+    return;
+  }
+
+  const remove = new Set(validIndices);
+  const activeIndex = tp.getCurrentTrackIndex();
+  const removesActiveTrack = remove.has(activeIndex);
+  if (removesActiveTrack) {
+    let replacementIndex = currentQueue.findIndex(
+      (_, index) => index > activeIndex && !remove.has(index),
+    );
+    if (replacementIndex === -1) {
+      for (let index = activeIndex - 1; index >= 0; index -= 1) {
+        if (!remove.has(index)) {
+          replacementIndex = index;
+          break;
+        }
+      }
+    }
+    await tp.skipToIndex(replacementIndex);
+  }
+
+  await tp.removeFromQueue(validIndices);
+  for (const index of validIndices) trackPlaylistMap.delete(currentQueue[index].track.id);
+  const nextQueue = currentQueue.filter((_, index) => !remove.has(index));
+  setQueueEntries(nextQueue);
+
+  // Re-sync the active index from native (recomputed on removal).
+  const nativeIndex = tp.getCurrentTrackIndex();
+  const store = playerStore.getState();
+  const activeTrack = removesActiveTrack && nativeIndex >= 0
+    ? nextQueue[nativeIndex]?.track ?? null
+    : store.currentTrack;
+  store.setCurrentTrack(
+    activeTrack,
+    nativeIndex >= 0 ? nativeIndex : null,
+  );
+  persistCurrentQueue();
+}
+
 /**
- * Remove a track from the play queue by index. When the removed track is
- * before the active one the native engine re-indexes; we read the new index
- * back rather than adjusting by hand. Clears the queue when it was the last.
+ * Remove a track from the play queue by index. The native engine pins its
+ * active row, so removing that row first skips to a retained track. Clears the
+ * queue when the requested row is the only track.
  */
 export async function removeFromQueue(index: number): Promise<void> {
   await awaitHydration();
   invalidateQueueWork();
-  await runQueueMutation(async () => {
-    if (index < 0 || index >= currentQueue.length) return;
-    if (currentQueue.length === 1) {
-      await clearPlayerStateNow();
-      return;
-    }
-
-    const removedChild = currentQueue[index].track;
-    await tp.removeFromQueue([index]);
-
-    trackPlaylistMap.delete(removedChild.id);
-    setQueueEntries(currentQueue.filter((_, i) => i !== index));
-
-    // Re-sync the active index from native (recomputed on removal).
-    const nativeIndex = tp.getCurrentTrackIndex();
-    playerStore.getState().setCurrentTrack(
-      playerStore.getState().currentTrack,
-      nativeIndex >= 0 ? nativeIndex : null,
-    );
-    persistCurrentQueue();
-  });
+  await runQueueMutation(() => removeQueueIndicesNow([index]));
 }
 
 /**
@@ -1152,25 +1178,14 @@ export async function removeFromQueue(index: number): Promise<void> {
  */
 export async function removeNonDownloadedTracks(): Promise<void> {
   await awaitHydration();
-
-  if (currentQueue.length === 0) return;
-
-  const indicesToRemove: number[] = [];
-  for (let i = currentQueue.length - 1; i >= 0; i--) {
-    if (!getLocalTrackUri(currentQueue[i].track.id)) {
-      indicesToRemove.push(i);
-    }
-  }
-
-  if (indicesToRemove.length === 0) return;
-  if (indicesToRemove.length === currentQueue.length) {
-    await clearQueue();
-    return;
-  }
-
-  for (const index of indicesToRemove) {
-    await removeFromQueue(index);
-  }
+  invalidateQueueWork();
+  await runQueueMutation(async () => {
+    const indicesToRemove: number[] = [];
+    currentQueue.forEach(({ track }, index) => {
+      if (!getLocalTrackUri(track.id)) indicesToRemove.push(index);
+    });
+    await removeQueueIndicesNow(indicesToRemove);
+  });
 }
 
 /** Cycle the repeat mode: off → all → one → off (persisted + native). */
