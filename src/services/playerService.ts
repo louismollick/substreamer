@@ -229,14 +229,19 @@ function preloadAutoplay(): Promise<void> | null {
   if (!shouldLoadAutoplay()) return null;
   if (autoplayPromise) return autoplayPromise;
 
-  const generation = queueGeneration;
   const requestId = ++autoplayRequestId;
-  const offline = offlineModeStore.getState().offlineMode;
-  const sourceIndex = playerStore.getState().currentTrackIndex!;
-  const source = currentQueue[sourceIndex].track;
-  playerStore.getState().setAutoplayLoading(true);
+  const pendingQueueMutations = queueMutationTail;
 
   const request = (async () => {
+    await pendingQueueMutations;
+    if (requestId !== autoplayRequestId || !shouldLoadAutoplay()) return;
+
+    const generation = queueGeneration;
+    const offline = offlineModeStore.getState().offlineMode;
+    const sourceIndex = playerStore.getState().currentTrackIndex!;
+    const source = currentQueue[sourceIndex].track;
+    playerStore.getState().setAutoplayLoading(true);
+
     const candidates = await buildAutoplayQueue(source, {
       currentQueue: queueTracks(),
       currentTrackIndex: sourceIndex,

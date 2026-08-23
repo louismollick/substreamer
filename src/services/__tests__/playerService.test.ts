@@ -504,6 +504,44 @@ describe('Autoplay', () => {
     );
   });
 
+  it('waits for a pending Play Next before snapshotting autoplay recommendations', async () => {
+    const source = makeChild('source');
+    const manual = makeChild('manual');
+    const autoplay = makeChild('autoplay');
+    await playTrack(source, [source]);
+    (playerStore.getState as jest.Mock).mockReturnValue(playingAtEnd([source]));
+
+    let resolveAddition!: () => void;
+    mockTP.addToQueue.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveAddition = resolve; }),
+    );
+    const playNextPromise = playSongNext(manual);
+    await flush();
+
+    mockBuildAutoplayQueue.mockResolvedValue([manual, autoplay]);
+    await setAutoplayEnabled(true);
+    await flush();
+    const requestStartedBeforeAddition = mockBuildAutoplayQueue.mock.calls.length;
+
+    resolveAddition();
+    await playNextPromise;
+    await flush();
+
+    expect(requestStartedBeforeAddition).toBe(0);
+    expect(mockBuildAutoplayQueue).toHaveBeenCalledWith(source, {
+      currentQueue: [source, manual],
+      currentTrackIndex: 0,
+    });
+    expect(mockTP.addToQueue).toHaveBeenLastCalledWith([
+      expect.objectContaining({ id: autoplay.id }),
+    ]);
+    expect(mockPersistQueue).toHaveBeenLastCalledWith(
+      [source, manual, autoplay],
+      0,
+      ['manual', 'manual', 'autoplay'],
+    );
+  });
+
   it('does not mutate the native queue when disabling with no future autoplay tracks', async () => {
     const queue = [makeChild('source'), makeChild('manual')];
     await playTrack(queue[0], queue);
