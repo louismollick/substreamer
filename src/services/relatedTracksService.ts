@@ -4,12 +4,12 @@ import { getSongEnvelope, musicCacheStore } from '../store/musicCacheStore';
 import { offlineModeStore } from '../store/offlineModeStore';
 import { shuffleArray } from '../utils/arrayHelpers';
 import {
+  getRandomSongs,
   getRandomSongsFiltered,
   getSimilarSongs,
   getSimilarSongs2,
   getTopSongs,
 } from './subsonicService';
-import { fetchSimilarSongsOrRandom } from './recommendationService';
 
 import type { Child } from './subsonicService';
 
@@ -92,9 +92,24 @@ export async function buildAutoplayQueue(
     const genre = sourceGenre(source);
     if (genre) push(shuffleArray(all.filter((song) => sourceGenre(song) === genre)));
     push(shuffleArray(all));
-  } else {
-    push(await fetchSimilarSongsOrRandom(source.id, target));
+    return [...fresh, ...recycled].slice(0, target);
   }
 
-  return [...fresh, ...recycled].slice(0, target);
+  const classify = (tracks: readonly Child[]): { fresh: Child[]; recycled: Child[] } => {
+    const seen = new Set(excluded);
+    const usable: Child[] = [];
+    const history: Child[] = [];
+    for (const track of tracks) {
+      if (!track?.id || seen.has(track.id)) continue;
+      seen.add(track.id);
+      (playedIds.has(track.id) ? history : usable).push(track);
+    }
+    return { fresh: usable.slice(0, target), recycled: history.slice(0, target) };
+  };
+
+  const similar = classify(await getSimilarSongs(source.id, target));
+  if (similar.fresh.length > 0) return similar.fresh;
+
+  const random = classify((await getRandomSongs(target)) ?? []);
+  return random.fresh.length > 0 ? random.fresh : random.recycled;
 }

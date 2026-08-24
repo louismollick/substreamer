@@ -58,7 +58,7 @@ it('shares the ordered online fallback chain with more-like-this', async () => {
   expect(getTopSongs).not.toHaveBeenCalled();
 });
 
-it('uses a non-empty similar response without calling another autoplay endpoint', async () => {
+it('returns one usable similar song without topping up from random', async () => {
   (getSimilarSongs as jest.Mock).mockResolvedValue([song('similar')]);
   (getSimilarSongs2 as jest.Mock).mockResolvedValue([song('artist')]);
   (getRandomSongsFiltered as jest.Mock).mockResolvedValue([song('genre')]);
@@ -71,6 +71,31 @@ it('uses a non-empty similar response without calling another autoplay endpoint'
   expect(getRandomSongsFiltered).not.toHaveBeenCalled();
   expect(getTopSongs).not.toHaveBeenCalled();
   expect(getRandomSongs).not.toHaveBeenCalled();
+});
+
+it('falls through to random when similarity returns only the source', async () => {
+  (getSimilarSongs as jest.Mock).mockResolvedValue([song('source')]);
+  (getRandomSongs as jest.Mock).mockResolvedValue([song('random')]);
+
+  await expect(buildAutoplayQueue(song('source'), options())).resolves.toEqual([
+    song('random'),
+  ]);
+  expect(getRandomSongs).toHaveBeenCalledTimes(1);
+});
+
+it('falls through to random when similar songs are already in the queue', async () => {
+  const played = song('played');
+  const source = song('source');
+  const upcoming = song('upcoming');
+  (getSimilarSongs as jest.Mock).mockResolvedValue([played, upcoming]);
+  (getRandomSongs as jest.Mock).mockResolvedValue([song('random')]);
+
+  await expect(buildAutoplayQueue(source, {
+    currentQueue: [played, source, upcoming],
+    currentTrackIndex: 1,
+    target: 3,
+  })).resolves.toEqual([song('random')]);
+  expect(getRandomSongs).toHaveBeenCalledTimes(1);
 });
 
 it('normalizes an object genre for the explicit-action fallback', async () => {
@@ -112,15 +137,29 @@ it('matches object and string genre shapes in the downloaded library', async () 
   expect(result.map((track) => track.id)).toEqual(['rock', 'jazz']);
 });
 
-it('excludes source, manual future tracks, duplicates, then recycles played tracks', async () => {
-  (getSimilarSongs as jest.Mock).mockResolvedValue([
-    song('source'), song('manual'), song('played'), song('fresh'), song('fresh'),
+it('filters random songs and keeps fresh results ahead of played history', async () => {
+  (getRandomSongs as jest.Mock).mockResolvedValue([
+    song(''), song('source'), song('manual'), song('played'), song('fresh'), song('fresh'),
   ]);
   const result = await buildAutoplayQueue(song('source'), {
     ...options([song('played'), song('source')]),
     currentQueue: [song('played'), song('source'), song('manual')],
   });
-  expect(result.map((track) => track.id)).toEqual(['fresh', 'played']);
+  expect(result.map((track) => track.id)).toEqual(['fresh']);
+});
+
+it('recycles random played history when no fresh random song remains', async () => {
+  (getRandomSongs as jest.Mock).mockResolvedValue([
+    song('source'), song('manual'), song('played'), song('played'),
+  ]);
+
+  const result = await buildAutoplayQueue(song('source'), {
+    currentQueue: [song('played'), song('source'), song('manual')],
+    currentTrackIndex: 1,
+    target: 3,
+  });
+
+  expect(result.map((track) => track.id)).toEqual(['played']);
 });
 
 it('does not recycle an autoplay track that is still ahead in the queue', async () => {
@@ -133,7 +172,7 @@ it('does not recycle an autoplay track that is still ahead in the queue', async 
   });
 
   expect(result).toEqual([]);
-  expect(getRandomSongs).not.toHaveBeenCalled();
+  expect(getRandomSongs).toHaveBeenCalledTimes(1);
   expect(getSimilarSongs2).not.toHaveBeenCalled();
   expect(getRandomSongsFiltered).not.toHaveBeenCalled();
   expect(getTopSongs).not.toHaveBeenCalled();
@@ -150,4 +189,10 @@ it('uses random songs when similar songs are empty', async () => {
 
   (getRandomSongs as jest.Mock).mockResolvedValue(null);
   await expect(buildAutoplayQueue(song('source'), options())).resolves.toEqual([]);
+});
+
+it('returns an empty batch when similar and random songs are empty', async () => {
+  await expect(buildAutoplayQueue(song('source'), options())).resolves.toEqual([]);
+  expect(getSimilarSongs).toHaveBeenCalledTimes(1);
+  expect(getRandomSongs).toHaveBeenCalledTimes(1);
 });

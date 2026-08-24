@@ -397,7 +397,6 @@ export async function initPlayer(): Promise<void> {
         // Consuming autoplay changes row ownership; ordinary advances stay one UPDATE.
         if (originsChanged) persistCurrentQueue(index);
         else persistCurrentIndex(index);
-        if (autoplayPromise) invalidateQueueWork();
         void preloadAutoplay();
       }
     } else {

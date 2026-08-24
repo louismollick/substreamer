@@ -355,11 +355,10 @@ describe('Autoplay', () => {
     expect(mockTP.addToQueue).toHaveBeenCalledTimes(1);
   });
 
-  it('restarts a pending preload for the new source after a manual skip', async () => {
+  it('keeps a pending preload across same-queue advancement and resumes at queue end', async () => {
     const first = makeChild('first');
     const second = makeChild('second');
-    const stale = makeChild('stale');
-    const fresh = makeChild('fresh');
+    const recommendation = makeChild('recommendation');
     const queue = [first, second];
     await playTrack(first, queue);
     (playerStore.getState as jest.Mock).mockReturnValue({
@@ -367,10 +366,10 @@ describe('Autoplay', () => {
       currentTrack: first,
       currentTrackIndex: 0,
     });
-    let resolveFirst!: (tracks: Child[]) => void;
-    mockBuildAutoplayQueue
-      .mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve; }))
-      .mockResolvedValueOnce([fresh]);
+    let resolveRequest!: (tracks: Child[]) => void;
+    mockBuildAutoplayQueue.mockReturnValueOnce(
+      new Promise((resolve) => { resolveRequest = resolve; }),
+    );
 
     await setAutoplayEnabled(true);
     (playerStore.getState as jest.Mock).mockReturnValue({
@@ -379,18 +378,40 @@ describe('Autoplay', () => {
       currentTrackIndex: 1,
     });
     emit('trackChange', { id: second.id }, 1, 'user-skip-to-index');
-    resolveFirst([stale]);
-    await flush();
+    emit('queueEnd');
+    resolveRequest([recommendation]);
     await flush();
 
-    expect(mockBuildAutoplayQueue).toHaveBeenNthCalledWith(2, second, {
+    expect(mockBuildAutoplayQueue).toHaveBeenCalledTimes(1);
+    expect(mockBuildAutoplayQueue).toHaveBeenCalledWith(first, {
       currentQueue: queue,
-      currentTrackIndex: 1,
+      currentTrackIndex: 0,
     });
     expect(mockTP.addToQueue).toHaveBeenCalledTimes(1);
     expect(mockTP.addToQueue).toHaveBeenCalledWith([
-      expect.objectContaining({ id: fresh.id }),
+      expect.objectContaining({ id: recommendation.id }),
     ]);
+    expect(mockTP.skipToIndex).toHaveBeenCalledWith(2);
+    expect(mockTP.play).toHaveBeenCalled();
+  });
+
+  it('discards a pending preload when a new queue starts', async () => {
+    const source = makeChild('source');
+    const replacement = makeChild('replacement');
+    await playTrack(source, [source]);
+    (playerStore.getState as jest.Mock).mockReturnValue(playingAtEnd([source]));
+    let resolveRequest!: (tracks: Child[]) => void;
+    mockBuildAutoplayQueue.mockReturnValueOnce(
+      new Promise((resolve) => { resolveRequest = resolve; }),
+    );
+
+    await setAutoplayEnabled(true);
+    await playTrack(replacement, [replacement]);
+    resolveRequest([makeChild('stale')]);
+    await flush();
+
+    expect(mockBuildAutoplayQueue).toHaveBeenCalledTimes(1);
+    expect(mockTP.addToQueue).not.toHaveBeenCalled();
   });
 
   it('rolls back a stale append before Play Next inserts the manual track', async () => {
