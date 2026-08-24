@@ -1190,7 +1190,10 @@ async function removeQueueIndicesNow(indices: readonly number[]): Promise<void> 
       }
     }
     const confirmed = await skipToConfirmedQueueIndex(replacementIndex);
-    if (!confirmed) return;
+    if (!confirmed) {
+      playbackToastStore.getState().fail();
+      return;
+    }
   }
 
   await tp.removeFromQueue(validIndices);

@@ -1,4 +1,5 @@
 import { layoutPreferencesStore } from '../store/layoutPreferencesStore';
+import { childGenreNames } from '../db/childSnapshot';
 import { getSongEnvelope, musicCacheStore } from '../store/musicCacheStore';
 import { offlineModeStore } from '../store/offlineModeStore';
 import { shuffleArray } from '../utils/arrayHelpers';
@@ -13,7 +14,7 @@ import {
 import type { Child } from './subsonicService';
 
 const sourceGenre = (source: Child): string | undefined =>
-  source.genre ?? source.genres?.[0];
+  source.genre ?? childGenreNames(source)[0];
 
 function downloadedSongs(): Child[] {
   return Object.keys(musicCacheStore.getState().cachedSongs)

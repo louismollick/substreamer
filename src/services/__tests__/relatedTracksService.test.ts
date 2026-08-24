@@ -71,6 +71,16 @@ it('uses online fallback order and stops once full', async () => {
   expect(getRandomSongs).not.toHaveBeenCalled();
 });
 
+it('normalizes an object genre when choosing the online genre fallback', async () => {
+  (getRandomSongsFiltered as jest.Mock).mockResolvedValue([song('genre')]);
+  const source = song('source', {
+    genres: [{ name: 'Rock' }] as unknown as string[],
+  });
+
+  await expect(buildAutoplayQueue(source, options())).resolves.toEqual([song('genre')]);
+  expect(getRandomSongsFiltered).toHaveBeenCalledWith({ size: 6, genre: 'Rock' });
+});
+
 it('uses downloaded genre tracks first, then all downloads', async () => {
   mockOffline.offlineMode = true;
   Object.assign(mockCachedSongs, { jazz: {}, rock: {}, other: {} });
@@ -82,6 +92,22 @@ it('uses downloaded genre tracks first, then all downloads', async () => {
   const result = await buildAutoplayQueue(song('source', { genre: 'Rock' }), options());
   expect(result.map((track) => track.id)).toEqual(['rock', 'jazz', 'other']);
   expect(getSimilarSongs).not.toHaveBeenCalled();
+});
+
+it('matches object and string genre shapes in the downloaded library', async () => {
+  mockOffline.offlineMode = true;
+  Object.assign(mockCachedSongs, { jazz: {}, rock: {} });
+  Object.assign(mockEnvelopes, {
+    jazz: song('jazz', { genres: ['Jazz'] }),
+    rock: song('rock', { genres: ['Rock'] }),
+  });
+  const source = song('source', {
+    genres: [{ name: 'Rock' }] as unknown as string[],
+  });
+
+  const result = await buildAutoplayQueue(source, options());
+
+  expect(result.map((track) => track.id)).toEqual(['rock', 'jazz']);
 });
 
 it('excludes source, manual future tracks, duplicates, then recycles played tracks', async () => {

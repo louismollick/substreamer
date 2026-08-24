@@ -1300,6 +1300,27 @@ describe('removeFromQueue', () => {
     );
   });
 
+  it('reports a failed removal when the active-track skip never confirms', async () => {
+    const queue = [makeChild('a'), makeChild('b')];
+    await playTrack(queue[0], queue);
+    jest.useFakeTimers({ doNotFake: ['setImmediate'] });
+    mockTP.getCurrentTrackIndex.mockReturnValue(0);
+    mockTP.removeFromQueue.mockClear();
+    mockToastFail.mockClear();
+
+    try {
+      const removalPromise = removeFromQueue(0);
+      await new Promise((resolve) => setImmediate(resolve));
+      jest.advanceTimersByTime(5000);
+      await removalPromise;
+
+      expect(mockTP.removeFromQueue).not.toHaveBeenCalled();
+      expect(mockToastFail).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('scans offline removals after a pending Play Next commits', async () => {
     const active = makeChild('active');
     const remote = makeChild('remote');
