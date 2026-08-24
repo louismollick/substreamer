@@ -280,6 +280,7 @@ function preloadAutoplay(): Promise<void> | null {
       if (queueEndedWhileLoading) {
         await tp.skipToIndex(firstAddedIndex);
         await tp.play();
+        queueEndedWhileLoading = false;
       }
     });
   })().catch(() => {
@@ -287,7 +288,6 @@ function preloadAutoplay(): Promise<void> | null {
   }).finally(() => {
     if (requestId === autoplayRequestId) {
       autoplayPromise = null;
-      queueEndedWhileLoading = false;
       playerStore.getState().setAutoplayLoading(false);
     }
   });
@@ -391,6 +391,7 @@ export async function initPlayer(): Promise<void> {
         // Consuming autoplay changes row ownership; ordinary advances stay one UPDATE.
         if (originsChanged) persistCurrentQueue(index);
         else persistCurrentIndex(index);
+        if (autoplayPromise) invalidateQueueWork();
         void preloadAutoplay();
       }
     } else {

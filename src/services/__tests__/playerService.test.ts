@@ -355,6 +355,44 @@ describe('Autoplay', () => {
     expect(mockTP.addToQueue).toHaveBeenCalledTimes(1);
   });
 
+  it('restarts a pending preload for the new source after a manual skip', async () => {
+    const first = makeChild('first');
+    const second = makeChild('second');
+    const stale = makeChild('stale');
+    const fresh = makeChild('fresh');
+    const queue = [first, second];
+    await playTrack(first, queue);
+    (playerStore.getState as jest.Mock).mockReturnValue({
+      ...playingAtEnd(queue),
+      currentTrack: first,
+      currentTrackIndex: 0,
+    });
+    let resolveFirst!: (tracks: Child[]) => void;
+    mockBuildAutoplayQueue
+      .mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockResolvedValueOnce([fresh]);
+
+    await setAutoplayEnabled(true);
+    (playerStore.getState as jest.Mock).mockReturnValue({
+      ...playingAtEnd(queue),
+      currentTrack: second,
+      currentTrackIndex: 1,
+    });
+    emit('trackChange', { id: second.id }, 1, 'user-skip-to-index');
+    resolveFirst([stale]);
+    await flush();
+    await flush();
+
+    expect(mockBuildAutoplayQueue).toHaveBeenNthCalledWith(2, second, {
+      currentQueue: queue,
+      currentTrackIndex: 1,
+    });
+    expect(mockTP.addToQueue).toHaveBeenCalledTimes(1);
+    expect(mockTP.addToQueue).toHaveBeenCalledWith([
+      expect.objectContaining({ id: fresh.id }),
+    ]);
+  });
+
   it('rolls back a stale append before Play Next inserts the manual track', async () => {
     const queue = [makeChild('source')];
     const autoplayTrack = makeChild('autoplay');
@@ -665,9 +703,14 @@ describe('Autoplay', () => {
     await playTrack(source, [source]);
     (playerStore.getState as jest.Mock).mockReturnValue(playingAtEnd([source]));
     mockOfflineMode.offlineMode = true;
-    mockBuildAutoplayQueue.mockResolvedValueOnce([]);
+    let resolveOffline!: (tracks: Child[]) => void;
+    mockBuildAutoplayQueue.mockReturnValueOnce(
+      new Promise((resolve) => { resolveOffline = resolve; }),
+    );
 
     await setAutoplayEnabled(true);
+    emit('queueEnd');
+    resolveOffline([]);
     await flush();
     expect(mockBuildAutoplayQueue).toHaveBeenCalledTimes(1);
 
@@ -681,6 +724,8 @@ describe('Autoplay', () => {
     expect(mockTP.addToQueue).toHaveBeenCalledWith([
       expect.objectContaining({ id: online.id }),
     ]);
+    expect(mockTP.skipToIndex).toHaveBeenCalledWith(1);
+    expect(mockTP.play).toHaveBeenCalled();
   });
 });
 
