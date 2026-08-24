@@ -727,6 +727,41 @@ describe('Autoplay', () => {
     expect(mockTP.skipToIndex).toHaveBeenCalledWith(1);
     expect(mockTP.play).toHaveBeenCalled();
   });
+
+  it('does not resume autoplay after manual navigation from a settled queue end', async () => {
+    const first = makeChild('first');
+    const last = makeChild('last');
+    const fresh = makeChild('fresh');
+    const queue = [first, last];
+    await playTrack(last, queue);
+    (playerStore.getState as jest.Mock).mockReturnValue(playingAtEnd(queue));
+    let resolveEnded!: (tracks: Child[]) => void;
+    mockBuildAutoplayQueue.mockReturnValueOnce(
+      new Promise((resolve) => { resolveEnded = resolve; }),
+    );
+
+    await setAutoplayEnabled(true);
+    emit('queueEnd');
+    resolveEnded([]);
+    await flush();
+
+    mockTP.skipToIndex.mockClear();
+    mockTP.play.mockClear();
+    mockBuildAutoplayQueue.mockResolvedValueOnce([fresh]);
+    (playerStore.getState as jest.Mock).mockReturnValue({
+      ...playingAtEnd(queue),
+      currentTrack: first,
+      currentTrackIndex: 0,
+    });
+    emit('trackChange', { id: first.id }, 0, 'user-skip-previous');
+    await flush();
+
+    expect(mockTP.addToQueue).toHaveBeenCalledWith([
+      expect.objectContaining({ id: fresh.id }),
+    ]);
+    expect(mockTP.skipToIndex).not.toHaveBeenCalled();
+    expect(mockTP.play).not.toHaveBeenCalled();
+  });
 });
 
 describe('sleep-timer state synchronization', () => {

@@ -124,11 +124,15 @@ function reportPlay(trackIndex: number): void {
   if (child) addCompletedScrobble(child, trackPlaylistMap.get(child.id));
 }
 
+function cancelAutoplayResume(): void {
+  queueEndedWhileLoading = false;
+}
+
 function invalidateQueueWork(): void {
   queueGeneration += 1;
   autoplayRequestId += 1;
   autoplayPromise = null;
-  queueEndedWhileLoading = false;
+  cancelAutoplayResume();
   playerStore.getState().setAutoplayLoading(false);
 }
 
@@ -352,6 +356,7 @@ export async function initPlayer(): Promise<void> {
     const store = playerStore.getState();
     store.setPlaybackState(mapState(state));
     if (state === 'playing') {
+      cancelAutoplayResume();
       if (store.error) store.setError(null);
       if (store.retrying) store.setRetrying(false);
     }
@@ -383,6 +388,7 @@ export async function initPlayer(): Promise<void> {
       reportPlay(activeScrobbleIndex);
     }
     if (track?.id) {
+      cancelAutoplayResume();
       const child = currentQueue.find((entry) => entry.track.id === track.id)?.track ?? null;
       const originsChanged = index != null ? markQueueHistoryThrough(index) : false;
       playerStore.getState().setCurrentTrack(child, index ?? null);
@@ -763,6 +769,7 @@ export async function togglePlayPause(): Promise<void> {
     await tp.pause();
   } else {
     // Covers a returning user resuming a restored queue via the mini-player.
+    cancelAutoplayResume();
     maybePromptFireBackgroundPlayback();
     await tp.play();
   }
@@ -771,12 +778,14 @@ export async function togglePlayPause(): Promise<void> {
 /** Skip to the next track in the queue. */
 export async function skipToNext(): Promise<void> {
   await awaitHydration();
+  cancelAutoplayResume();
   await tp.skipToNext();
 }
 
 /** Skip to the previous track in the queue. */
 export async function skipToPrevious(): Promise<void> {
   await awaitHydration();
+  cancelAutoplayResume();
   await tp.skipToPrevious();
 }
 
@@ -794,6 +803,7 @@ export function canSkipToPrevious(): boolean {
  */
 export async function seekTo(position: number): Promise<void> {
   await awaitHydration();
+  cancelAutoplayResume();
   const target = Math.max(0, position);
   await tp.seekTo(target);
   const store = playerStore.getState();
@@ -803,6 +813,7 @@ export async function seekTo(position: number): Promise<void> {
 /** Skip to a specific track in the queue by index. */
 export async function skipToTrack(index: number): Promise<void> {
   await awaitHydration();
+  cancelAutoplayResume();
   await tp.skipToIndex(index);
   await tp.play();
 }
