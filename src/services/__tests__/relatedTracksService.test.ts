@@ -58,7 +58,7 @@ it('shares the ordered online fallback chain with more-like-this', async () => {
   expect(getTopSongs).not.toHaveBeenCalled();
 });
 
-it('uses online fallback order and stops once full', async () => {
+it('uses a non-empty similar response without calling another autoplay endpoint', async () => {
   (getSimilarSongs as jest.Mock).mockResolvedValue([song('similar')]);
   (getSimilarSongs2 as jest.Mock).mockResolvedValue([song('artist')]);
   (getRandomSongsFiltered as jest.Mock).mockResolvedValue([song('genre')]);
@@ -66,18 +66,20 @@ it('uses online fallback order and stops once full', async () => {
     song('source', { artistId: 'artist-id', artist: 'Artist', genre: 'Rock' }),
     options(),
   );
-  expect(result.map((track) => track.id)).toEqual(['similar', 'artist', 'genre']);
+  expect(result.map((track) => track.id)).toEqual(['similar']);
+  expect(getSimilarSongs2).not.toHaveBeenCalled();
+  expect(getRandomSongsFiltered).not.toHaveBeenCalled();
   expect(getTopSongs).not.toHaveBeenCalled();
   expect(getRandomSongs).not.toHaveBeenCalled();
 });
 
-it('normalizes an object genre when choosing the online genre fallback', async () => {
+it('normalizes an object genre for the explicit-action fallback', async () => {
   (getRandomSongsFiltered as jest.Mock).mockResolvedValue([song('genre')]);
   const source = song('source', {
     genres: [{ name: 'Rock' }] as unknown as string[],
   });
 
-  await expect(buildAutoplayQueue(source, options())).resolves.toEqual([song('genre')]);
+  await expect(buildMoreLikeThisQueue(source, 3)).resolves.toEqual([song('genre')]);
   expect(getRandomSongsFiltered).toHaveBeenCalledWith({ size: 6, genre: 'Rock' });
 });
 
@@ -131,14 +133,21 @@ it('does not recycle an autoplay track that is still ahead in the queue', async 
   });
 
   expect(result).toEqual([]);
+  expect(getRandomSongs).not.toHaveBeenCalled();
+  expect(getSimilarSongs2).not.toHaveBeenCalled();
+  expect(getRandomSongsFiltered).not.toHaveBeenCalled();
+  expect(getTopSongs).not.toHaveBeenCalled();
 });
 
-it('continues past unavailable sources and returns empty when none yield tracks', async () => {
-  (getRandomSongsFiltered as jest.Mock).mockResolvedValue(null);
-  (getTopSongs as jest.Mock).mockResolvedValue(null);
+it('uses random songs when similar songs are empty', async () => {
   (getRandomSongs as jest.Mock).mockResolvedValue([song('fallback')]);
   const source = song('source', { artistId: 'artist-id', artist: 'Artist', genre: 'Rock' });
   await expect(buildAutoplayQueue(source, options())).resolves.toEqual([song('fallback')]);
+  expect(getRandomSongs).toHaveBeenCalledWith(3);
+  expect(getSimilarSongs2).not.toHaveBeenCalled();
+  expect(getRandomSongsFiltered).not.toHaveBeenCalled();
+  expect(getTopSongs).not.toHaveBeenCalled();
+
   (getRandomSongs as jest.Mock).mockResolvedValue(null);
   await expect(buildAutoplayQueue(song('source'), options())).resolves.toEqual([]);
 });

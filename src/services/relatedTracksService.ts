@@ -4,12 +4,12 @@ import { getSongEnvelope, musicCacheStore } from '../store/musicCacheStore';
 import { offlineModeStore } from '../store/offlineModeStore';
 import { shuffleArray } from '../utils/arrayHelpers';
 import {
-  getRandomSongs,
   getRandomSongsFiltered,
   getSimilarSongs,
   getSimilarSongs2,
   getTopSongs,
 } from './subsonicService';
+import { fetchSimilarSongsOrRandom } from './recommendationService';
 
 import type { Child } from './subsonicService';
 
@@ -93,11 +93,7 @@ export async function buildAutoplayQueue(
     if (genre) push(shuffleArray(all.filter((song) => sourceGenre(song) === genre)));
     push(shuffleArray(all));
   } else {
-    for (const load of onlineSources(source, target)) {
-      push((await load()) ?? []);
-      if (fresh.length >= target) return fresh.slice(0, target);
-    }
-    push((await getRandomSongs(target * 2)) ?? []);
+    push(await fetchSimilarSongsOrRandom(source.id, target));
   }
 
   return [...fresh, ...recycled].slice(0, target);
