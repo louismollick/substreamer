@@ -40,8 +40,10 @@ import { playTrack } from '../services/playerService';
 import { fetchAlbumDetail } from '../services/detailFetchService';
 import { getDb } from '../store/persistence/db';
 import { getAlbumDetail } from '../db/repository/details';
+import { getDownloadedAlbumProjection } from '../db/repository/downloads';
 import { moreOptionsStore } from '../store/moreOptionsStore';
 import { offlineModeStore } from '../store/offlineModeStore';
+import { hasDownloadedArtist } from '../services/downloadedArtistService';
 
 import type { AlbumWithSongsID3, Child } from '../services/subsonicService';
 
@@ -80,6 +82,18 @@ export function AlbumDetailScreen() {
   const [album, setAlbum] = useState<AlbumWithSongsID3 | null>(null);
   const [hasCache, setHasCache] = useState(false);
   const [cacheChecked, setCacheChecked] = useState(false);
+  const [hasOfflineArtist, setHasOfflineArtist] = useState(false);
+  useEffect(() => {
+    if (!offlineMode || !album?.artistId) {
+      setHasOfflineArtist(false);
+      return;
+    }
+    let alive = true;
+    void hasDownloadedArtist(album.artistId).then((present) => {
+      if (alive) setHasOfflineArtist(present);
+    });
+    return () => { alive = false; };
+  }, [album?.artistId, offlineMode]);
   // Read the cached detail from the local DB first (fast) — the server fetch only runs
   // on a genuine miss. The server refresh (fetchAlbum) dual-writes normalized, so a
   // re-open resolves instantly from here without a network round-trip.
@@ -91,7 +105,7 @@ export function AlbumDetailScreen() {
       return;
     }
     let alive = true;
-    getAlbumDetail(db, id)
+    (offlineMode ? getDownloadedAlbumProjection(db, id) : getAlbumDetail(db, id))
       .then((d) => {
         if (!alive) return;
         if (d) {
@@ -108,7 +122,7 @@ export function AlbumDetailScreen() {
     return () => {
       alive = false;
     };
-  }, [id]);
+  }, [id, offlineMode]);
   const starred = useIsStarred('album', id ?? '');
   const transitionComplete = useTransitionComplete();
   const downloadStatus = useDownloadStatus('album', Platform.OS === 'ios' ? (id ?? '') : '');
@@ -149,6 +163,12 @@ export function AlbumDetailScreen() {
 
   /* ---- Data fetching ---- */
   const load = useCallback(async (albumId: string, isRefresh: boolean) => {
+    if (offlineMode) {
+      const db = getDb();
+      const data = db ? await getDownloadedAlbumProjection(db, albumId) : null;
+      setAlbum(data ? ({ ...data.album, song: data.songs } as AlbumWithSongsID3) : null);
+      return data ? null : t('albumNotFound');
+    }
     // The fetch always upserts the album row, so the viewed album reaches the library
     // list without a separate sync step. `force` only on an explicit pull-to-refresh;
     // a normal open answers from the local database when we already hold the tracks.
@@ -158,7 +178,7 @@ export function AlbumDetailScreen() {
       refreshCoverArt(data.id, 'album-detail-pull').catch(() => { /* non-critical */ });
     }
     return data ? null : t('albumNotFound');
-  }, [t]);
+  }, [offlineMode, t]);
 
   const { loading, refreshing, error, onRefresh } = useDetailFetch({
     id,
@@ -259,7 +279,7 @@ export function AlbumDetailScreen() {
           </MarqueeText>
           <View style={styles.subtitleRow}>
             <View style={styles.subtitleText}>
-              {album.artistId && !offlineMode ? (
+              {album.artistId && (!offlineMode || hasOfflineArtist) ? (
                 <Pressable
                   onPress={() => router.push(`/artist/${album.artistId}`)}
                   hitSlop={8}

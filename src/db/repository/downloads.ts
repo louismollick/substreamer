@@ -196,6 +196,41 @@ export async function listDownloadedAlbumIds(
   return new Set(rows.map((r) => r.item_id));
 }
 
+/** A downloaded album and only the tracks attached to its durable cache item. */
+export async function getDownloadedAlbumProjection(
+  db: InternalDb,
+  albumId: string,
+): Promise<{ album: AlbumID3; songs: Child[] } | null> {
+  const albumRow = await db.getFirstAsync<AlbumListRow>(
+    `SELECT ${CACHED_ALBUM_COLS} FROM cached_albums ca
+      JOIN cached_items ci ON ci.item_id = ca.item_id
+     WHERE ci.type = 'album' AND ca.item_id = ?`,
+    [albumId],
+  );
+  if (!albumRow) return null;
+
+  const songRows = await db.getAllAsync<DownloadedSongRow & { src_suffix: string | null }>(
+    `SELECT cs.song_id AS id, cs.title, cs.artist, cs.sort_name, cs.sort_title,
+            cs.sort_artist, COALESCE(cs.src_album_id, cs.album_id) AS album_id,
+            cs.duration, cs.cover_art, cs.user_rating, cs.artist_id, cs.album,
+            cs.track, cs.disc_number, cs.year, cs.suffix, cs.src_suffix, cs.content_type
+       FROM cached_item_songs cis
+       JOIN cached_songs cs ON cs.song_id = cis.song_id
+      WHERE cis.item_id = ?
+      ORDER BY cis.position`,
+    [albumId],
+  );
+  if (songRows.length === 0) return null;
+
+  return {
+    album: albumListRowToAlbumID3(albumRow),
+    songs: songRows.map((row) => downloadedSongRowToChild({
+      ...row,
+      suffix: row.src_suffix ?? row.suffix,
+    })),
+  };
+}
+
 /**
  * A downloaded song, at the projection the Songs tab's downloaded filter renders — nine
  * columns of the ~58 `cached_songs` holds. Widening it changes what those rows render, so

@@ -2,7 +2,7 @@ import Ionicons from "@react-native-vector-icons/ionicons/static";
 import MaterialCommunityIcons from "@react-native-vector-icons/material-design-icons/static";
 import { FlashList } from '@shopify/flash-list';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ActivityIndicator,
@@ -60,6 +60,7 @@ import { usePlayerLyrics } from '@/hooks/usePlayerLyrics';
 import { playbackSettingsStore } from '@/store/playbackSettingsStore';
 import { moreOptionsStore } from '@/store/moreOptionsStore';
 import { offlineModeStore } from '@/store/offlineModeStore';
+import { getLocalTrackUri } from '@/services/musicCacheService';
 import { playerStore } from '@/store/playerStore';
 import { tabletLayoutStore } from '@/store/tabletLayoutStore';
 
@@ -145,6 +146,14 @@ export function PlayerTabletLandscape({
     error: lyricsError,
     handleRetry: handleRetryLyrics,
   } = usePlayerLyrics(trackId, currentTrack?.artist, currentTrack?.title, playerExpanded);
+  const showInfoOffline = currentTrack ? getLocalTrackUri(currentTrack.id) !== null : false;
+  const showLyricsOffline = lyricsEntry !== undefined;
+
+  useEffect(() => {
+    if (!offlineMode) return;
+    if (rightPanelMode === 'info' && !showInfoOffline) setRightPanelMode('queue');
+    if (rightPanelMode === 'lyrics' && !showLyricsOffline) setRightPanelMode('queue');
+  }, [offlineMode, rightPanelMode, showInfoOffline, showLyricsOffline]);
 
   // Measure the art area so cover art fills available height
   const [artMaxSize, setArtMaxSize] = useState(0);
@@ -560,7 +569,7 @@ export function PlayerTabletLandscape({
                       color={rightPanelMode === 'queue' ? colors.primary : colors.textSecondary}
                     />
                   </Pressable>
-                  {!offlineMode && (
+                  {(!offlineMode || showInfoOffline) && (
                     <Pressable
                       onPress={() => setRightPanelMode('info')}
                       hitSlop={8}
@@ -575,7 +584,7 @@ export function PlayerTabletLandscape({
                       />
                     </Pressable>
                   )}
-                  {!offlineMode && (
+                  {(!offlineMode || showLyricsOffline) && (
                     <Pressable
                       onPress={() => setRightPanelMode('lyrics')}
                       hitSlop={8}

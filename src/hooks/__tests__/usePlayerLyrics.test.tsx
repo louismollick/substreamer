@@ -196,7 +196,7 @@ describe('usePlayerLyrics — retry', () => {
     const { result } = setUp({ trackId: 't1', enabled: false });
 
     act(() => {
-      result.current.handleRetry();
+      result.current.handleRetry?.();
     });
 
     expect(fetchLyrics).toHaveBeenCalledTimes(1);
@@ -208,7 +208,7 @@ describe('usePlayerLyrics — retry', () => {
     expect(fetchLyrics).toHaveBeenCalledTimes(1);
 
     act(() => {
-      result.current.handleRetry();
+      result.current.handleRetry?.();
     });
     expect(fetchLyrics).toHaveBeenCalledTimes(2);
 
@@ -222,7 +222,7 @@ describe('usePlayerLyrics — retry', () => {
     const { result } = setUp({ trackId: null, enabled: true });
 
     act(() => {
-      result.current.handleRetry();
+      result.current.handleRetry?.();
     });
 
     expect(fetchLyrics).not.toHaveBeenCalled();

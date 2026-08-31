@@ -570,6 +570,8 @@
   "downloadedPlaylists": "Downloaded Playlists",
   "downloadPlaylistsOffline": "Download playlists to listen offline",
   "noDownloadedMusic": "No downloaded music",
+  "noDownloadedAlbums": "No downloaded albums",
+  "noDownloadedAlbumsSubtitle": "Download albums to see them here.",
   "noDownloadedMusicHintBefore": "Tap the",
   "noDownloadedMusicHintAfter": "button on an album, playlist, or your favorite songs list to download it for offline listening",
   "viewListeningHistory": "View listening history",

@@ -21,6 +21,7 @@ import {
   downloadedPlaylistSortKey,
   downloadedSongRowToChild,
   downloadedSongSortKey,
+  getDownloadedAlbumProjection,
   getDownloadedArtistProjection,
   listDownloadedArtists,
   partialGate,
@@ -583,6 +584,32 @@ describe('downloaded artist projection', () => {
       ['ar2', 1],
     ]);
     expect(result[0].biography).toBe('Cached bio');
+  });
+});
+
+describe('downloaded album projection', () => {
+  it('returns only songs attached to the downloaded item, in edge order', async () => {
+    seedItem('a1', 'album', 2, ['s2', 's1']);
+    seedAlbumMeta('a1', { artist_id: 'ar1' });
+    seedCachedSong('undownloaded-normalized');
+
+    const result = await getDownloadedAlbumProjection(db(), 'a1');
+
+    expect(result?.album.id).toBe('a1');
+    expect(result?.songs.map((song) => song.id)).toEqual(['s2', 's1']);
+  });
+
+  it('requires both durable album metadata and at least one local track', async () => {
+    seedItem('a1', 'album', 1, []);
+    seedAlbumMeta('a1');
+    expect(await getDownloadedAlbumProjection(db(), 'a1')).toBeNull();
+
+    seedCachedSong('s1');
+    db().runSync(
+      'INSERT INTO cached_item_songs (item_id, position, song_id) VALUES (?, ?, ?)',
+      ['a1', 0, 's1'],
+    );
+    expect(await getDownloadedAlbumProjection(db(), 'a1')).not.toBeNull();
   });
 });
 

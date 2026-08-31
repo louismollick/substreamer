@@ -2,7 +2,7 @@ import Ionicons from "@react-native-vector-icons/ionicons/static";
 import { useRouter } from 'expo-router';
 import { HeaderHeightContext } from "expo-router/react-navigation";
 import i18next from 'i18next';
-import { useCallback, useContext, useMemo, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useTranslation } from 'react-i18next';
 
@@ -22,11 +22,14 @@ import { albumCoverArtById, resolveSongCoverArt, useSongCoverArt } from '../hook
 import { useTheme } from '../hooks/useTheme';
 import { useTransitionComplete } from '../hooks/useTransitionComplete';
 import { playTrack } from '../services/playerService';
+import { fetchDownloadedArtists } from '../services/downloadedArtistService';
+import { getLocalTrackUri } from '../services/musicCacheService';
 import { type Child } from '../services/subsonicService';
 import { completedScrobbleStore } from '../store/completedScrobbleStore';
 import { layoutPreferencesStore } from '../store/layoutPreferencesStore';
 import { offlineModeStore } from '../store/offlineModeStore';
 import { pendingScrobbleStore } from '../store/pendingScrobbleStore';
+import { musicCacheStore } from '../store/musicCacheStore';
 import { fireAndForget } from '../utils/fireAndForget';
 import { getDateTimeFormat } from '../utils/intl';
 import { getArtistInitials, minDelay, timeAgo } from '../utils/stringHelpers';
@@ -146,6 +149,16 @@ export function MyListeningScreen() {
   const { aggregates: periodAggregates, refresh: refreshPeriod } = usePeriodAggregates(period);
   const dateFormat = layoutPreferencesStore((s) => s.dateFormat);
   const offlineMode = offlineModeStore((s) => s.offlineMode);
+  const cacheRevision = musicCacheStore((state) => state.revision);
+  const [downloadedArtistIds, setDownloadedArtistIds] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => {
+    if (!offlineMode) return;
+    let alive = true;
+    void fetchDownloadedArtists().then((rows) => {
+      if (alive) setDownloadedArtistIds(new Set(rows.map((row) => row.artist.id)));
+    });
+    return () => { alive = false; };
+  }, [offlineMode, cacheRevision]);
 
   const analytics = usePlaybackAnalytics(period, periodAggregates, allTimeAggregates, pendingScrobbles);
 
@@ -168,7 +181,7 @@ export function MyListeningScreen() {
   // `onPress`, which collapses to a non-interactive View when omitted.
   const onPlaySong = useCallback(
     (song: Child) => {
-      if (offlineMode) return undefined;
+      if (offlineMode && getLocalTrackUri(song.id) === null) return undefined;
       return () => fireAndForget(playTrack(song, [song]), 'my-listening:playSong');
     },
     [offlineMode],
@@ -176,7 +189,8 @@ export function MyListeningScreen() {
 
   const onOpenAlbum = useCallback(
     (albumId: string | undefined) => {
-      if (offlineMode || !albumId) return undefined;
+      if (!albumId) return undefined;
+      if (offlineMode && !(albumId in musicCacheStore.getState().cachedItems)) return undefined;
       return () => router.push(`/album/${albumId}`);
     },
     [offlineMode, router],
@@ -184,10 +198,11 @@ export function MyListeningScreen() {
 
   const onOpenArtist = useCallback(
     (artistId: string | undefined) => {
-      if (offlineMode || !artistId) return undefined;
+      if (!artistId) return undefined;
+      if (offlineMode && !downloadedArtistIds.has(artistId)) return undefined;
       return () => router.push(`/artist/${artistId}`);
     },
-    [offlineMode, router],
+    [offlineMode, downloadedArtistIds, router],
   );
 
   if (!transitionComplete) {

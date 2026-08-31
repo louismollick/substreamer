@@ -22,12 +22,14 @@ import { useCallback, useEffect, useRef } from 'react';
 import { useAppActive } from './useAppActive';
 import { lyricsStore, type LyricsErrorKind } from '../store/lyricsStore';
 import { type LyricsData } from '../services/subsonicService';
+import { offlineModeStore } from '../store/offlineModeStore';
+import { loadLyrics } from '../store/persistence/lyricsTable';
 
 export interface PlayerLyricsResult {
   entry: LyricsData | undefined;
   loading: boolean;
   error: LyricsErrorKind | null;
-  handleRetry: () => void;
+  handleRetry: (() => void) | undefined;
 }
 
 export function usePlayerLyrics(
@@ -38,6 +40,7 @@ export function usePlayerLyrics(
   enabled: boolean,
 ): PlayerLyricsResult {
   const appActive = useAppActive();
+  const offline = offlineModeStore((state) => state.offlineMode);
   const shouldFetch = enabled && appActive;
 
   const entry = lyricsStore((s) => (trackId ? s.entries[trackId] : undefined));
@@ -57,15 +60,24 @@ export function usePlayerLyrics(
     if (!trackId || entry || loading) return;
     if (fetchAttemptedRef.current === trackId) return;
     fetchAttemptedRef.current = trackId;
+    if (offline) {
+      void loadLyrics(trackId).then((stored) => {
+        if (!stored) return;
+        lyricsStore.setState((state) => ({
+          entries: { ...state.entries, [trackId]: stored },
+        }));
+      });
+      return;
+    }
     lyricsStore.getState().fetchLyrics(
       trackId,
       artist ?? undefined,
       title ?? undefined,
     );
-  }, [shouldFetch, trackId, entry, loading, artist, title]);
+  }, [shouldFetch, trackId, entry, loading, artist, title, offline]);
 
   const handleRetry = useCallback(() => {
-    if (!trackId) return;
+    if (!trackId || offline) return;
     // User-initiated, so never gated. Records the attempt so the effect does not
     // fire a second fetch when this one settles.
     fetchAttemptedRef.current = trackId;
@@ -74,7 +86,7 @@ export function usePlayerLyrics(
       artist ?? undefined,
       title ?? undefined,
     );
-  }, [trackId, artist, title]);
+  }, [trackId, artist, title, offline]);
 
-  return { entry, loading, error, handleRetry };
+  return { entry, loading, error, handleRetry: offline ? undefined : handleRetry };
 }

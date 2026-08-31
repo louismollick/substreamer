@@ -55,6 +55,7 @@ import { useShuffleOverlay } from '@/hooks/useShuffleOverlay';
 import { getPlayerSize } from '@/hooks/playerSize';
 import { useTheme } from '@/hooks/useTheme';
 import { offlineModeStore } from '@/store/offlineModeStore';
+import { getLocalTrackUri } from '@/services/musicCacheService';
 import {
   clearQueue,
   retryPlayback,
@@ -136,6 +137,14 @@ export function PlayerPhonePortrait() {
   /* ---- Tab state ---- */
   const [activeTab, setActiveTab] = useState<PlayerTab>('player');
   const [mountedTabs, setMountedTabs] = useState<Set<PlayerTab>>(() => new Set(['player']));
+
+  const showInfoOffline = currentTrack ? getLocalTrackUri(currentTrack.id) !== null : false;
+  const showLyricsOffline = lyricsEntry !== undefined;
+  useEffect(() => {
+    if (!offlineMode) return;
+    if (activeTab === 'info' && !showInfoOffline) setActiveTab('queue');
+    if (activeTab === 'lyrics' && !showLyricsOffline) setActiveTab('queue');
+  }, [activeTab, offlineMode, showInfoOffline, showLyricsOffline]);
 
 
 
@@ -426,7 +435,14 @@ export function PlayerPhonePortrait() {
 
         {/* Tab bar */}
         <View style={{ paddingBottom: insets.bottom }}>
-          <PlayerTabBar activeTab={activeTab} onSelect={setActiveTab} colors={colors} offlineMode={offlineMode} />
+          <PlayerTabBar
+            activeTab={activeTab}
+            onSelect={setActiveTab}
+            colors={colors}
+            offlineMode={offlineMode}
+            showInfoOffline={showInfoOffline}
+            showLyricsOffline={showLyricsOffline}
+          />
         </View>
 
         {/* Shuffle overlay */}
