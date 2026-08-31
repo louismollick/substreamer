@@ -3,12 +3,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { useTranslation } from 'react-i18next';
 
-import { EmptyState } from '../components/EmptyState';
 import { SegmentControl } from '../components/SegmentControl';
 import { useTheme } from '../hooks/useTheme';
 import { runWhenIdle } from '../utils/runWhenIdle';
 import { filterBarStore } from '../store/filterBarStore';
-import { offlineModeStore } from '../store/offlineModeStore';
 import { searchStore } from '../store/searchStore';
 import {
   layoutPreferencesStore,
@@ -96,7 +94,7 @@ export function LibraryScreen() {
       onToggle: current.toggle,
     });
     store.setDownloadButtonConfig(null);
-    store.setHideDownloaded(activeSegment === 'artists');
+    store.setHideDownloaded(false);
     store.setHideFavorites(activeSegment === 'playlists');
   }, [
     isFocused,
@@ -113,7 +111,6 @@ export function LibraryScreen() {
 
   const downloadedOnly = filterBarStore((s) => s.downloadedOnly);
   const favoritesOnly = filterBarStore((s) => s.favoritesOnly);
-  const offlineMode = offlineModeStore((s) => s.offlineMode);
 
   const segmentHeight = 52;
   const contentInsetTop = headerHeight + segmentHeight;
@@ -132,30 +129,12 @@ export function LibraryScreen() {
               />
             )}
             {activeSegment === 'artists' && (
-              // Artists cannot be downloaded, so the Downloaded filter hides them
-              // entirely; offline mode enforces that filter. The COPY still keys off
-              // `offlineMode` because the implication runs one way (offline ⇒
-              // downloaded-only, never the reverse) — telling an online user "not
-              // available offline" would be false.
-              downloadedOnly ? (
-                <View style={[styles.emptyContainer, { paddingTop: contentInsetTop }]}>
-                  <EmptyState
-                    icon={offlineMode ? 'cloud-offline-outline' : 'cloud-download-outline'}
-                    title={offlineMode ? t('notAvailableOffline') : t('artistsNotDownloadable')}
-                    subtitle={
-                      offlineMode
-                        ? t('artistsNotAvailableOffline')
-                        : t('artistsNotDownloadableHint')
-                    }
-                  />
-                </View>
-              ) : (
-                <ArtistListScreen
-                  layout={artistLayout}
-                  favoritesOnly={favoritesOnly}
-                  contentInsetTop={contentInsetTop}
-                />
-              )
+              <ArtistListScreen
+                layout={artistLayout}
+                favoritesOnly={favoritesOnly}
+                downloadedOnly={downloadedOnly}
+                contentInsetTop={contentInsetTop}
+              />
             )}
             {activeSegment === 'playlists' && (
               <PlaylistListScreen

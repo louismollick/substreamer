@@ -51,6 +51,7 @@ import { layoutPreferencesStore } from '../store/layoutPreferencesStore';
 import { moreOptionsStore } from '../store/moreOptionsStore';
 import { offlineModeStore } from '../store/offlineModeStore';
 import { playbackSettingsStore, type ArtistPlayMode } from '../store/playbackSettingsStore';
+import { fetchDownloadedArtist } from '../services/downloadedArtistService';
 
 import {
   type AlbumID3,
@@ -114,6 +115,22 @@ export function ArtistDetailScreen() {
   // re-reads without a store subscription.
   useEffect(() => {
     if (!id) return;
+    if (offlineMode) {
+      let alive = true;
+      fetchDownloadedArtist(id)
+        .then((projection) => {
+          if (!alive || !projection) return;
+          setArtist({ ...projection.artist, album: projection.albums } as ArtistWithAlbumsID3);
+          setTopSongs(projection.songs);
+          setBiography(projection.biography);
+          setSimilarArtists([]);
+          setHeroFallbackUrl(undefined);
+          setTopSongsSettled(true);
+          setHasCache(true);
+        })
+        .finally(() => { if (alive) setCacheChecked(true); });
+      return () => { alive = false; };
+    }
     const db = getDb();
     if (!db) {
       setCacheChecked(true);
@@ -136,7 +153,7 @@ export function ArtistDetailScreen() {
       alive = false;
       unsub();
     };
-  }, [id]);
+  }, [id, offlineMode]);
 
   // The other three parts load independently — `useDetailFetch` only calls `load` on a
   // base MISS, so routing them through it would leave them unfetched for every artist we
@@ -144,6 +161,7 @@ export function ArtistDetailScreen() {
   // `error`, which would blank a screen that has already rendered its albums.
   useEffect(() => {
     if (!id) return;
+    if (offlineMode) return;
     let alive = true;
     const force = refreshNonce > 0;
     void fetchArtistInfo(id, { force })
@@ -164,7 +182,7 @@ export function ArtistDetailScreen() {
       .catch(() => { /* section stays absent */ })
       .finally(() => { if (alive) setTopSongsSettled(true); });
     return () => { alive = false; };
-  }, [id, refreshNonce]);
+  }, [id, refreshNonce, offlineMode]);
 
   /* ---- Header right: more options button ---- */
   useEffect(() => {
@@ -195,6 +213,15 @@ export function ArtistDetailScreen() {
 
   /* ---- Data fetching ---- */
   const load = useCallback(async (artistId: string, isRefresh: boolean) => {
+    if (offlineMode) {
+      const projection = await fetchDownloadedArtist(artistId);
+      if (!projection) return t('artistNotFound');
+      setArtist({ ...projection.artist, album: projection.albums } as ArtistWithAlbumsID3);
+      setTopSongs(projection.songs);
+      setBiography(projection.biography);
+      setHasCache(true);
+      return null;
+    }
     // Base only. The other three parts have their own effect; a pull bumps the nonce so
     // they re-run forced. `force` here is the local-row bypass — it deliberately does NOT
     // re-resolve the bio, which would re-hammer MusicBrainz on every pull.
@@ -213,7 +240,7 @@ export function ArtistDetailScreen() {
       refreshCoverArt(base.artist.id, 'artist-detail-pull').catch(() => { /* non-critical */ });
     }
     return null;
-  }, [t]);
+  }, [offlineMode, t]);
 
   const { loading, refreshing, error, onRefresh } = useDetailFetch({
     id,
@@ -311,12 +338,14 @@ export function ArtistDetailScreen() {
           </View>
         </View>
         <View style={styles.heroButtons}>
-          <PillToggle
-            options={playModeOptions}
-            selected={artistPlayMode}
-            onSelect={handlePlayModeChange}
-            colors={colors}
-          />
+          {!offlineMode && (
+            <PillToggle
+              options={playModeOptions}
+              selected={artistPlayMode}
+              onSelect={handlePlayModeChange}
+              colors={colors}
+            />
+          )}
           <View style={styles.heroPlayButtons}>
             {/* Top songs arrive after the base, so an unarrived list must not read as an
                 empty one — that would silently fall through to "more by artist" and play
@@ -325,6 +354,11 @@ export function ArtistDetailScreen() {
             <ShufflePlayButton
               disabled={artistPlayMode === 'topSongs' && !topSongsSettled}
               onPress={() => {
+                if (offlineMode) {
+                  const shuffled = shuffleArray(topSongs);
+                  if (shuffled.length > 0) playTrack(shuffled[0], shuffled);
+                  return;
+                }
                 if (artistPlayMode === 'allSongs') {
                   playAllByArtist(artist.id, artist.name, true);
                 } else if (topSongs.length > 1) {
@@ -338,6 +372,10 @@ export function ArtistDetailScreen() {
             <PlayAllButton
               disabled={artistPlayMode === 'topSongs' && !topSongsSettled}
               onPress={() => {
+                if (offlineMode) {
+                  if (topSongs.length > 0) playTrack(topSongs[0], topSongs);
+                  return;
+                }
                 if (artistPlayMode === 'allSongs') {
                   playAllByArtist(artist.id, artist.name, false);
                 } else if (topSongs.length > 0) {
@@ -391,7 +429,10 @@ export function ArtistDetailScreen() {
             {/* ---- Top Songs ---- */}
             {topSongs.length > 0 && (
               <View style={styles.section}>
-                <SectionTitle title={t('topSongs')} color={colors.label} />
+                <SectionTitle
+                  title={offlineMode ? t('downloadedSongs') : t('topSongs')}
+                  color={colors.label}
+                />
                 {/* Uncapped: the fetch is already bounded by the list-length setting, so what
                     renders matches what Play/Shuffle queue from. */}
                 <FlashList
@@ -479,6 +520,7 @@ export function ArtistDetailScreen() {
     artistPlayMode,
     playModeOptions,
     handlePlayModeChange,
+    offlineMode,
     t,
   ]);
 

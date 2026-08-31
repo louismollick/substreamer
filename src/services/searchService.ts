@@ -18,6 +18,7 @@ import { songListRowToChild } from '../db/repository/songs';
 import { listPlaylistsByIds, playlistListRowToPlaylist } from '../db/repository/playlists';
 import { normalize, tokenize, metaphoneKey, scoreField, scoreCandidate, REJECT, CONFIDENT } from './searchMatch';
 import { getGenreNames } from '../utils/genreHelpers';
+import { fetchDownloadedArtists } from './downloadedArtistService';
 
 export interface SearchResults {
   albums: AlbumID3[];
@@ -110,11 +111,19 @@ export async function performOfflineSearch(
     }
   }
   scored.sort((a, b) => b.s - a.s);
+  const artists = (await fetchDownloadedArtists())
+    .map((projection) => ({
+      artist: projection.artist,
+      score: scoreField(query, projection.artist.name).score,
+    }))
+    .filter((row) => row.score >= CONFIDENT)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, ARTIST_RESULT_CAP)
+    .map((row) => row.artist);
 
   return {
     albums: [...albums, ...playlistAlbums].slice(0, ALBUM_RESULT_CAP),
-    // No artists offline — a meaningful artist view needs online calls.
-    artists: [],
+    artists,
     songs: scored.slice(0, SONG_RESULT_CAP).map((x) => x.c),
   };
 }

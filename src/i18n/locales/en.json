@@ -57,6 +57,7 @@
   "persistenceDegradedLoginError": "Storage unavailable on this device. Login can't be saved — try restarting the app.",
   "offline": "Offline",
   "downloaded": "Downloaded",
+  "downloadedSongs": "Downloaded songs",
   "searchPlaceholder": "Search...",
   "offlineSearchPlaceholder": "Offline Search...",
   "startingPlayback": "Starting playback…",
