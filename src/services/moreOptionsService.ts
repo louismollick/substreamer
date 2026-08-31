@@ -7,8 +7,9 @@
 
 import i18n from '../i18n/i18n';
 import { fetchArtistBase, fetchArtistTopSongs } from './detailFetchService';
+import { fetchDownloadedArtist } from './downloadedArtistService';
 import { favoritesStore } from '../store/favoritesStore';
-import { getSongEnvelope, musicCacheStore } from '../store/musicCacheStore';
+import { musicCacheStore } from '../store/musicCacheStore';
 import { offlineModeStore } from '../store/offlineModeStore';
 import { layoutPreferencesStore } from '../store/layoutPreferencesStore';
 import { refreshPlaylistLibrary } from './normalizedLibrarySync';
@@ -277,17 +278,7 @@ async function fetchAllArtistSongs(
   const offline = offlineModeStore.getState().offlineMode;
 
   if (offline) {
-    const state = musicCacheStore.getState();
-    const items = Object.values(state.cachedItems);
-    // Match on the row (cheap) and build the full `Child` only for the hits.
-    // `album`/`coverArt` keep coming from the containing item, as they always have.
-    const songs = items.flatMap((item) =>
-      item.songIds.flatMap((id) => {
-        if (state.cachedSongs[id]?.artist !== artistName) return [];
-        const envelope = getSongEnvelope(id);
-        return envelope ? [{ ...envelope, album: item.name, coverArt: item.coverArtId }] : [];
-      }),
-    );
+    const songs = (await fetchDownloadedArtist(artistId))?.songs ?? [];
 
     if (songs.length === 0) {
       processingOverlayStore.getState().showError(i18n.t('noOfflineSongsByArtist', { artist: artistName }));

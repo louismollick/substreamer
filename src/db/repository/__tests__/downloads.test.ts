@@ -7,6 +7,7 @@ import {
 import { getSortKey, letterOfSortKey } from '../../../utils/sortHelpers';
 import { ensureNormalizedSchema } from '../../createNormalizedTables';
 import { albumListRowToAlbumID3, listAlbums, upsertAlbums } from '../albums';
+import { upsertArtists } from '../artists';
 import { listAllStarredAlbums, markStarredAlbums } from '../favorites';
 import {
   downloadedClause,
@@ -20,6 +21,8 @@ import {
   downloadedPlaylistSortKey,
   downloadedSongRowToChild,
   downloadedSongSortKey,
+  getDownloadedArtistProjection,
+  listDownloadedArtists,
   partialGate,
 } from '../downloads';
 import { playlistListRowToPlaylist } from '../playlists';
@@ -33,6 +36,8 @@ const TABLES = [
   'cached_playlists',
   'cached_items',
   'cached_songs',
+  'artist_bio',
+  'artists',
   'albums',
 ];
 
@@ -500,6 +505,84 @@ describe('listDownloadedSongs', () => {
 
   it('is empty when nothing is downloaded', async () => {
     expect(await listDownloadedSongs(db())).toEqual([]);
+  });
+});
+
+describe('downloaded artist projection', () => {
+  const seedArtistSong = async (
+    id: string,
+    artistId: string,
+    albumId: string,
+    title = id,
+  ): Promise<void> => {
+    await upsertCachedSong({
+      id,
+      title,
+      artist: 'Shared name',
+      artistId,
+      album: `Album ${albumId}`,
+      albumId: `dir-${albumId}`,
+      srcAlbumId: albumId,
+      bytes: 1,
+      duration: 1,
+      suffix: 'mp3',
+      srcSuffix: 'flac',
+      formatCapturedAt: 0,
+      downloadedAt: 0,
+    });
+  };
+
+  it('returns only downloaded songs for the exact primary artist id', async () => {
+    await upsertArtists(db(), [
+      { id: 'ar1', name: 'Shared name', albumCount: 2 },
+      { id: 'ar2', name: 'Shared name', albumCount: 1 },
+    ]);
+    await seedArtistSong('s1', 'ar1', 'a1');
+    await seedArtistSong('s2', 'ar1', 'a2');
+    await seedArtistSong('featured', 'ar2', 'a1');
+    seedItem('a1', 'album', 2, []);
+    seedAlbumMeta('a1', { artist_id: 'ar1' });
+    seedItem('a2', 'album', 2, []);
+    seedAlbumMeta('a2', { artist_id: 'ar1' });
+
+    const result = await getDownloadedArtistProjection(db(), 'ar1');
+    expect(result?.songs.map((song) => song.id)).toEqual(['s1', 's2']);
+    expect(result?.songs[0]).toMatchObject({ artistId: 'ar1', albumId: 'a1', suffix: 'flac' });
+    expect(result?.albums.map((album) => [album.id, album.downloadedSongCount])).toEqual([
+      ['a1', 1],
+      ['a2', 1],
+    ]);
+    expect(result).toMatchObject({ songCount: 2, albumCount: 2 });
+  });
+
+  it('requires a persisted artist row and drops the projection after download deletion', async () => {
+    await seedArtistSong('s1', 'ar1', 'a1');
+    expect(await getDownloadedArtistProjection(db(), 'ar1')).toBeNull();
+    await upsertArtists(db(), [{ id: 'ar1', name: 'Artist', albumCount: 1 }]);
+    expect(await getDownloadedArtistProjection(db(), 'ar1')).not.toBeNull();
+    db().runSync('DELETE FROM cached_songs WHERE song_id = ?', ['s1']);
+    expect(await getDownloadedArtistProjection(db(), 'ar1')).toBeNull();
+  });
+
+  it('lists each represented artist once with local counts and a cached biography', async () => {
+    await upsertArtists(db(), [
+      { id: 'ar1', name: 'A', albumCount: 20 },
+      { id: 'ar2', name: 'B', albumCount: 30 },
+    ]);
+    await seedArtistSong('s1', 'ar1', 'a1');
+    await seedArtistSong('s2', 'ar1', 'a1');
+    await seedArtistSong('s3', 'ar2', 'a2');
+    db().runSync(
+      'INSERT INTO artist_bio (artist_id, biography) VALUES (?, ?)',
+      ['ar1', 'Cached bio'],
+    );
+
+    const result = await listDownloadedArtists(db());
+    expect(result.map((row) => [row.artist.id, row.songCount])).toEqual([
+      ['ar1', 2],
+      ['ar2', 1],
+    ]);
+    expect(result[0].biography).toBe('Cached bio');
   });
 });
 

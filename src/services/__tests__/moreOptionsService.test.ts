@@ -45,6 +45,21 @@ jest.mock('../../store/persistence/db', () => ({
   getDb: jest.fn(() => ({})),
 }));
 
+jest.mock('../downloadedArtistService', () => ({
+  fetchDownloadedArtist: async (artistId: string) => {
+    const { musicCacheStore: store, getSongEnvelope } = require('../../store/musicCacheStore');
+    const state = store.getState();
+    const songs = Object.values(state.cachedItems).flatMap((item: any) =>
+      item.songIds.flatMap((id: string) => {
+        if (state.cachedSongs[id]?.artistId !== artistId) return [];
+        const song = getSongEnvelope(id);
+        return song ? [{ ...song, album: item.name, coverArt: item.coverArtId }] : [];
+      }),
+    );
+    return songs.length ? { songs } : null;
+  },
+}));
+
 // The normalized detail reads derive from the (mocked) detail stores so the existing
 // cached-data test setups exercise the same code path without per-test churn.
 jest.mock('../../db/repository/details', () => ({
@@ -171,7 +186,18 @@ const mockPlayTrack = playTrack as jest.Mock;
 const seedCache = (
   cachedItems: Record<string, unknown> = {},
   cachedSongs: Record<string, unknown> = {},
-) => musicCacheStore.setState({ cachedItems, cachedSongs } as any);
+) => musicCacheStore.setState({
+  cachedItems,
+  cachedSongs: Object.fromEntries(
+    Object.entries(cachedSongs).map(([id, row]: [string, any]) => [
+      id,
+      {
+        ...row,
+        artistId: row.artistId ?? (row.artist === 'Other' ? 'other' : 'ar1'),
+      },
+    ]),
+  ),
+} as any);
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -741,7 +767,7 @@ describe('playMoreByArtist', () => {
       (offlineModeStore.getState as jest.Mock).mockReturnValue({ offlineMode: true });
     });
 
-    it('plays songs from cached items matching artist name', async () => {
+    it('plays songs from cached items matching primary artist id', async () => {
       seedCache(
         {
           alb1: { itemId: 'alb1', name: 'Album One', coverArtId: 'cov1', songIds: ['s1', 's2', 's4', 's5'] },
