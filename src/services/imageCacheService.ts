@@ -1255,6 +1255,11 @@ export function ensureCached(coverArtId: string): Promise<void> {
   return cacheAllSizes(coverArtId);
 }
 
+/** Whether the durable 600px source file row exists for offline rendering. */
+export function hasCachedCoverArt(coverArtId: string): Promise<boolean> {
+  return dbHasCachedImage(coverArtId, SOURCE_SIZE);
+}
+
 /**
  * The component reports that the cached file at the requested size
  * failed to decode. The service deletes the variant (file + DB row +
