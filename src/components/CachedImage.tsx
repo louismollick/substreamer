@@ -139,6 +139,10 @@ export const CachedImage = memo(function CachedImage({
   // variant OR a failedRemoteIds flip) and by onError, to re-run the async
   // cover-art resolution below.
   const [resolveToken, bumpResolve] = useReducer((x: number) => x + 1, 0);
+  // Native reload token. Only image decode/load errors bump this; ordinary
+  // cache updates may resolve to the same URI and must not clear a visible image.
+  const [reloadToken, bumpReload] = useReducer((x: number) => x + 1, 0);
+  const [failedFallbackKey, setFailedFallbackKey] = useState<string | undefined>();
 
   // Resolved display target, filled asynchronously via the shared resolver
   // (`resolveDisplayImage` — the single source of truth also used by the CarPlay
@@ -201,7 +205,8 @@ export const CachedImage = memo(function CachedImage({
   // offline + the remote-failed set); fall back to the bundled placeholder URI.
   let renderUri: string | undefined = resolved?.uri;
   const isRemote = resolved?.isRemote ?? false;
-  if (!renderUri && fallbackUri) renderUri = fallbackUri;
+  const fallbackKey = fallbackUri ? `${coverArtId ?? ''}:${fallbackUri}` : undefined;
+  if (!renderUri && fallbackUri && fallbackKey !== failedFallbackKey) renderUri = fallbackUri;
 
   // Subscribe — fires on file landed OR remote-failed flag flipped.
   useEffect(() => {
@@ -212,18 +217,23 @@ export const CachedImage = memo(function CachedImage({
     });
   }, [coverArtId]);
 
-  // Error handler — three branches, no retry tower.
+  // Error handler.
   const onError = useCallback(() => {
+    if (!resolved) {
+      setFailedFallbackKey(fallbackKey);
+      return;
+    }
     if (!coverArtId) return;
-    const hadCached = resolved != null && !resolved.isRemote; // was showing a file:// cache hit
+    const hadCached = !resolved.isRemote; // was showing a file:// cache hit
     if (hadCached) {
       localErroredRef.current = true;
       void reportBadCache(coverArtId, size);
     } else if (resolved?.isRemote) {
       void reportBadRemote(coverArtId);
     }
+    bumpReload();
     bumpResolve();
-  }, [coverArtId, size, resolved]);
+  }, [coverArtId, size, resolved, fallbackKey]);
 
   // Layout measurement for placeholder logo sizing.
   const [layoutSize, setLayoutSize] = useState<{ w: number; h: number } | null>(null);
@@ -284,10 +294,10 @@ export const CachedImage = memo(function CachedImage({
           // PipelineDraweeController recycle/re-attach crashes. Both fetch via
           // our trusted OkHttp / URLSession, so self-signed servers still load.
           transition={0}
-          // id+size for FlashList recycling; resolveToken forces a reload when
-          // reportBadCache re-downloads the same file:// path (expo-image has
-          // no per-key memory eviction).
-          recyclingKey={`${rawCoverArtId}:${size}:${resolveToken}`}
+          // Include the active fallback so a changed fallback clears recycled
+          // content. Ignore an unused fallback so metadata updates do not clear
+          // a valid primary image. reloadToken handles same-path recovery.
+          recyclingKey={`${rawCoverArtId}:${size}:${resolved ? '' : fallbackUri ?? ''}:${reloadToken}`}
           // We own resize (pre-sized variants) + disk cache (imageCacheService),
           // so expo-image retains nothing.
           cachePolicy="none"
