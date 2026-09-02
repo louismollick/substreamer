@@ -294,10 +294,10 @@ export const CachedImage = memo(function CachedImage({
           // PipelineDraweeController recycle/re-attach crashes. Both fetch via
           // our trusted OkHttp / URLSession, so self-signed servers still load.
           transition={0}
-          // id+size for FlashList recycling; reloadToken forces a reload when
-          // reportBadCache re-downloads the same file:// path (expo-image has
-          // no per-key memory eviction).
-          recyclingKey={`${rawCoverArtId}:${size}:${reloadToken}`}
+          // Include the active fallback so a changed fallback clears recycled
+          // content. Ignore an unused fallback so metadata updates do not clear
+          // a valid primary image. reloadToken handles same-path recovery.
+          recyclingKey={`${rawCoverArtId}:${size}:${resolved ? '' : fallbackUri ?? ''}:${reloadToken}`}
           // We own resize (pre-sized variants) + disk cache (imageCacheService),
           // so expo-image retains nothing.
           cachePolicy="none"

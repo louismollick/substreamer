@@ -276,6 +276,38 @@ describe('PLACEHOLDER state', () => {
     await flush();
     expect(findImage(tree)?.uri).toBe('https://ext.example/img.jpg');
   });
+
+  it('changes native image identity when the fallbackUri changes', async () => {
+    const tree = render(
+      <CachedImage coverArtId={undefined} size={150} fallbackUri="https://ext.example/first.jpg" />,
+    );
+    await flush();
+    const first = findImage(tree);
+
+    tree.rerender(
+      <CachedImage coverArtId={undefined} size={150} fallbackUri="https://ext.example/second.jpg" />,
+    );
+
+    expect(findImage(tree)).toEqual({
+      uri: 'https://ext.example/second.jpg',
+      recyclingKey: expect.any(String),
+    });
+    expect(findImage(tree)?.recyclingKey).not.toBe(first?.recyclingKey);
+  });
+
+  it('keeps native image identity stable when an unused fallbackUri changes', async () => {
+    const tree = render(
+      <CachedImage coverArtId="abc" size={150} fallbackUri="https://ext.example/first.jpg" />,
+    );
+    await flush();
+    const first = findImage(tree);
+
+    tree.rerender(
+      <CachedImage coverArtId="abc" size={150} fallbackUri="https://ext.example/second.jpg" />,
+    );
+
+    expect(findImage(tree)).toEqual(first);
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -347,6 +379,7 @@ describe('decode errors', () => {
     await flush();
 
     const img = tree.UNSAFE_queryAllByType(RNImage)[0];
+    const failedKey = img.props.recyclingKey;
     await act(async () => {
       img.props.onError();
       await Promise.resolve();
@@ -365,6 +398,19 @@ describe('decode errors', () => {
       />,
     );
     expect(findImage(tree)).toBeNull();
+
+    tree.rerender(
+      <CachedImage
+        coverArtId="abc"
+        size={150}
+        fallbackUri="https://ext.example/replacement.jpg"
+      />,
+    );
+    expect(findImage(tree)).toEqual({
+      uri: 'https://ext.example/replacement.jpg',
+      recyclingKey: expect.any(String),
+    });
+    expect(findImage(tree)?.recyclingKey).not.toBe(failedKey);
   });
 
   it('calls reportBadCache when a local URI fails to load, then falls through to REMOTE', async () => {
@@ -397,6 +443,7 @@ describe('decode errors', () => {
     const tree = render(<CachedImage coverArtId="abc" size={150} />);
     await flush();
     const img = tree.UNSAFE_queryAllByType(RNImage)[0];
+    const recyclingKeyBeforeError = img.props.recyclingKey;
     await act(async () => {
       img.props.onError();
       await Promise.resolve();
@@ -404,6 +451,7 @@ describe('decode errors', () => {
     });
     expect(mockReportBadRemote).toHaveBeenCalledWith('abc');
     expect(mockReportBadCache).not.toHaveBeenCalled();
+    expect(findImage(tree)?.recyclingKey).not.toBe(recyclingKeyBeforeError);
   });
 
   it('clears the local-error flag when the cache-update fires', async () => {
