@@ -171,6 +171,11 @@ jest.mock('../connectivityService', () => ({
   awaitFirstPing: () => mockAwaitFirstPing(),
 }));
 
+const mockDownloadedArtistCoverArtIds = jest.fn(async () => new Set<string>());
+jest.mock('../../db/repository/downloads', () => ({
+  listDownloadedArtistCoverArtIds: () => mockDownloadedArtistCoverArtIds(),
+}));
+
 // `triggerCoverArtRecache` lazy-requires `hydrateCachedItems` AND
 // `hydrateCachedSongs` to read the downloaded album/playlist set plus
 // per-song cover art (needed for songs inside downloaded playlists
@@ -413,6 +418,7 @@ beforeEach(() => {
   mockReset.mockClear();
   mockGetLastReconcileMs.mockReset();
   mockGetLastReconcileMs.mockReturnValue(undefined);
+  mockDownloadedArtistCoverArtIds.mockResolvedValue(new Set());
   mockMarkReconcileRan.mockClear();
   // mockReset (not mockClear) so any unused mockResolvedValueOnce queue
   // from a previous test that early-returned (e.g. offline-gated
@@ -1580,6 +1586,22 @@ describe('downloadSourceImage — connectivity-gated purge', () => {
 
     expect(mockDeleteCachedImagesForCoverArt).toHaveBeenCalledWith('dead-album');
     expect(mockDbRows.has(mockDbKey('dead-album', 50))).toBe(false);
+  });
+
+  it('does not purge downloaded artist artwork when the server returns 404', async () => {
+    mockDownloadedArtistCoverArtIds.mockResolvedValue(new Set(['artist-cover']));
+    seedDbRow({ coverArtId: 'artist-cover', size: 50 });
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      headers: { get: () => 'image/jpeg' },
+      arrayBuffer: async () => new ArrayBuffer(0),
+    });
+
+    await ensureCached('artist-cover');
+
+    expect(mockDeleteCachedImagesForCoverArt).not.toHaveBeenCalledWith('artist-cover');
+    expect(mockDbRows.has(mockDbKey('artist-cover', 50))).toBe(true);
   });
 
   it('purges 404 even when connectivity store says server is unreachable', async () => {

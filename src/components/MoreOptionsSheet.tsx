@@ -1,7 +1,7 @@
 import Ionicons from "@react-native-vector-icons/ionicons/static";
 import MaterialCommunityIcons from "@react-native-vector-icons/material-design-icons/static";
 import { usePathname, useRouter } from 'expo-router';
-import { useCallback, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -71,6 +71,7 @@ import { bumpDetailChanged } from '../db/detailNotifier';
 import { runWithOverlay } from '../store/processingOverlayStore';
 import { canUserShare, supports } from '../services/serverCapabilityService';
 import { setRatingStore } from '../store/setRatingStore';
+import { hasDownloadedArtist } from '../services/downloadedArtistService';
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -310,6 +311,23 @@ export function MoreOptionsSheet() {
   const [detailsVisible, setDetailsVisible] = useState(false);
   const [detailsAlbum, setDetailsAlbum] = useState<AlbumID3 | null>(null);
   const [detailsTrack, setDetailsTrack] = useState<Child | null>(null);
+  const [hasOfflineArtist, setHasOfflineArtist] = useState(false);
+  const offlineMode = offlineModeStore((s) => s.offlineMode);
+
+  useEffect(() => {
+    const artistId = entity?.type === 'song' || entity?.type === 'album'
+      ? entity.item.artistId
+      : undefined;
+    if (!artistId || !offlineMode) {
+      setHasOfflineArtist(false);
+      return;
+    }
+    let alive = true;
+    void hasDownloadedArtist(artistId).then((present) => {
+      if (alive) setHasOfflineArtist(present);
+    });
+    return () => { alive = false; };
+  }, [entity, offlineMode]);
 
   const handleClose = useCallback(() => {
     hide();
@@ -643,7 +661,7 @@ export function MoreOptionsSheet() {
   const showRating = !offline && isRatable(entity) && (
     entity.type === 'song' || supports('albumArtistRating')
   );
-  const showArtistLink = !offline && hasArtistLink(entity);
+  const showArtistLink = hasArtistLink(entity) && (!offline || hasOfflineArtist);
   const showAlbumLink = hasAlbumLink(entity) &&
     (!offline || (entity.type === 'song' && entity.item.albumId != null &&
       entity.item.albumId in musicCacheStore.getState().cachedItems));

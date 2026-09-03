@@ -35,46 +35,23 @@ beforeEach(() => {
   offlineModeStore.setState({ offlineMode: false });
 });
 
-/**
- * Artists cannot be downloaded, so the DOWNLOADED filter — not offline mode — is what
- * hides the Artists segment. Offline mode merely enforces that filter
- * (`offlineModeStore` sets it and `FilterBar` locks it), which is why offline already
- * behaved this way.
- *
- * The implication runs ONE WAY: offline ⇒ downloaded-only, never the reverse. So the
- * copy still keys off `offlineMode` — telling a user who is online with just the
- * Downloaded chip on that artists are "not available offline" would be false.
- */
 describe('LibraryScreen — the Artists segment under the Downloaded filter', () => {
   it('renders the artist list when no filter is on', async () => {
     const r = showArtists();
     await waitFor(() => expect(r.queryByTestId('artist-list')).not.toBeNull());
   });
 
-  it('hides the artist list when the Downloaded filter is on, while ONLINE', async () => {
+  it('renders the downloaded artist list while online', async () => {
     filterBarStore.setState({ downloadedOnly: true });
     const r = showArtists();
-    await waitFor(() => expect(r.queryByText("Artists can't be downloaded")).not.toBeNull());
-    expect(r.queryByTestId('artist-list')).toBeNull();
+    await waitFor(() => expect(r.queryByTestId('artist-list')).not.toBeNull());
   });
 
-  it('explains it as a download limit, NOT as being offline, when online', async () => {
-    filterBarStore.setState({ downloadedOnly: true });
-    const r = showArtists();
-    await waitFor(() => expect(r.queryByText("Artists can't be downloaded")).not.toBeNull());
-    expect(r.getByText('Turn off the Downloaded filter to browse artists')).toBeTruthy();
-    // The regression this guards: reusing the offline copy for an online user.
-    expect(r.queryByText('Not available offline')).toBeNull();
-    expect(r.queryByText('Artists are not available in offline mode')).toBeNull();
-  });
-
-  it('keeps the OFFLINE copy when actually offline — unchanged behaviour', async () => {
+  it('renders the downloaded artist list offline', async () => {
     offlineModeStore.setState({ offlineMode: true });
-    filterBarStore.setState({ downloadedOnly: true }); // offline enforces this
+    filterBarStore.setState({ downloadedOnly: true });
     const r = showArtists();
-    await waitFor(() => expect(r.queryByText('Not available offline')).not.toBeNull());
-    expect(r.getByText('Artists are not available in offline mode')).toBeTruthy();
-    expect(r.queryByTestId('artist-list')).toBeNull();
+    await waitFor(() => expect(r.queryByTestId('artist-list')).not.toBeNull());
   });
 
   it('still shows the artist list with only the Favourites filter on', async () => {

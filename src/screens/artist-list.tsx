@@ -25,8 +25,12 @@ import { refreshArtistLibrary } from '../services/normalizedLibrarySync';
 import { syncStatusStore } from '../store/syncStatusStore';
 import { favoritesStore } from '../store/favoritesStore';
 import { type ArtistID3 } from '../services/subsonicService';
+import { fetchDownloadedArtists } from '../services/downloadedArtistService';
+import { musicCacheStore } from '../store/musicCacheStore';
 
 const PAGE = 120;
+const artistIdentity = (artist: ArtistID3): ArtistID3 => artist;
+const downloadedArtistSortKey = (artist: ArtistID3): string => artist.name;
 /** Alphabet-scroller letters — all active in keyset mode (the loaded window can't
  *  reveal which letters exist; a tap on an empty letter seeks to the next one). */
 const ALL_LETTERS = new Set<string>([
@@ -317,18 +321,62 @@ function FilteredArtistList({
   );
 }
 
+function DownloadedArtistList({
+  layout,
+  favoritesOnly,
+  contentInsetTop,
+}: {
+  layout: ArtistLayout;
+  favoritesOnly: boolean;
+  contentInsetTop: number;
+}) {
+  const revision = musicCacheStore((state) => state.revision);
+  const favoriteIds = favoritesStore((state) => state.artistIds);
+  const [artists, setArtists] = useState<ArtistID3[]>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    void fetchDownloadedArtists().then((rows) => {
+      if (!alive) return;
+      const next = rows.map((row) => ({ ...row.artist, albumCount: row.albumCount }));
+      setArtists(favoritesOnly ? next.filter((artist) => favoriteIds.has(artist.id)) : next);
+      setLoading(false);
+    });
+    return () => { alive = false; };
+  }, [revision, favoritesOnly, favoriteIds]);
+  return (
+    <ArtistListView
+      items={artists}
+      toArtist={artistIdentity}
+      layout={layout}
+      loading={loading}
+      contentInsetTop={contentInsetTop}
+      showAlphabetScroller
+      sortKeyOf={downloadedArtistSortKey}
+    />
+  );
+}
+
 export function ArtistListScreen({
   layout = 'list',
   favoritesOnly = false,
+  downloadedOnly = false,
   contentInsetTop = 0,
 }: {
   layout?: ArtistLayout;
   favoritesOnly?: boolean;
+  downloadedOnly?: boolean;
   contentInsetTop?: number;
 }) {
   return (
     <View style={styles.container}>
-      {favoritesOnly ? (
+      {downloadedOnly ? (
+        <DownloadedArtistList
+          layout={layout}
+          favoritesOnly={favoritesOnly}
+          contentInsetTop={contentInsetTop}
+        />
+      ) : favoritesOnly ? (
         <FilteredArtistList
           layout={layout}
           favoritesOnly={favoritesOnly}

@@ -15,6 +15,8 @@ interface PlayerTabBarProps {
   onSelect: (tab: PlayerTab) => void;
   colors: ThemeColors;
   offlineMode?: boolean;
+  showInfoOffline?: boolean;
+  showLyricsOffline?: boolean;
 }
 
 export const PlayerTabBar = memo(function PlayerTabBar({
@@ -22,6 +24,8 @@ export const PlayerTabBar = memo(function PlayerTabBar({
   onSelect,
   colors,
   offlineMode,
+  showInfoOffline = false,
+  showLyricsOffline = false,
 }: PlayerTabBarProps) {
   const { t } = useTranslation();
   const handlePlayer = useCallback(() => onSelect('player'), [onSelect]);
@@ -62,7 +66,7 @@ export const PlayerTabBar = memo(function PlayerTabBar({
         />
       </Pressable>
 
-      {!offlineMode && (
+      {(!offlineMode || showInfoOffline) && (
         <Pressable
           onPress={handleInfo}
           accessibilityRole="tab"
@@ -78,7 +82,7 @@ export const PlayerTabBar = memo(function PlayerTabBar({
         </Pressable>
       )}
 
-      {!offlineMode && (
+      {(!offlineMode || showLyricsOffline) && (
         <Pressable
           onPress={handleLyrics}
           accessibilityRole="tab"

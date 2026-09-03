@@ -77,6 +77,7 @@ import {
 import { coverArtForAlbum, coverArtForPlaylist } from '../utils/coverArtId';
 import { runPool } from '../utils/promisePool';
 import { albumCoverArtById, resolveSongCoverArt } from '../hooks/useSongCoverArt';
+import { ensureDownloadedArtistMetadata } from './downloadedArtistMetadataService';
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -953,6 +954,13 @@ export async function enqueueSongDownload(song: Child): Promise<void> {
 
   await ensureCoverArtAuth();
 
+  try {
+    await ensureDownloadedArtistMetadata([song]);
+  } catch (error) {
+    processingOverlayStore.getState().showError(errMessage(error));
+    return;
+  }
+
   // Metadata-before-binary: ensure the song's PARENT ALBUM detail + the song's
   // cover art are cached up front, so the album this song belongs to is fully
   // available offline even if the binary is interrupted. Only fetch when the
@@ -1242,6 +1250,16 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
     musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
       status: 'error',
       error: 'Failed to read songs',
+    });
+    return;
+  }
+
+  try {
+    await ensureDownloadedArtistMetadata(songs);
+  } catch (error) {
+    musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
+      status: 'error',
+      error: errMessage(error),
     });
     return;
   }

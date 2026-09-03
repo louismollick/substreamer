@@ -25,6 +25,7 @@ import {
   type Child,
 } from '../services/subsonicService';
 import { listDownloadedAlbumIds } from '../db/repository/downloads';
+import { fetchDownloadedArtists } from '../services/downloadedArtistService';
 import { favoritesStore } from '../store/favoritesStore';
 import { filterBarStore } from '../store/filterBarStore';
 import { layoutPreferencesStore } from '../store/layoutPreferencesStore';
@@ -109,6 +110,7 @@ export function SearchScreen() {
   // completes. Unknown ⇒ no albums; a refresh keeps the previous answer on screen (the same
   // trade `album-library-list.tsx` makes by keeping its rows while `loading`).
   const [downloadedAlbumIds, setDownloadedAlbumIds] = useState<ReadonlySet<string> | null>(null);
+  const [downloadedArtistIds, setDownloadedArtistIds] = useState<ReadonlySet<string> | null>(null);
   // `revision` reaches the effect ONLY through this key, so it cannot be dropped without the
   // re-read being dropped with it.
   const downloadedKey = `${includePartial}:${revision}`;
@@ -118,7 +120,11 @@ export function SearchScreen() {
     void (async () => {
       const db = getDb();
       const ids = db ? await listDownloadedAlbumIds(db, { includePartial }) : new Set<string>();
-      if (alive) setDownloadedAlbumIds(ids);
+      const artistIds = new Set((await fetchDownloadedArtists()).map((row) => row.artist.id));
+      if (alive) {
+        setDownloadedAlbumIds(ids);
+        setDownloadedArtistIds(artistIds);
+      }
     })();
     return () => {
       alive = false;
@@ -137,10 +143,10 @@ export function SearchScreen() {
       albums =
         downloadedAlbumIds === null ? [] : albums.filter((a) => downloadedAlbumIds.has(a.id));
       songs = songs.filter((s) => getLocalTrackUri(s.id) !== null);
-      // Artists cannot be downloaded, so the filter drops them outright — the same
-      // handling the library and favourites tabs give the Artists segment. Only the
-      // ONLINE path reaches this; offline search already returns no artists.
-      artists = [];
+      // Keep only artists with a locally navigable downloaded projection.
+      artists = downloadedArtistIds === null
+        ? []
+        : artists.filter((artist) => downloadedArtistIds.has(artist.id));
     }
 
     if (favoritesOnly) {
@@ -155,6 +161,7 @@ export function SearchScreen() {
     downloadedOnly,
     favoritesOnly,
     downloadedAlbumIds,
+    downloadedArtistIds,
     starredSongIds,
     starredAlbumIds,
     starredArtistIds,

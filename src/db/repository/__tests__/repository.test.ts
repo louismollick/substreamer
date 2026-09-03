@@ -108,7 +108,7 @@ const playlist = (id: string, name: string, extra: Partial<Playlist> = {}): Play
 
 beforeAll(() => ensureNormalizedSchema(db()));
 beforeEach(() => {
-  for (const t of ['albums', 'songs', 'artists', 'playlists']) {
+  for (const t of ['cached_songs', 'albums', 'songs', 'artists', 'playlists']) {
     db().runSync(`DELETE FROM ${t}`);
   }
 });
@@ -967,6 +967,19 @@ describe('deleteArtistsNotIn', () => {
     await upsertArtists(db(), [artist('ar1', 'Alpha')]);
     await deleteArtistsNotIn(db(), []);
     expect(await countArtists(db())).toBe(1);
+  });
+
+  it('preserves artists referenced by downloaded songs', async () => {
+    await upsertArtists(db(), [artist('keep', 'Downloaded'), artist('drop', 'Removed')]);
+    db().runSync(
+      'INSERT INTO cached_songs (song_id, album_id, suffix, bytes, format_captured_at, ' +
+        'downloaded_at, title, duration, artist_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ['s1', 'a1', 'mp3', 1, 0, 0, 'Track', 1, 'keep'],
+    );
+
+    await deleteArtistsNotIn(db(), ['server-artist']);
+
+    expect(db().getAllSync<{ id: string }>('SELECT id FROM artists')).toEqual([{ id: 'keep' }]);
   });
 });
 

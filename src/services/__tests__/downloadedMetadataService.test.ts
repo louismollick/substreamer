@@ -18,7 +18,13 @@ const mockRefreshState = {
 };
 const mockCacheState = {
   cachedItems: {} as Record<string, { type: string; parentAlbumId?: string; songIds?: string[] }>,
-  cachedSongs: {} as Record<string, { id: string; albumId?: string | null }>,
+  cachedSongs: {} as Record<string, {
+    id: string;
+    title?: string;
+    artist?: string;
+    artistId?: string;
+    albumId?: string | null;
+  }>,
 };
 const mockAlbumState = { albums: {} as Record<string, unknown> };
 const mockPlaylistState = { playlists: {} as Record<string, unknown> };
@@ -50,6 +56,10 @@ jest.mock('../../store/musicCacheStore', () => ({
 jest.mock('../detailFetchService', () => ({
   fetchAlbumDetail: (id: string, opts?: { prefetchCovers?: boolean }) => mockFetchAlbum(id, opts),
   fetchPlaylistDetail: (id: string, opts?: { prefetchCovers?: boolean }) => mockFetchPlaylist(id, opts),
+}));
+jest.mock('../downloadedArtistMetadataService', () => ({
+  ensureDownloadedArtistMetadata: jest.fn().mockResolvedValue(undefined),
+  hasDownloadedArtistMetadata: jest.fn().mockResolvedValue(true),
 }));
 
 jest.mock('../../store/persistence/db', () => ({ getDb: () => ({}) }));

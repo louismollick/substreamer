@@ -160,31 +160,28 @@ function AlbumSection({
     config.refresh();
   }, [config]);
   const onSeeMore = useCallback(() => {
-    router.push({ pathname: '/album-list', params: { type: listType } });
-  }, [listType, router]);
+    router.push({
+      pathname: '/album-list',
+      params: { type: listType, downloadedOnly: offlineMode ? 'true' : undefined },
+    });
+  }, [listType, offlineMode, router]);
   return (
     <View style={styles.section}>
       <View style={styles.sectionHeader}>
-        {offlineMode ? (
+        <Pressable
+          onPress={onSeeMore}
+          style={({ pressed }) => [
+            { flex: 1 },
+            pressed && styles.iconButtonPressed,
+          ]}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel={t('seeMoreAlbums', { section: title })}
+        >
           <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>
             {title}
           </Text>
-        ) : (
-          <Pressable
-            onPress={onSeeMore}
-            style={({ pressed }) => [
-              { flex: 1 },
-              pressed && styles.iconButtonPressed,
-            ]}
-            hitSlop={8}
-            accessibilityRole="button"
-            accessibilityLabel={t('seeMoreAlbums', { section: title })}
-          >
-            <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>
-              {title}
-            </Text>
-          </Pressable>
-        )}
+        </Pressable>
         {!offlineMode && (
           <View style={styles.sectionHeaderActions}>
             <Pressable

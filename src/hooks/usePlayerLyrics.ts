@@ -22,12 +22,14 @@ import { useCallback, useEffect, useRef } from 'react';
 import { useAppActive } from './useAppActive';
 import { lyricsStore, type LyricsErrorKind } from '../store/lyricsStore';
 import { type LyricsData } from '../services/subsonicService';
+import { offlineModeStore } from '../store/offlineModeStore';
+import { loadLyrics } from '../store/persistence/lyricsTable';
 
 export interface PlayerLyricsResult {
   entry: LyricsData | undefined;
   loading: boolean;
   error: LyricsErrorKind | null;
-  handleRetry: () => void;
+  handleRetry: (() => void) | undefined;
 }
 
 export function usePlayerLyrics(
@@ -38,6 +40,7 @@ export function usePlayerLyrics(
   enabled: boolean,
 ): PlayerLyricsResult {
   const appActive = useAppActive();
+  const offline = offlineModeStore((state) => state.offlineMode);
   const shouldFetch = enabled && appActive;
 
   const entry = lyricsStore((s) => (trackId ? s.entries[trackId] : undefined));
@@ -45,8 +48,8 @@ export function usePlayerLyrics(
   const error = lyricsStore((s) => (trackId ? (s.errors[trackId] ?? null) : null));
 
   /**
-   * The track a fetch was last started for. Comparing by id IS the per-track
-   * reset — a new track never matches, so it gets exactly one attempt.
+   * The track and offline mode of the last attempt. A mode change permits one
+   * new attempt so an offline persistence miss can fetch after reconnecting.
    */
   const fetchAttemptedRef = useRef<string | null>(null);
 
@@ -55,26 +58,36 @@ export function usePlayerLyrics(
     // would poison it, and it would never fetch once the player opens.
     if (!shouldFetch) return;
     if (!trackId || entry || loading) return;
-    if (fetchAttemptedRef.current === trackId) return;
-    fetchAttemptedRef.current = trackId;
+    const attemptKey = `${trackId}:${offline}`;
+    if (fetchAttemptedRef.current === attemptKey) return;
+    fetchAttemptedRef.current = attemptKey;
+    if (offline) {
+      void loadLyrics(trackId).then((stored) => {
+        if (!stored) return;
+        lyricsStore.setState((state) => ({
+          entries: { ...state.entries, [trackId]: stored },
+        }));
+      });
+      return;
+    }
     lyricsStore.getState().fetchLyrics(
       trackId,
       artist ?? undefined,
       title ?? undefined,
     );
-  }, [shouldFetch, trackId, entry, loading, artist, title]);
+  }, [shouldFetch, trackId, entry, loading, artist, title, offline]);
 
   const handleRetry = useCallback(() => {
-    if (!trackId) return;
+    if (!trackId || offline) return;
     // User-initiated, so never gated. Records the attempt so the effect does not
     // fire a second fetch when this one settles.
-    fetchAttemptedRef.current = trackId;
+    fetchAttemptedRef.current = `${trackId}:false`;
     lyricsStore.getState().fetchLyrics(
       trackId,
       artist ?? undefined,
       title ?? undefined,
     );
-  }, [trackId, artist, title]);
+  }, [trackId, artist, title, offline]);
 
-  return { entry, loading, error, handleRetry };
+  return { entry, loading, error, handleRetry: offline ? undefined : handleRetry };
 }

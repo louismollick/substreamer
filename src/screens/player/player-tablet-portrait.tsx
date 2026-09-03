@@ -37,6 +37,7 @@ import { CastButton } from '@/components/RoutePicker';
 import { type ThemeColors } from '@/constants/theme';
 import { useCanSkip } from '@/hooks/useCanSkip';
 import { useCoverGradient } from '@/hooks/useCoverGradient';
+import { useDownloadStatus } from '@/hooks/useDownloadStatus';
 import { useSongCoverArt } from '@/hooks/useSongCoverArt';
 import { usePlayerActions } from '@/hooks/usePlayerActions';
 import { usePlaybackState } from '@/hooks/usePlaybackState';
@@ -51,6 +52,7 @@ import {
 } from '@/services/playerService';
 import { moreOptionsStore } from '@/store/moreOptionsStore';
 import { offlineModeStore } from '@/store/offlineModeStore';
+import { usePlayerLyrics } from '@/hooks/usePlayerLyrics';
 import { playbackSettingsStore } from '@/store/playbackSettingsStore';
 import { playerStore } from '@/store/playerStore';
 import { mixHexColors } from '@/utils/colors';
@@ -83,13 +85,24 @@ export function PlayerTabletPortrait() {
   const queue = playerStore((s) => s.queue);
   const queueOrigins = playerStore((s) => s.queueOrigins);
   const offlineMode = offlineModeStore((s) => s.offlineMode);
+  const { entry: lyricsEntry } = usePlayerLyrics(
+    currentTrack?.id ?? null,
+    currentTrack?.artist,
+    currentTrack?.title,
+    true,
+  );
+  const currentTrackDownloadStatus = useDownloadStatus('song', currentTrack?.id ?? '');
+  const showInfoOffline = currentTrackDownloadStatus === 'complete';
+  const showLyricsOffline = lyricsEntry !== undefined;
 
   const [mode, setMode] = useState<PlayerMode>('queue');
 
-  // Info/Lyrics are hidden offline — fall back to the queue if they vanish.
+  // Fall back to the queue when the active tab has no local content.
   useEffect(() => {
-    if (offlineMode && mode !== 'queue') setMode('queue');
-  }, [offlineMode, mode]);
+    if (!offlineMode) return;
+    if (mode === 'info' && !showInfoOffline) setMode('queue');
+    if (mode === 'lyrics' && !showLyricsOffline) setMode('queue');
+  }, [offlineMode, mode, showInfoOffline, showLyricsOffline]);
 
   const onClose = useCallback(() => router.back(), [router]);
 
@@ -257,7 +270,14 @@ export function PlayerTabletPortrait() {
           </View>
 
           {/* Centered Queue / Info / Lyrics toggle, between the two sections */}
-          <ModeToggle mode={mode} onSelect={setMode} colors={colors} offlineMode={offlineMode} />
+          <ModeToggle
+            mode={mode}
+            onSelect={setMode}
+            colors={colors}
+            offlineMode={offlineMode}
+            showInfoOffline={showInfoOffline}
+            showLyricsOffline={showLyricsOffline}
+          />
 
           {/* Bottom content: queue / info / lyrics on the page gradient */}
           <View style={[styles.bottomSection, { height: bottomSectionHeight }]}>
@@ -298,11 +318,15 @@ const ModeToggle = memo(function ModeToggle({
   onSelect,
   colors,
   offlineMode,
+  showInfoOffline,
+  showLyricsOffline,
 }: {
   mode: PlayerMode;
   onSelect: (mode: PlayerMode) => void;
   colors: ThemeColors;
   offlineMode: boolean;
+  showInfoOffline: boolean;
+  showLyricsOffline: boolean;
 }) {
   const { t } = useTranslation();
   return (
@@ -321,7 +345,7 @@ const ModeToggle = memo(function ModeToggle({
           color={mode === 'queue' ? colors.primary : colors.textSecondary}
         />
       </Pressable>
-      {!offlineMode && (
+      {(!offlineMode || showInfoOffline) && (
         <Pressable
           onPress={() => onSelect('info')}
           hitSlop={8}
@@ -337,7 +361,7 @@ const ModeToggle = memo(function ModeToggle({
           />
         </Pressable>
       )}
-      {!offlineMode && (
+      {(!offlineMode || showLyricsOffline) && (
         <Pressable
           onPress={() => onSelect('lyrics')}
           hitSlop={8}

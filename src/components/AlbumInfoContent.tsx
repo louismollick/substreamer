@@ -46,7 +46,7 @@ export interface AlbumInfoContentProps {
   /** Called when the user taps Retry after an error. */
   onRetry?: () => void;
   refreshing: boolean;
-  onRefresh: () => void;
+  onRefresh?: () => void;
   colors: {
     textPrimary: string;
     textSecondary: string;
@@ -159,7 +159,7 @@ export const AlbumInfoContent = memo(function AlbumInfoContent({
       style={styles.infoScrollView}
       contentContainerStyle={styles.infoContent}
       showsVerticalScrollIndicator={false}
-      refreshControl={
+      refreshControl={onRefresh ? (
         <RefreshControl
           key={refreshControlKey}
           refreshing={refreshing}
@@ -167,7 +167,7 @@ export const AlbumInfoContent = memo(function AlbumInfoContent({
           tintColor={colors.primary}
           colors={[colors.primary]}
         />
-      }
+      ) : undefined}
     >
       {albumInfoError && !albumInfoLoading && !refreshing ? (
         <View style={styles.errorBlock}>

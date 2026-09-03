@@ -48,6 +48,7 @@ import { closeOpenRow } from '@/components/SwipeableRow';
 import { type ThemeColors } from '@/constants/theme';
 import { useCanSkip } from '@/hooks/useCanSkip';
 import { useCoverGradient } from '@/hooks/useCoverGradient';
+import { useDownloadStatus } from '@/hooks/useDownloadStatus';
 import { useSongCoverArt } from '@/hooks/useSongCoverArt';
 import { usePlayerActions } from '@/hooks/usePlayerActions';
 import { usePlaybackState } from '@/hooks/usePlaybackState';
@@ -136,6 +137,15 @@ export function PlayerPhonePortrait() {
   /* ---- Tab state ---- */
   const [activeTab, setActiveTab] = useState<PlayerTab>('player');
   const [mountedTabs, setMountedTabs] = useState<Set<PlayerTab>>(() => new Set(['player']));
+
+  const currentTrackDownloadStatus = useDownloadStatus('song', currentTrack?.id ?? '');
+  const showInfoOffline = currentTrackDownloadStatus === 'complete';
+  const showLyricsOffline = lyricsEntry !== undefined;
+  useEffect(() => {
+    if (!offlineMode) return;
+    if (activeTab === 'info' && !showInfoOffline) setActiveTab('queue');
+    if (activeTab === 'lyrics' && !showLyricsOffline) setActiveTab('queue');
+  }, [activeTab, offlineMode, showInfoOffline, showLyricsOffline]);
 
 
 
@@ -426,7 +436,14 @@ export function PlayerPhonePortrait() {
 
         {/* Tab bar */}
         <View style={{ paddingBottom: insets.bottom }}>
-          <PlayerTabBar activeTab={activeTab} onSelect={setActiveTab} colors={colors} offlineMode={offlineMode} />
+          <PlayerTabBar
+            activeTab={activeTab}
+            onSelect={setActiveTab}
+            colors={colors}
+            offlineMode={offlineMode}
+            showInfoOffline={showInfoOffline}
+            showLyricsOffline={showLyricsOffline}
+          />
         </View>
 
         {/* Shuffle overlay */}

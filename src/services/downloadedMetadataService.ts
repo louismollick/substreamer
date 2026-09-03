@@ -12,6 +12,8 @@
  * Online-gated (no-op offline — `fetchAlbum`/`fetchPlaylist` short-circuit to the
  * cached entry offline anyway). One run at a time. Bounded concurrency.
  */
+import type { Child } from 'subsonic-api';
+
 import { fetchAlbumDetail, fetchPlaylistDetail } from './detailFetchService';
 import { downloadedMetadataRefreshStore } from '../store/downloadedMetadataRefreshStore';
 import { musicCacheStore } from '../store/musicCacheStore';
@@ -20,10 +22,17 @@ import { getDb } from '../store/persistence/db';
 import { albumIdsWithSongs } from '../db/repository/songs';
 import { playlistIdsWithSongs } from '../db/repository/playlists';
 import { runPool } from '../utils/promisePool';
+import {
+  ensureDownloadedArtistMetadata,
+  hasDownloadedArtistMetadata,
+} from './downloadedArtistMetadataService';
 
 const CONCURRENCY = 3;
 
-type Task = { kind: 'album' | 'playlist'; id: string };
+type Task =
+  | { kind: 'album'; id: string }
+  | { kind: 'playlist'; id: string }
+  | { kind: 'artist'; id: string; songs: Child[] };
 
 /** Outcome of a pass. `remaining` is measured from ACTUAL store presence after
  *  the pass (not fetch return values), so a `fetchAlbum` that returns null on a
@@ -54,6 +63,7 @@ export async function refreshDownloadedMetadata(opts: {
   // parent albums of favorited songs.
   const albumIds = new Set<string>();
   const playlistIds = new Set<string>();
+  const artistSongs = new Map<string, Child[]>();
   for (const [id, item] of Object.entries(cachedItems)) {
     if (item.type === 'album') albumIds.add(id);
     else if (item.type === 'playlist') playlistIds.add(id);
@@ -65,12 +75,29 @@ export async function refreshDownloadedMetadata(opts: {
       }
     }
   }
+  for (const song of Object.values(cachedSongs)) {
+    if (!song.artistId) continue;
+    const list = artistSongs.get(song.artistId) ?? [];
+    list.push({
+      id: song.id,
+      title: song.title,
+      artist: song.artist,
+      artistId: song.artistId,
+      isDir: false,
+    });
+    artistSongs.set(song.artistId, list);
+  }
 
   // Presence = the item has its DETAIL in the normalized model (≥1 song / ≥1 membership
   // row). `fetchAlbum`/`fetchPlaylist` dual-write it, so this reflects prior passes.
   const db = getDb();
   const albumsHave = db ? await albumIdsWithSongs(db, [...albumIds]) : new Set<string>();
   const playlistsHave = db ? await playlistIdsWithSongs(db, [...playlistIds]) : new Set<string>();
+  const artistPresence = new Map(
+    await Promise.all(
+      [...artistSongs.keys()].map(async (id) => [id, await hasDownloadedArtistMetadata(id)] as const),
+    ),
+  );
   const tasks: Task[] = [
     ...[...albumIds]
       .filter((id) => opts.mode === 'all' || !albumsHave.has(id))
@@ -78,6 +105,9 @@ export async function refreshDownloadedMetadata(opts: {
     ...[...playlistIds]
       .filter((id) => opts.mode === 'all' || !playlistsHave.has(id))
       .map((id) => ({ kind: 'playlist' as const, id })),
+    ...[...artistSongs]
+      .filter(([id]) => opts.mode === 'all' || !artistPresence.get(id))
+      .map(([id, songs]) => ({ kind: 'artist' as const, id, songs })),
   ];
 
   if (tasks.length === 0) return { attempted: 0, remaining: 0 };
@@ -91,8 +121,10 @@ export async function refreshDownloadedMetadata(opts: {
         try {
           if (t.kind === 'album') {
             await fetchAlbumDetail(t.id, { prefetchCovers: true, force: opts.mode === 'all' });
-          } else {
+          } else if (t.kind === 'playlist') {
             await fetchPlaylistDetail(t.id, { prefetchCovers: true, force: opts.mode === 'all' });
+          } else {
+            await ensureDownloadedArtistMetadata(t.songs);
           }
           downloadedMetadataRefreshStore.getState().tick(true);
         } catch (e) {
@@ -118,8 +150,11 @@ export async function refreshDownloadedMetadata(opts: {
   const playlistTaskIds = tasks.filter((t) => t.kind === 'playlist').map((t) => t.id);
   const albumsHaveAfter = db ? await albumIdsWithSongs(db, albumTaskIds) : new Set<string>();
   const playlistsHaveAfter = db ? await playlistIdsWithSongs(db, playlistTaskIds) : new Set<string>();
-  const remaining = tasks.filter((t) =>
-    t.kind === 'album' ? !albumsHaveAfter.has(t.id) : !playlistsHaveAfter.has(t.id),
-  ).length;
+  const remainingChecks = await Promise.all(tasks.map(async (t) => {
+    if (t.kind === 'album') return !albumsHaveAfter.has(t.id);
+    if (t.kind === 'playlist') return !playlistsHaveAfter.has(t.id);
+    return !(await hasDownloadedArtistMetadata(t.id));
+  }));
+  const remaining = remainingChecks.filter(Boolean).length;
   return { attempted: tasks.length, remaining };
 }

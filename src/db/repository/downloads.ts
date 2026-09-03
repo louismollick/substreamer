@@ -21,10 +21,16 @@
  * Conflating the two would either hide downloaded albums from search or surface metadata-less
  * rows in the library browser.
  */
-import type { Child } from 'subsonic-api';
+import type { AlbumID3, ArtistID3, Child } from 'subsonic-api';
 
 import type { InternalDb } from '../client';
-import { type AlbumListRow, type AlbumSortOrder } from './albums';
+import { albumListRowToAlbumID3, type AlbumListRow, type AlbumSortOrder } from './albums';
+import {
+  ARTIST_LIST_COLS,
+  artistListRowToArtistID3,
+  hydrateArtistRows,
+  type ArtistListRow,
+} from './artists';
 import { colsOf } from './core';
 import { type PlaylistListRow } from './playlists';
 import { type SongSortOrder } from './songs';
@@ -190,6 +196,41 @@ export async function listDownloadedAlbumIds(
   return new Set(rows.map((r) => r.item_id));
 }
 
+/** A downloaded album and only the tracks attached to its durable cache item. */
+export async function getDownloadedAlbumProjection(
+  db: InternalDb,
+  albumId: string,
+): Promise<{ album: AlbumID3; songs: Child[] } | null> {
+  const albumRow = await db.getFirstAsync<AlbumListRow>(
+    `SELECT ${CACHED_ALBUM_COLS} FROM cached_albums ca
+      JOIN cached_items ci ON ci.item_id = ca.item_id
+     WHERE ci.type = 'album' AND ca.item_id = ?`,
+    [albumId],
+  );
+  if (!albumRow) return null;
+
+  const songRows = await db.getAllAsync<DownloadedSongRow & { src_suffix: string | null }>(
+    `SELECT cs.song_id AS id, cs.title, cs.artist, cs.sort_name, cs.sort_title,
+            cs.sort_artist, COALESCE(cs.src_album_id, cs.album_id) AS album_id,
+            cs.duration, cs.cover_art, cs.user_rating, cs.artist_id, cs.album,
+            cs.track, cs.disc_number, cs.year, cs.suffix, cs.src_suffix, cs.content_type
+       FROM cached_item_songs cis
+       JOIN cached_songs cs ON cs.song_id = cis.song_id
+      WHERE cis.item_id = ?
+      ORDER BY cis.position`,
+    [albumId],
+  );
+  if (songRows.length === 0) return null;
+
+  return {
+    album: albumListRowToAlbumID3(albumRow),
+    songs: songRows.map((row) => downloadedSongRowToChild({
+      ...row,
+      suffix: row.src_suffix ?? row.suffix,
+    })),
+  };
+}
+
 /**
  * A downloaded song, at the projection the Songs tab's downloaded filter renders — nine
  * columns of the ~58 `cached_songs` holds. Widening it changes what those rows render, so
@@ -224,6 +265,13 @@ export interface DownloadedSongRow {
    *  rated song shows no stars under the Downloaded filter while showing them in the
    *  unfiltered list, which reads the same rating from `songs`. */
   user_rating: number | null;
+  artist_id?: string | null;
+  album?: string | null;
+  track?: number | null;
+  disc_number?: number | null;
+  year?: number | null;
+  suffix?: string | null;
+  content_type?: string | null;
 }
 
 export interface DownloadedSongFilter {
@@ -271,8 +319,117 @@ export function downloadedSongRowToChild(r: DownloadedSongRow): Child {
     coverArt: r.cover_art ?? undefined,
     sortName: r.sort_name ?? undefined,
     userRating: r.user_rating ?? undefined,
+    ...(r.artist_id != null ? { artistId: r.artist_id } : {}),
+    ...(r.album != null ? { album: r.album } : {}),
+    ...(r.track != null ? { track: r.track } : {}),
+    ...(r.disc_number != null ? { discNumber: r.disc_number } : {}),
+    ...(r.year != null ? { year: r.year } : {}),
+    ...(r.suffix != null ? { suffix: r.suffix } : {}),
+    ...(r.content_type != null ? { contentType: r.content_type } : {}),
     isDir: false,
   };
+}
+
+export interface DownloadedArtistAlbum extends AlbumID3 {
+  downloadedSongCount: number;
+}
+
+export interface DownloadedArtistProjection {
+  artist: ArtistID3;
+  songs: Child[];
+  albums: DownloadedArtistAlbum[];
+  biography: string | null;
+  songCount: number;
+  albumCount: number;
+}
+
+interface DownloadedArtistSongRow extends DownloadedSongRow {
+  src_suffix: string | null;
+}
+
+/** The locally playable primary-artist view used by every offline artist entry point. */
+export async function getDownloadedArtistProjection(
+  db: InternalDb,
+  artistId: string,
+): Promise<DownloadedArtistProjection | null> {
+  const artistRow = await db.getFirstAsync<ArtistListRow>(
+    `SELECT ${ARTIST_LIST_COLS} FROM artists WHERE id = ?`,
+    [artistId],
+  );
+  if (!artistRow) return null;
+
+  const songRows = await db.getAllAsync<DownloadedArtistSongRow>(
+    `SELECT song_id AS id, title, artist, sort_name, sort_title, sort_artist,
+            COALESCE(src_album_id, album_id) AS album_id, duration, cover_art, user_rating,
+            artist_id, album, track, disc_number, year, suffix, src_suffix, content_type
+       FROM cached_songs
+      WHERE artist_id = ?
+      ORDER BY year, disc_number, track, sort_title, song_id`,
+    [artistId],
+  );
+  if (songRows.length === 0) return null;
+
+  await hydrateArtistRows(db, [artistRow]);
+  const albumCounts = new Map<string, number>();
+  for (const song of songRows) {
+    if (song.album_id) albumCounts.set(song.album_id, (albumCounts.get(song.album_id) ?? 0) + 1);
+  }
+  const albumRows = albumCounts.size === 0
+    ? []
+    : await db.getAllAsync<AlbumListRow>(
+        `SELECT ${CACHED_ALBUM_COLS} FROM cached_albums ca
+          JOIN cached_items ci ON ci.item_id = ca.item_id
+         WHERE ca.item_id IN (SELECT value FROM json_each(?))
+         ORDER BY ca.year, ca.sort_title, ca.item_id`,
+        [JSON.stringify([...albumCounts.keys()])],
+      );
+  const bio = await db.getFirstAsync<{ biography: string | null }>(
+    'SELECT biography FROM artist_bio WHERE artist_id = ?',
+    [artistId],
+  );
+  const albums = albumRows.map((row) => ({
+    ...albumListRowToAlbumID3(row),
+    downloadedSongCount: albumCounts.get(row.id) ?? 0,
+  }));
+  return {
+    artist: artistListRowToArtistID3(artistRow),
+    songs: songRows.map((row) => downloadedSongRowToChild({
+      ...row,
+      suffix: row.src_suffix ?? row.suffix,
+    })),
+    albums,
+    biography: bio?.biography ?? null,
+    songCount: songRows.length,
+    albumCount: albums.length,
+  };
+}
+
+/** All locally navigable artists, with counts from downloaded songs rather than the server. */
+export async function listDownloadedArtists(
+  db: InternalDb,
+): Promise<DownloadedArtistProjection[]> {
+  const rows = await db.getAllAsync<{ artist_id: string }>(
+    `SELECT DISTINCT artist_id FROM cached_songs
+      WHERE artist_id IS NOT NULL AND artist_id <> ''`,
+  );
+  const projections = await Promise.all(
+    rows.map((row) => getDownloadedArtistProjection(db, row.artist_id)),
+  );
+  return projections
+    .filter((row): row is DownloadedArtistProjection => row !== null)
+    .sort((a, b) => (a.artist.name < b.artist.name ? -1 : a.artist.name > b.artist.name ? 1 : 0));
+}
+
+/** Artist cover-art IDs required by downloaded primary-artist projections. */
+export async function listDownloadedArtistCoverArtIds(db: InternalDb): Promise<Set<string>> {
+  const rows = await db.getAllAsync<{ cover_art: string }>(
+    `SELECT DISTINCT a.cover_art
+       FROM cached_songs cs
+       JOIN artists a ON a.id = cs.artist_id
+      WHERE cs.artist_id IS NOT NULL AND cs.artist_id <> ''
+        AND a.cover_art IS NOT NULL AND a.cover_art <> ''`,
+  );
+  return new Set(rows.map((row) => row.cover_art));
 }
 
 /**

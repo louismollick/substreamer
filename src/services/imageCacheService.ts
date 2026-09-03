@@ -57,7 +57,7 @@ import {
   upsertCachedImage,
   type CacheBrowserFilter,
 } from '../store/persistence/imageCacheTable';
-import { isDbHealthy } from '../store/persistence/db';
+import { getDb, isDbHealthy } from '../store/persistence/db';
 import { hydrateCachedItems, hydrateCachedSongs } from '../store/persistence/musicCacheTables';
 import { musicCacheStore } from '../store/musicCacheStore';
 import { layoutPreferencesStore } from '../store/layoutPreferencesStore';
@@ -89,6 +89,7 @@ import {
   type Playlist,
 } from './subsonicService';
 import { resolveEntityCoverArt, resolveSongCoverArt } from '../hooks/useSongCoverArt';
+import { listDownloadedArtistCoverArtIds } from '../db/repository/downloads';
 
 // Sentinel cover-art IDs rendered from bundled assets via
 // `CachedImage.tsx`, never downloaded. Inlined here (not imported)
@@ -468,9 +469,13 @@ function downloadedCoverArtIds(): Set<string> {
   return _dlCoverIds;
 }
 
-/** True when a coverArtId belongs to a downloaded item (never auto-purge it). */
-function isDownloadedCover(coverArtId: string): boolean {
-  return downloadedCoverArtIds().has(coverArtId);
+/** Every cover required by downloaded items, tracks, and primary artists. */
+async function allDownloadedCoverArtIds(): Promise<Set<string>> {
+  const ids = new Set(downloadedCoverArtIds());
+  const db = getDb();
+  if (!db) return ids;
+  for (const id of await listDownloadedArtistCoverArtIds(db)) ids.add(id);
+  return ids;
 }
 
 /**
@@ -484,8 +489,8 @@ function isDownloadedCover(coverArtId: string): boolean {
  * resize hiccup). Only the manual "clear image cache" / logout wipe it.
  */
 async function purgeCoverArtRows(coverArtId: string): Promise<{ files: number }> {
-  if (isDownloadedCover(coverArtId)) {
-    logImageCache(`purge skipped (downloaded item): ${coverArtId}`);
+  if ((await allDownloadedCoverArtIds()).has(coverArtId)) {
+    logImageCache(`purge skipped (downloaded content): ${coverArtId}`);
     variantFailureCount.delete(coverArtId);
     return { files: 0 };
   }
@@ -893,6 +898,7 @@ export async function reconcileImageCache(source: string = 'auto'): Promise<void
   // --- Pass 2: SQL -> FS (drop rows whose files are gone or empty) ---
   // Walk the snapshot; delete any row whose file wasn't observed on disk or
   // whose file exists but is zero bytes (crashed write).
+  const protectedDownloadedCovers = await allDownloadedCoverArtIds();
   let droppedCount = 0;
   const staleDownloadedCovers = new Set<string>();
   const toDrop: { coverArtId: string; size: number }[] = [];
@@ -905,7 +911,7 @@ export async function reconcileImageCache(source: string = 'auto'): Promise<void
     // Downloaded item's cover with a missing file (OS eviction, external
     // wipe): do NOT drop the row — re-cache it instead so the offline copy
     // is restored. Never leave a downloaded cover unrecoverable.
-    if (isDownloadedCover(coverArtId)) {
+    if (protectedDownloadedCovers.has(coverArtId)) {
       for (const v of variants) {
         if (seenOnDisk.has(diskKey(coverArtId, v.size))) continue;
         const onDiskSize = fileMap.get(`${v.size}.${v.ext}`);
@@ -1253,6 +1259,11 @@ export function ensureCached(coverArtId: string): Promise<void> {
   if (isSentinelCoverArtId(coverArtId)) return Promise.resolve();
   if (offlineModeStore.getState().offlineMode) return Promise.resolve();
   return cacheAllSizes(coverArtId);
+}
+
+/** Whether the durable 600px source file row exists for offline rendering. */
+export function hasCachedCoverArt(coverArtId: string): Promise<boolean> {
+  return dbHasCachedImage(coverArtId, SOURCE_SIZE);
 }
 
 /**
@@ -2503,10 +2514,10 @@ function generateCycleId(): string {
 
 /**
  * Snapshot every cover-art ID associated with downloaded music
- * (cached_items albums/playlists + per-song covers from cached_songs).
+ * (cached_items albums/playlists + per-song covers + primary-artist covers).
  * Returns the deduped list.
  */
-function snapshotDownloadedCoverArtIds(): string[] {
+async function snapshotDownloadedCoverArtIds(): Promise<string[]> {
   const { items, songCoverArtIds } = hydrateCachedItemsForRecache();
   const seen = new Set<string>();
   const out: string[] = [];
@@ -2521,6 +2532,14 @@ function snapshotDownloadedCoverArtIds(): string[] {
     if (seen.has(id)) continue;
     seen.add(id);
     out.push(id);
+  }
+  const db = getDb();
+  if (db) {
+    for (const id of await listDownloadedArtistCoverArtIds(db)) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(id);
+    }
   }
   return out;
 }
@@ -2547,7 +2566,7 @@ export async function enqueueImageRefreshCycle(
     return meta.cycleId;
   }
   const ids = scope === 'refresh-downloads'
-    ? snapshotDownloadedCoverArtIds()
+    ? await snapshotDownloadedCoverArtIds()
     : await snapshotAllCachedCoverArtIds();
   if (ids.length === 0) {
     logImageCache(`image-queue: ${scope} produced 0 ids, nothing to do`);

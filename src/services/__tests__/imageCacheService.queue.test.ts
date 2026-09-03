@@ -55,6 +55,11 @@ jest.mock('../connectivityService', () => ({
   awaitFirstPing: () => Promise.resolve(),
 }));
 
+const mockDownloadedArtistCoverArtIds = jest.fn(async () => new Set<string>());
+jest.mock('../../db/repository/downloads', () => ({
+  listDownloadedArtistCoverArtIds: () => mockDownloadedArtistCoverArtIds(),
+}));
+
 // imageCacheStore — minimal surface the worker reads.
 const mockImageCacheState = {
   maxConcurrentImageDownloads: 1,
@@ -235,6 +240,7 @@ beforeEach(() => {
   mockHydrateCachedItems.mockReturnValue({});
   mockHydrateCachedSongs.mockReturnValue({});
   mockGetAllCachedCoverArtIds.mockReturnValue([]);
+  mockDownloadedArtistCoverArtIds.mockResolvedValue(new Set());
   mockDownloaderShouldFail = false;
   // Re-install the downloader stub — it may have been reset by
   // earlier tests calling __setImageDownloaderForTest(undefined).
@@ -268,18 +274,19 @@ describe('enqueueImageRefreshCycle', () => {
       's-1': { id: 's-1', albumId: 'a-2', coverArt: 'cov-a2' },
       's-2': { id: 's-2', albumId: 'a-1', coverArt: 'cov-a1' }, // dedups with item a-1's cover
     });
+    mockDownloadedArtistCoverArtIds.mockResolvedValue(new Set(['cov-artist', 'cov-a1']));
 
     const cycleId = await enqueueImageRefreshCycle('refresh-downloads');
 
     expect(cycleId).not.toBeNull();
     expect(mockEnqueueBulk).toHaveBeenCalledTimes(1);
     const [ids, scope] = mockEnqueueBulk.mock.calls[0];
-    expect(ids).toEqual(['cov-a1', 'cov-pl1', 'cov-a2']);
+    expect(ids).toEqual(['cov-a1', 'cov-pl1', 'cov-a2', 'cov-artist']);
     expect(scope).toBe('refresh-downloads');
     const meta = await getImageQueueState();
     expect(meta.cycleId).toBe(cycleId);
     expect(meta.cycleScope).toBe('refresh-downloads');
-    expect(meta.cycleTotal).toBe(3);
+    expect(meta.cycleTotal).toBe(4);
   });
 
   it('refresh-all snapshots from cached_images distinct cover_art_ids', async () => {
