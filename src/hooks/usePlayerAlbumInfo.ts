@@ -54,16 +54,22 @@ export function usePlayerAlbumInfo(
   const fetchAttemptedRef = useRef<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
+  // Reset the per-album guard before the fetch effect runs for a new album.
+  useEffect(() => {
+    fetchAttemptedRef.current = null;
+  }, [albumId]);
+
   useEffect(() => {
     if (!enabled) return;
     if (!albumId || entry || loading) return;
-    if (fetchAttemptedRef.current === albumId) return;
-    fetchAttemptedRef.current = albumId;
+    const attemptKey = `${albumId}:${offline}`;
+    if (fetchAttemptedRef.current === attemptKey) return;
+    fetchAttemptedRef.current = attemptKey;
     // Cached info lives in `album_info` — read it first and only hit the network on a
     // genuine miss.
     void (async () => {
       const cached = await albumInfoStore.getState().hydrateAlbumInfo(albumId);
-      if (cached || offline) return;
+      if (cached || offline || offlineModeStore.getState().offlineMode) return;
       await albumInfoStore.getState().fetchAlbumInfo(
         albumId,
         artist ?? undefined,
@@ -72,14 +78,9 @@ export function usePlayerAlbumInfo(
     })();
   }, [enabled, albumId, entry, loading, artist, album, offline]);
 
-  // Reset the per-album guard when the album changes.
-  useEffect(() => {
-    fetchAttemptedRef.current = null;
-  }, [albumId]);
-
   const handleRetry = useCallback(() => {
     if (!albumId || offline) return;
-    fetchAttemptedRef.current = null;
+    fetchAttemptedRef.current = `${albumId}:false`;
     albumInfoStore.getState().fetchAlbumInfo(
       albumId,
       artist ?? undefined,
@@ -98,7 +99,7 @@ export function usePlayerAlbumInfo(
       const { [albumId]: _drop, ...rest } = state.entries;
       return { entries: rest };
     });
-    fetchAttemptedRef.current = null;
+    fetchAttemptedRef.current = `${albumId}:false`;
     await albumInfoStore.getState().fetchAlbumInfo(
       albumId,
       artist ?? undefined,

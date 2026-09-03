@@ -37,6 +37,7 @@ import { CastButton } from '@/components/RoutePicker';
 import { type ThemeColors } from '@/constants/theme';
 import { useCanSkip } from '@/hooks/useCanSkip';
 import { useCoverGradient } from '@/hooks/useCoverGradient';
+import { useDownloadStatus } from '@/hooks/useDownloadStatus';
 import { useSongCoverArt } from '@/hooks/useSongCoverArt';
 import { usePlayerActions } from '@/hooks/usePlayerActions';
 import { usePlaybackState } from '@/hooks/usePlaybackState';
@@ -51,7 +52,6 @@ import {
 } from '@/services/playerService';
 import { moreOptionsStore } from '@/store/moreOptionsStore';
 import { offlineModeStore } from '@/store/offlineModeStore';
-import { getLocalTrackUri } from '@/services/musicCacheService';
 import { usePlayerLyrics } from '@/hooks/usePlayerLyrics';
 import { playbackSettingsStore } from '@/store/playbackSettingsStore';
 import { playerStore } from '@/store/playerStore';
@@ -91,12 +91,13 @@ export function PlayerTabletPortrait() {
     currentTrack?.title,
     true,
   );
-  const showInfoOffline = currentTrack ? getLocalTrackUri(currentTrack.id) !== null : false;
+  const currentTrackDownloadStatus = useDownloadStatus('song', currentTrack?.id ?? '');
+  const showInfoOffline = currentTrackDownloadStatus === 'complete';
   const showLyricsOffline = lyricsEntry !== undefined;
 
   const [mode, setMode] = useState<PlayerMode>('queue');
 
-  // Info/Lyrics are hidden offline — fall back to the queue if they vanish.
+  // Fall back to the queue when the active tab has no local content.
   useEffect(() => {
     if (!offlineMode) return;
     if (mode === 'info' && !showInfoOffline) setMode('queue');

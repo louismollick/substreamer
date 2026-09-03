@@ -40,6 +40,7 @@ import { SleepTimerCapsule } from '@/components/SleepTimerCapsule';
 import { closeOpenRow } from '@/components/SwipeableRow';
 import { useCanSkip } from '@/hooks/useCanSkip';
 import { useCoverGradient } from '@/hooks/useCoverGradient';
+import { useDownloadStatus } from '@/hooks/useDownloadStatus';
 import { useSongCoverArt } from '@/hooks/useSongCoverArt';
 import { mixHexColors } from '@/utils/colors';
 import { isAutoplaySectionStart } from '@/utils/queueOrigins';
@@ -60,7 +61,6 @@ import { usePlayerLyrics } from '@/hooks/usePlayerLyrics';
 import { playbackSettingsStore } from '@/store/playbackSettingsStore';
 import { moreOptionsStore } from '@/store/moreOptionsStore';
 import { offlineModeStore } from '@/store/offlineModeStore';
-import { getLocalTrackUri } from '@/services/musicCacheService';
 import { playerStore } from '@/store/playerStore';
 import { tabletLayoutStore } from '@/store/tabletLayoutStore';
 
@@ -146,7 +146,8 @@ export function PlayerTabletLandscape({
     error: lyricsError,
     handleRetry: handleRetryLyrics,
   } = usePlayerLyrics(trackId, currentTrack?.artist, currentTrack?.title, playerExpanded);
-  const showInfoOffline = currentTrack ? getLocalTrackUri(currentTrack.id) !== null : false;
+  const currentTrackDownloadStatus = useDownloadStatus('song', currentTrack?.id ?? '');
+  const showInfoOffline = currentTrackDownloadStatus === 'complete';
   const showLyricsOffline = lyricsEntry !== undefined;
 
   useEffect(() => {

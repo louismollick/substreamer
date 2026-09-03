@@ -109,10 +109,14 @@ export function AlbumDetailScreen() {
       .then((d) => {
         if (!alive) return;
         if (d) {
-          setAlbum((prev) => prev ?? ({ ...d.album, song: d.songs } as AlbumWithSongsID3));
+          const next = { ...d.album, song: d.songs } as AlbumWithSongsID3;
+          setAlbum((prev) => offlineMode ? next : (prev ?? next));
           // "Cached" only if we actually have the tracks — an album ROW can exist without
           // its songs synced yet; an empty song list ⇒ fetch from the server.
           setHasCache(d.songs.length > 0);
+        } else if (offlineMode) {
+          setAlbum(null);
+          setHasCache(false);
         }
         setCacheChecked(true);
       })
@@ -322,7 +326,7 @@ export function AlbumDetailScreen() {
         <View style={styles.trackListSpacer} />
       </>
     );
-  }, [album, colors, allSongs, offlineMode, router, t]);
+  }, [album, colors, allSongs, offlineMode, hasOfflineArtist, router, t]);
 
   const listEmpty = useMemo(
     () => (

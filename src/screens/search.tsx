@@ -143,9 +143,7 @@ export function SearchScreen() {
       albums =
         downloadedAlbumIds === null ? [] : albums.filter((a) => downloadedAlbumIds.has(a.id));
       songs = songs.filter((s) => getLocalTrackUri(s.id) !== null);
-      // Artists cannot be downloaded, so the filter drops them outright — the same
-      // handling the library and favourites tabs give the Artists segment. Only the
-      // ONLINE path reaches this; offline search already returns no artists.
+      // Keep only artists with a locally navigable downloaded projection.
       artists = downloadedArtistIds === null
         ? []
         : artists.filter((artist) => downloadedArtistIds.has(artist.id));

@@ -48,6 +48,7 @@ import { closeOpenRow } from '@/components/SwipeableRow';
 import { type ThemeColors } from '@/constants/theme';
 import { useCanSkip } from '@/hooks/useCanSkip';
 import { useCoverGradient } from '@/hooks/useCoverGradient';
+import { useDownloadStatus } from '@/hooks/useDownloadStatus';
 import { useSongCoverArt } from '@/hooks/useSongCoverArt';
 import { usePlayerActions } from '@/hooks/usePlayerActions';
 import { usePlaybackState } from '@/hooks/usePlaybackState';
@@ -55,7 +56,6 @@ import { useShuffleOverlay } from '@/hooks/useShuffleOverlay';
 import { getPlayerSize } from '@/hooks/playerSize';
 import { useTheme } from '@/hooks/useTheme';
 import { offlineModeStore } from '@/store/offlineModeStore';
-import { getLocalTrackUri } from '@/services/musicCacheService';
 import {
   clearQueue,
   retryPlayback,
@@ -138,7 +138,8 @@ export function PlayerPhonePortrait() {
   const [activeTab, setActiveTab] = useState<PlayerTab>('player');
   const [mountedTabs, setMountedTabs] = useState<Set<PlayerTab>>(() => new Set(['player']));
 
-  const showInfoOffline = currentTrack ? getLocalTrackUri(currentTrack.id) !== null : false;
+  const currentTrackDownloadStatus = useDownloadStatus('song', currentTrack?.id ?? '');
+  const showInfoOffline = currentTrackDownloadStatus === 'complete';
   const showLyricsOffline = lyricsEntry !== undefined;
   useEffect(() => {
     if (!offlineMode) return;

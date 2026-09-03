@@ -58,8 +58,9 @@ export function usePlayerLyrics(
     // would poison it, and it would never fetch once the player opens.
     if (!shouldFetch) return;
     if (!trackId || entry || loading) return;
-    if (fetchAttemptedRef.current === trackId) return;
-    fetchAttemptedRef.current = trackId;
+    const attemptKey = `${trackId}:${offline}`;
+    if (fetchAttemptedRef.current === attemptKey) return;
+    fetchAttemptedRef.current = attemptKey;
     if (offline) {
       void loadLyrics(trackId).then((stored) => {
         if (!stored) return;
@@ -80,7 +81,7 @@ export function usePlayerLyrics(
     if (!trackId || offline) return;
     // User-initiated, so never gated. Records the attempt so the effect does not
     // fire a second fetch when this one settles.
-    fetchAttemptedRef.current = trackId;
+    fetchAttemptedRef.current = `${trackId}:false`;
     lyricsStore.getState().fetchLyrics(
       trackId,
       artist ?? undefined,

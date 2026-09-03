@@ -119,7 +119,18 @@ export function ArtistDetailScreen() {
       let alive = true;
       fetchDownloadedArtist(id)
         .then((projection) => {
-          if (!alive || !projection) return;
+          if (!alive) return;
+          if (!projection) {
+            setArtist(null);
+            setTopSongs([]);
+            setBiography(null);
+            setSimilarArtists([]);
+            setHeroFallbackUrl(undefined);
+            setTopSongsSettled(true);
+            setBioLoading(false);
+            setHasCache(false);
+            return;
+          }
           setArtist({ ...projection.artist, album: projection.albums } as ArtistWithAlbumsID3);
           setTopSongs(projection.songs);
           setBiography(projection.biography);

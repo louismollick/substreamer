@@ -30,6 +30,7 @@ import { musicCacheStore } from '../store/musicCacheStore';
 
 const PAGE = 120;
 const artistIdentity = (artist: ArtistID3): ArtistID3 => artist;
+const downloadedArtistSortKey = (artist: ArtistID3): string => artist.name;
 /** Alphabet-scroller letters — all active in keyset mode (the loaded window can't
  *  reveal which letters exist; a tap on an empty letter seeks to the next one). */
 const ALL_LETTERS = new Set<string>([
@@ -351,6 +352,7 @@ function DownloadedArtistList({
       loading={loading}
       contentInsetTop={contentInsetTop}
       showAlphabetScroller
+      sortKeyOf={downloadedArtistSortKey}
     />
   );
 }

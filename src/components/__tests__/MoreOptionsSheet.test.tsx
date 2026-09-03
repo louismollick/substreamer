@@ -93,6 +93,10 @@ jest.mock('../../services/moreOptionsService', () => ({
 }));
 
 jest.mock('../../services/musicCacheService', () => ({ deleteCachedItem: jest.fn() }));
+const mockHasDownloadedArtist = jest.fn();
+jest.mock('../../services/downloadedArtistService', () => ({
+  hasDownloadedArtist: (...args: unknown[]) => mockHasDownloadedArtist(...args),
+}));
 jest.mock('../../services/subsonicService', () => ({
   deletePlaylist: jest.fn(),
   isVariousArtists: () => false,
@@ -197,6 +201,8 @@ beforeEach(() => {
   mockCachedItems = {};
   mockOfflineMode = false;
   mockDownloadStatus = 'none';
+  mockHasDownloadedArtist.mockReset();
+  mockHasDownloadedArtist.mockResolvedValue(true);
   moreOptionsStore.setState({ visible: false, entity: null, source: 'default' });
 });
 
@@ -302,5 +308,19 @@ describe('MoreOptionsSheet — isPlayerSource must not treat every non-default s
     showSong('player-phone-portrait');
     const { queryByText } = render(<MoreOptionsSheet />);
     expect(queryByText('Remove Download')).toBeTruthy();
+  });
+});
+
+describe('MoreOptionsSheet — offline artist navigation', () => {
+  it('rechecks the current entity when offline mode changes', async () => {
+    showSong();
+    const view = render(<MoreOptionsSheet />);
+    expect(view.queryByText('Go to Artist')).toBeTruthy();
+
+    mockOfflineMode = true;
+    view.rerender(<MoreOptionsSheet />);
+
+    expect(await view.findByText('Go to Artist')).toBeTruthy();
+    expect(mockHasDownloadedArtist).toHaveBeenCalledWith('ar1');
   });
 });

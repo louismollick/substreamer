@@ -106,6 +106,17 @@ const seedDownloadedSong = (id: string, c: Partial<Child>): void => {
   );
 };
 
+const seedDownloadedArtist = async (id: string, name: string): Promise<void> => {
+  await upsertArtists(db(), [{ id, name, albumCount: 1 }]);
+  const keys = songSortKeys({ title: 'Track', artist: name });
+  db().runSync(
+    'INSERT INTO cached_songs (song_id, album_id, suffix, bytes, format_captured_at, ' +
+      'downloaded_at, title, artist, duration, sort_title, sort_artist, artist_id) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [`song-${id}`, 'al1', 'mp3', 1, 0, 0, 'Track', name, 10, keys.sort_title, keys.sort_artist, id],
+  );
+};
+
 /**
  * The three fixtures are the three divergences that actually shipped, one per step:
  *  - an album whose `displayArtist` differs from its `artist` tag (3b),
@@ -368,4 +379,16 @@ describe('the artist sort order letters on sort_artist, not sort_title', () => {
     expect(latest().items.map((i) => i.id)).toEqual(['lib-1', 'rem-2']);
     expect(latest().items.map((i) => letterOfSortKey(keyOf(i)))).toEqual(['A', 'Z']);
   });
+});
+
+it('maps downloaded artist scroller letters to the artist-name order', async () => {
+  await seedDownloadedArtist('ar-z', 'Zulu');
+  await seedDownloadedArtist('ar-a', 'Alpha');
+
+  render(<ArtistListScreen downloadedOnly />);
+  await waitFor(() => expect(latest().items).toHaveLength(2));
+
+  const keyOf = latest().sortKeyOf!;
+  expect(latest().items.map((i) => i.id)).toEqual(['ar-a', 'ar-z']);
+  expect(latest().items.map((i) => letterOfSortKey(keyOf(i)))).toEqual(['A', 'Z']);
 });

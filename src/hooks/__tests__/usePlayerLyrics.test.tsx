@@ -18,7 +18,9 @@ import { act, renderHook } from '@testing-library/react-native';
 
 import { appStateStore } from '../../store/appStateStore';
 import { lyricsStore } from '../../store/lyricsStore';
+import { offlineModeStore } from '../../store/offlineModeStore';
 import { usePlayerLyrics } from '../usePlayerLyrics';
+import { loadLyrics } from '../../store/persistence/lyricsTable';
 
 import { type LyricsData } from '../../services/subsonicService';
 
@@ -58,6 +60,7 @@ beforeEach(() => {
   fetchLyrics.mockClear();
   lyricsStore.setState({ entries: {}, loading: {}, errors: {}, fetchLyrics });
   appStateStore.setState({ isActive: true });
+  offlineModeStore.setState({ offlineMode: false });
 });
 
 describe('usePlayerLyrics — the open-player gate', () => {
@@ -195,8 +198,9 @@ describe('usePlayerLyrics — retry', () => {
   it('fetches on retry regardless of the gate', () => {
     const { result } = setUp({ trackId: 't1', enabled: false });
 
+    expect(result.current.handleRetry).toEqual(expect.any(Function));
     act(() => {
-      result.current.handleRetry?.();
+      result.current.handleRetry!();
     });
 
     expect(fetchLyrics).toHaveBeenCalledTimes(1);
@@ -207,8 +211,9 @@ describe('usePlayerLyrics — retry', () => {
     const { result } = setUp({ trackId: 't1', enabled: true });
     expect(fetchLyrics).toHaveBeenCalledTimes(1);
 
+    expect(result.current.handleRetry).toEqual(expect.any(Function));
     act(() => {
-      result.current.handleRetry?.();
+      result.current.handleRetry!();
     });
     expect(fetchLyrics).toHaveBeenCalledTimes(2);
 
@@ -226,5 +231,23 @@ describe('usePlayerLyrics — retry', () => {
     });
 
     expect(fetchLyrics).not.toHaveBeenCalled();
+  });
+});
+
+describe('usePlayerLyrics — offline transitions', () => {
+  it('fetches online after an offline persistence miss for the same track', async () => {
+    (loadLyrics as jest.Mock).mockResolvedValueOnce(null);
+    offlineModeStore.setState({ offlineMode: true });
+    setUp({ trackId: 't1', enabled: true });
+
+    await act(async () => {});
+    expect(fetchLyrics).not.toHaveBeenCalled();
+
+    act(() => {
+      offlineModeStore.setState({ offlineMode: false });
+    });
+
+    expect(fetchLyrics).toHaveBeenCalledTimes(1);
+    expect(fetchLyrics).toHaveBeenCalledWith('t1', 'Artist', 'Title');
   });
 });

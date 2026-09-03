@@ -312,12 +312,13 @@ export function MoreOptionsSheet() {
   const [detailsAlbum, setDetailsAlbum] = useState<AlbumID3 | null>(null);
   const [detailsTrack, setDetailsTrack] = useState<Child | null>(null);
   const [hasOfflineArtist, setHasOfflineArtist] = useState(false);
+  const offlineMode = offlineModeStore((s) => s.offlineMode);
 
   useEffect(() => {
     const artistId = entity?.type === 'song' || entity?.type === 'album'
       ? entity.item.artistId
       : undefined;
-    if (!artistId || !offlineModeStore.getState().offlineMode) {
+    if (!artistId || !offlineMode) {
       setHasOfflineArtist(false);
       return;
     }
@@ -326,7 +327,7 @@ export function MoreOptionsSheet() {
       if (alive) setHasOfflineArtist(present);
     });
     return () => { alive = false; };
-  }, [entity]);
+  }, [entity, offlineMode]);
 
   const handleClose = useCallback(() => {
     hide();
