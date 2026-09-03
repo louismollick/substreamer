@@ -490,7 +490,7 @@ async function allDownloadedCoverArtIds(): Promise<Set<string>> {
  */
 async function purgeCoverArtRows(coverArtId: string): Promise<{ files: number }> {
   if ((await allDownloadedCoverArtIds()).has(coverArtId)) {
-    logImageCache(`purge skipped (downloaded item): ${coverArtId}`);
+    logImageCache(`purge skipped (downloaded content): ${coverArtId}`);
     variantFailureCount.delete(coverArtId);
     return { files: 0 };
   }

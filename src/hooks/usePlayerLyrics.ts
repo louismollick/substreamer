@@ -48,8 +48,8 @@ export function usePlayerLyrics(
   const error = lyricsStore((s) => (trackId ? (s.errors[trackId] ?? null) : null));
 
   /**
-   * The track a fetch was last started for. Comparing by id IS the per-track
-   * reset — a new track never matches, so it gets exactly one attempt.
+   * The track and offline mode of the last attempt. A mode change permits one
+   * new attempt so an offline persistence miss can fetch after reconnecting.
    */
   const fetchAttemptedRef = useRef<string | null>(null);
 
