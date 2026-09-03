@@ -23,6 +23,7 @@ import {
   downloadedSongSortKey,
   getDownloadedAlbumProjection,
   getDownloadedArtistProjection,
+  listDownloadedArtistCoverArtIds,
   listDownloadedArtists,
   partialGate,
 } from '../downloads';
@@ -584,6 +585,16 @@ describe('downloaded artist projection', () => {
       ['ar2', 1],
     ]);
     expect(result[0].biography).toBe('Cached bio');
+  });
+
+  it('lists the cover art required by downloaded primary artists', async () => {
+    await upsertArtists(db(), [
+      { id: 'ar1', name: 'A', albumCount: 1, coverArt: 'artist-cover' },
+      { id: 'ar2', name: 'B', albumCount: 1, coverArt: 'not-downloaded' },
+    ]);
+    await seedArtistSong('s1', 'ar1', 'a1');
+
+    expect(await listDownloadedArtistCoverArtIds(db())).toEqual(new Set(['artist-cover']));
   });
 });
 

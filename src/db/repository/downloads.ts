@@ -420,6 +420,18 @@ export async function listDownloadedArtists(
     .sort((a, b) => (a.artist.name < b.artist.name ? -1 : a.artist.name > b.artist.name ? 1 : 0));
 }
 
+/** Artist cover-art IDs required by downloaded primary-artist projections. */
+export async function listDownloadedArtistCoverArtIds(db: InternalDb): Promise<Set<string>> {
+  const rows = await db.getAllAsync<{ cover_art: string }>(
+    `SELECT DISTINCT a.cover_art
+       FROM cached_songs cs
+       JOIN artists a ON a.id = cs.artist_id
+      WHERE cs.artist_id IS NOT NULL AND cs.artist_id <> ''
+        AND a.cover_art IS NOT NULL AND a.cover_art <> ''`,
+  );
+  return new Set(rows.map((row) => row.cover_art));
+}
+
 /**
  * The set of downloaded PLAYLIST ids — the MEMBERSHIP predicate's playlist twin, for
  * filtering a list that came from elsewhere (the CarPlay playlist node, whose rows come

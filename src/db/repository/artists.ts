@@ -235,9 +235,18 @@ export async function listArtistsBefore(
  */
 export const deleteArtistsNotIn = (db: InternalDb, keepIds: string[]): Promise<unknown> => {
   if (keepIds.length === 0) return Promise.resolve();
-  return db.runAsync('DELETE FROM artists WHERE id NOT IN (SELECT value FROM json_each(?))', [
-    JSON.stringify(keepIds),
-  ]);
+  return db.runAsync(
+    `DELETE FROM artists
+      WHERE id NOT IN (SELECT value FROM json_each(?))
+        AND id NOT IN (
+          SELECT artist_id FROM cached_songs
+           WHERE artist_id IS NOT NULL AND artist_id <> ''
+          UNION
+          SELECT artist_id FROM download_queue_songs
+           WHERE artist_id IS NOT NULL AND artist_id <> ''
+        )`,
+    [JSON.stringify(keepIds)],
+  );
 };
 
 export const countArtists = (db: InternalDb): Promise<number> => countRows(db, 'artists');
