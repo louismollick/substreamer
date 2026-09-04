@@ -19,7 +19,7 @@ jest.mock('expo-file-system', () => {
     move = jest.fn().mockResolvedValue(undefined);
     static downloadFileAsync = jest.fn().mockResolvedValue(undefined);
   }
-  return { Directory, File, Paths: { document: { uri: 'file:///document' } } };
+  return { Directory, File, Paths: { document: { uri: 'file:///document' } };
 });
 
 jest.mock('expo-async-fs', () => ({
@@ -102,6 +102,7 @@ const makeSong = (id: string) => ({
   albumId: 'album-lyrics',
   duration: 180,
   suffix: 'mp3',
+  contributors: [],
 });
 
 const waitForQueueIdle = async (): Promise<void> => {
