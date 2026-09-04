@@ -26,6 +26,7 @@ import { resolveEntityCoverArt } from '../hooks/useSongCoverArt';
 import { tabletLayoutStore } from '../store/tabletLayoutStore';
 import {
   addAlbumToQueue,
+  addArtistToQueue,
   addPlaylistToQueue,
   addSongToQueue,
   cancelDownload,
@@ -133,6 +134,7 @@ function hasAlbumLink(entity: MoreOptionsEntity): boolean {
 }
 
 function canAddToQueue(entity: MoreOptionsEntity): boolean {
+  if (entity.type === 'artist') return !isVariousArtists(entity.item.name);
   return entity.type === 'song' || entity.type === 'album' || entity.type === 'playlist';
 }
 
@@ -424,6 +426,9 @@ export function MoreOptionsSheet() {
         case 'album':
           await addAlbumToQueue(entity.item as AlbumID3);
           break;
+        case 'artist':
+          await addArtistToQueue(entity.item.id, entity.item.name);
+          break;
         case 'playlist':
           await addPlaylistToQueue(entity.item as Playlist);
           break;
@@ -581,8 +586,7 @@ export function MoreOptionsSheet() {
       [
         { text: t('cancel'), style: 'cancel' },
         {
-          text: t('delete'),
-          style: 'destructive',
+          text: t('delete'), style: 'destructive',
           onPress: async () => {
             const deleted = await runWithOverlay(
               async () => {
