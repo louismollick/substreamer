@@ -1939,6 +1939,29 @@ describe('clearDownloadQueue', () => {
     await clearDownloadQueue();
     expect(musicCacheStore.getState().downloadQueue).toHaveLength(0);
   });
+
+  it('does not read every queued payload when clearing a large queue', async () => {
+    const readRefs = persistenceMock.readDownloadQueueSongRefsAsync as jest.Mock;
+    readRefs.mockClear();
+    musicCacheStore.setState({
+      downloadQueue: Array.from({ length: 100 }, (_, i) => ({
+        queueId: `bulk-q${i}`,
+        itemId: `bulk-a${i}`,
+        type: 'album',
+        name: 'X',
+        status: 'queued',
+        totalSongs: 1,
+        completedSongs: 0,
+        addedAt: i,
+        queuePosition: i + 1,
+      })),
+    } as any);
+
+    await clearDownloadQueue();
+
+    expect(readRefs).not.toHaveBeenCalled();
+    expect(musicCacheStore.getState().downloadQueue).toHaveLength(0);
+  });
 });
 
 /* ------------------------------------------------------------------ */

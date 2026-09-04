@@ -2110,11 +2110,69 @@ export async function cancelDownload(queueId: string): Promise<void> {
  */
 export async function clearDownloadQueue(): Promise<void> {
   const queue = [...musicCacheStore.getState().downloadQueue];
-  await runPool(
-    queue,
-    async (item) => cancelDownload(item.queueId),
-    { concurrency: 5 },
+  if (queue.length === 0) {
+    resumeIfSpaceAvailable();
+    return;
+  }
+
+  // An enqueue publishes to the mirror before its SQL batch lands. Wait for
+  // every row in this snapshot first so the bulk DELETE cannot run ahead of a
+  // parked insert and let that item reappear after the clear.
+  await Promise.all(queue.map((item) => whenQueuePayloadWritten(item.queueId)));
+
+  // Only the currently-downloading item can own live .tmp files: processQueue
+  // runs queue items serially. Keep that cleanup, but do not read every queued
+  // payload just to discover there is nothing partial on disk for it.
+  const activeItem = queue.find((item) => item.status === 'downloading');
+  if (activeItem) {
+    try {
+      await cleanupTmpFilesForQueueItem(activeItem);
+    } catch {
+      /* best-effort: downloadSong/reconciliation also reap tmp remnants */
+    }
+  }
+
+  // queue_position is sparse by design, but new rows append after the current
+  // maximum. Deleting through the snapshot maximum turns N queue-row deletes
+  // into one native SQLite operation while preserving later enqueues.
+  const maxQueuePosition = queue.reduce(
+    (max, item) => Math.max(max, item.queuePosition),
+    queue[0].queuePosition,
   );
+  const snapshotIds = new Set(queue.map((item) => item.queueId));
+  const db = getDb();
+  let bulkDeleted = false;
+  if (db) {
+    try {
+      await db.runAsync(
+        'DELETE FROM download_queue WHERE queue_position <= ?;',
+        [maxQueuePosition],
+      );
+      bulkDeleted = true;
+    } catch {
+      // Fall through to the existing per-item path. A failed bulk write must
+      // not make the in-memory queue disappear while rows remain on disk.
+    }
+  }
+
+  if (bulkDeleted) {
+    musicCacheStore.setState((state) => ({
+      downloadQueue: state.downloadQueue.filter(
+        (item) => !snapshotIds.has(item.queueId),
+      ),
+    }));
+    scheduleRecalculate();
+  } else {
+    const result = await runPool(
+      queue,
+      async (item) => cancelDownload(item.queueId),
+      { concurrency: 5 },
+    );
+    if (result.rejected.length > 0) {
+      throw result.rejected[0].error;
+    }
+  }
+
   resumeIfSpaceAvailable();
 }
 
