@@ -55,6 +55,7 @@ import {
   readDownloadQueueAlbumIdsAsync,
   readDownloadQueueSongRefsAsync,
   readDownloadQueueSongsAsync,
+  removeDownloadQueueItemsThroughPosition,
   readQueuedSongStatus,
 } from '../store/persistence/musicCacheTables';
 import { logImageCache } from './imageCacheLogger';
@@ -2140,20 +2141,7 @@ export async function clearDownloadQueue(): Promise<void> {
     queue[0].queuePosition,
   );
   const snapshotIds = new Set(queue.map((item) => item.queueId));
-  const db = getDb();
-  let bulkDeleted = false;
-  if (db) {
-    try {
-      await db.runAsync(
-        'DELETE FROM download_queue WHERE queue_position <= ?;',
-        [maxQueuePosition],
-      );
-      bulkDeleted = true;
-    } catch {
-      // Fall through to the existing per-item path. A failed bulk write must
-      // not make the in-memory queue disappear while rows remain on disk.
-    }
-  }
+  const bulkDeleted = await removeDownloadQueueItemsThroughPosition(maxQueuePosition);
 
   if (bulkDeleted) {
     musicCacheStore.setState((state) => ({

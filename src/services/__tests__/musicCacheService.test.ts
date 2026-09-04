@@ -296,6 +296,7 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
     removeDownloadQueueItem: jest.fn((queueId: string) => {
       queueSongs.delete(queueId);
     }),
+    removeDownloadQueueItemsThroughPosition: jest.fn(async () => true),
     updateDownloadQueueItem: jest.fn(),
     reorderDownloadQueue: jest.fn(),
     markDownloadComplete: jest.fn((queueId, item, songs, incomingEdges) => {
@@ -1942,7 +1943,9 @@ describe('clearDownloadQueue', () => {
 
   it('does not read every queued payload when clearing a large queue', async () => {
     const readRefs = persistenceMock.readDownloadQueueSongRefsAsync as jest.Mock;
+    const bulkRemove = persistenceMock.removeDownloadQueueItemsThroughPosition as jest.Mock;
     readRefs.mockClear();
+    bulkRemove.mockClear();
     musicCacheStore.setState({
       downloadQueue: Array.from({ length: 100 }, (_, i) => ({
         queueId: `bulk-q${i}`,
@@ -1960,6 +1963,8 @@ describe('clearDownloadQueue', () => {
     await clearDownloadQueue();
 
     expect(readRefs).not.toHaveBeenCalled();
+    expect(bulkRemove).toHaveBeenCalledTimes(1);
+    expect(bulkRemove).toHaveBeenCalledWith(100);
     expect(musicCacheStore.getState().downloadQueue).toHaveLength(0);
   });
 });
