@@ -1,0 +1,58 @@
+name: Apply queue clear patch
+
+on:
+  push:
+    branches:
+      - fix/parallel-download-queue-clear
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/parallel-download-queue-clear
+      - name: Patch queue clearing
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/services/musicCacheService.ts')
+          source = path.read_text()
+          old = """export async function clearDownloadQueue(): Promise<void> {
+            const queue = [...musicCacheStore.getState().downloadQueue];
+            for (const item of queue) {
+              // Serial: each cancel reads its payload before dropping the row, and the resume
+              // below must not restart an item that is still being cancelled.
+              // eslint-disable-next-line no-await-in-loop
+              await cancelDownload(item.queueId);
+            }
+            resumeIfSpaceAvailable();
+          }
+          """
+          new = """export async function clearDownloadQueue(): Promise<void> {
+            const queue = [...musicCacheStore.getState().downloadQueue];
+            await runPool(
+              queue,
+              async (item) => cancelDownload(item.queueId),
+              { concurrency: 5 },
+            );
+            resumeIfSpaceAvailable();
+          }
+          """
+          if old not in source:
+              raise SystemExit('clearDownloadQueue block not found')
+          path.write_text(source.replace(old, new, 1))
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-queue-clear-patch.yml
+          git add src/services/musicCacheService.ts
+          git commit -m "fix: clear download queue concurrently"
+          git push origin HEAD:fix/parallel-download-queue-clear
