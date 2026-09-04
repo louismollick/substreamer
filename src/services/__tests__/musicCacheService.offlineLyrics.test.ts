@@ -1,47 +1,31 @@
 const mockFetchLyrics = jest.fn();
-const mockDownloadFileAsyncWithProgress = jest.fn();
+const mockDownload = jest.fn();
+const mockPassiveStore = { subscribe: jest.fn(() => jest.fn()) };
 let mockQueueSongs: any[] = [];
 let mockState: any;
 
 jest.mock('expo-file-system', () => {
-  class MockDirectory {
+  class Directory {
     uri: string;
     constructor(...args: any[]) {
-      this.uri = args
-        .map((arg: any) => (typeof arg === 'string' ? arg : arg?.uri ?? ''))
-        .join('/');
+      this.uri = args.map((a: any) => typeof a === 'string' ? a : a?.uri ?? '').join('/');
     }
     get exists() { return true; }
     create = jest.fn();
     delete = jest.fn();
   }
-
-  class MockFile {
-    uri: string;
-    constructor(...args: any[]) {
-      this.uri = args
-        .map((arg: any) => (typeof arg === 'string' ? arg : arg?.uri ?? ''))
-        .join('/');
-    }
-    get exists() { return true; }
+  class File extends Directory {
     get size() { return 1000; }
-    delete = jest.fn();
     move = jest.fn().mockResolvedValue(undefined);
     static downloadFileAsync = jest.fn().mockResolvedValue(undefined);
   }
-
-  return {
-    Directory: MockDirectory,
-    File: MockFile,
-    Paths: { document: { uri: 'file:///document' } },
-  };
+  return { Directory, File, Paths: { document: { uri: 'file:///document' } } };
 });
 
 jest.mock('expo-async-fs', () => ({
   listDirectoryAsync: jest.fn().mockResolvedValue([]),
   getDirectorySizeAsync: jest.fn().mockResolvedValue(0),
-  downloadFileAsyncWithProgress: (...args: unknown[]) =>
-    mockDownloadFileAsyncWithProgress(...args),
+  downloadFileAsyncWithProgress: (...args: unknown[]) => mockDownload(...args),
   deleteDirectoryAsync: jest.fn().mockResolvedValue(true),
   deleteFileAsync: jest.fn().mockResolvedValue(true),
 }));
@@ -49,55 +33,25 @@ jest.mock('expo-async-fs', () => ({
 jest.mock('../../utils/onAppForeground', () => ({
   onAppForeground: jest.fn(() => ({ remove: jest.fn() })),
 }));
-
-jest.mock('../../i18n/i18n', () => ({
-  __esModule: true,
-  default: { t: (key: string) => key },
-}));
-
-jest.mock('../storageService', () => ({
-  checkStorageLimit: jest.fn(() => false),
-}));
-
-jest.mock('../downloadSpeedTracker', () => ({
-  beginDownload: jest.fn(),
-  clearDownload: jest.fn(),
-}));
-
-jest.mock('../detailFetchService', () => ({
-  fetchAlbumDetail: jest.fn(),
-  fetchPlaylistDetail: jest.fn(),
-}));
-
-jest.mock('../../store/favoritesStore', () => ({
-  favoritesStore: { subscribe: jest.fn(() => jest.fn()) },
-}));
-
-jest.mock('../../store/storageLimitStore', () => ({
-  storageLimitStore: { subscribe: jest.fn(() => jest.fn()) },
-}));
-
+jest.mock('../../i18n/i18n', () => ({ __esModule: true, default: { t: (key: string) => key } }));
+jest.mock('../storageService', () => ({ checkStorageLimit: jest.fn(() => false) }));
+jest.mock('../downloadSpeedTracker', () => ({ beginDownload: jest.fn(), clearDownload: jest.fn() }));
+jest.mock('../detailFetchService', () => ({ fetchAlbumDetail: jest.fn(), fetchPlaylistDetail: jest.fn() }));
+jest.mock('../../store/favoritesStore', () => ({ favoritesStore: mockPassiveStore }));
+jest.mock('../../store/storageLimitStore', () => ({ storageLimitStore: mockPassiveStore }));
 jest.mock('../../store/lyricsStore', () => ({
-  lyricsStore: {
-    getState: () => ({ fetchLyrics: mockFetchLyrics }),
-  },
+  lyricsStore: { getState: () => ({ fetchLyrics: mockFetchLyrics }) },
 }));
-
 jest.mock('../../store/musicCacheStore', () => ({
-  musicCacheStore: {
-    getState: () => mockState,
-    setState: jest.fn(),
-  },
+  musicCacheStore: { getState: () => mockState, setState: jest.fn() },
   whenQueuePayloadWritten: jest.fn().mockResolvedValue(undefined),
 }));
-
 jest.mock('../../store/offlineModeStore', () => ({
   offlineModeStore: {
     getState: () => ({ offlineMode: false }),
     subscribe: jest.fn(() => jest.fn()),
   },
 }));
-
 jest.mock('../../store/persistence/musicCacheTables', () => ({
   albumMetaFromAlbumID3: jest.fn(() => ({})),
   countCachedSongs: jest.fn(() => 0),
@@ -110,62 +64,30 @@ jest.mock('../../store/persistence/musicCacheTables', () => ({
   readDownloadQueueSongsAsync: jest.fn(async () => mockQueueSongs),
   readQueuedSongStatus: jest.fn(() => null),
 }));
-
 jest.mock('../imageCacheLogger', () => ({ logImageCache: jest.fn() }));
-
 jest.mock('../../store/processingOverlayStore', () => ({
-  processingOverlayStore: {
-    getState: () => ({ showError: jest.fn() }),
-  },
+  processingOverlayStore: { getState: () => ({ showError: jest.fn() }) },
 }));
-
 jest.mock('../../store/playbackSettingsStore', () => ({
-  playbackSettingsStore: {
-    getState: () => ({ downloadFormat: 'raw', downloadMaxBitRate: null }),
-  },
+  playbackSettingsStore: { getState: () => ({ downloadFormat: 'raw', downloadMaxBitRate: null }) },
 }));
-
 jest.mock('../../utils/effectiveFormat', () => ({
-  resolveEffectiveFormat: jest.fn(() => ({
-    bitRate: undefined,
-    bitDepth: undefined,
-    samplingRate: undefined,
-    capturedAt: 1,
-  })),
+  resolveEffectiveFormat: jest.fn(() => ({ capturedAt: 1 })),
 }));
-
 jest.mock('../../store/persistence/db', () => ({ getDb: jest.fn(() => null) }));
-jest.mock('../../db/repository/details', () => ({
-  getAlbumDetail: jest.fn(),
-  getPlaylistDetail: jest.fn(),
-}));
+jest.mock('../../db/repository/details', () => ({ getAlbumDetail: jest.fn(), getPlaylistDetail: jest.fn() }));
 jest.mock('../../db/repository/songs', () => ({ albumIdsWithSongs: jest.fn() }));
 jest.mock('../../db/repository/favorites', () => ({
-  countStarredSongs: jest.fn(),
-  listAllStarredSongs: jest.fn(),
-  starredItemOf: jest.fn(),
+  countStarredSongs: jest.fn(), listAllStarredSongs: jest.fn(), starredItemOf: jest.fn(),
 }));
-
 jest.mock('../subsonicService', () => ({
   ensureCoverArtAuth: jest.fn().mockResolvedValue(undefined),
   getDownloadStreamUrl: jest.fn(() => 'https://example.com/song'),
 }));
-
-jest.mock('../imageCacheService', () => ({
-  ensureCached: jest.fn().mockResolvedValue(undefined),
-  prefetchCoverArt: jest.fn(),
-}));
-
-jest.mock('../../utils/coverArtId', () => ({
-  coverArtForAlbum: jest.fn(),
-  coverArtForPlaylist: jest.fn(),
-}));
-
+jest.mock('../imageCacheService', () => ({ ensureCached: jest.fn(), prefetchCoverArt: jest.fn() }));
+jest.mock('../../utils/coverArtId', () => ({ coverArtForAlbum: jest.fn(), coverArtForPlaylist: jest.fn() }));
 jest.mock('../../utils/promisePool', () => ({ runPool: jest.fn() }));
-jest.mock('../../hooks/useSongCoverArt', () => ({
-  albumCoverArtById: jest.fn(),
-  resolveSongCoverArt: jest.fn(),
-}));
+jest.mock('../../hooks/useSongCoverArt', () => ({ albumCoverArtById: jest.fn(), resolveSongCoverArt: jest.fn() }));
 jest.mock('../downloadedArtistMetadataService', () => ({
   ensureDownloadedArtistMetadata: jest.fn().mockResolvedValue(undefined),
 }));
@@ -191,25 +113,14 @@ const waitForQueueIdle = async (): Promise<void> => {
 };
 
 beforeEach(() => {
-  mockFetchLyrics.mockReset();
-  mockFetchLyrics.mockResolvedValue(null);
-  mockDownloadFileAsyncWithProgress.mockReset();
-  mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
-
-  const songs = [makeSong('one'), makeSong('two')];
-  mockQueueSongs = songs;
+  mockFetchLyrics.mockReset().mockResolvedValue(null);
+  mockDownload.mockReset().mockResolvedValue(undefined);
+  mockQueueSongs = [makeSong('one'), makeSong('two')];
   mockState = {
     maxConcurrentDownloads: 2,
     downloadQueue: [{
-      queueId: 'queue-lyrics',
-      itemId: 'album-lyrics',
-      type: 'album',
-      name: 'Lyrics Album',
-      totalSongs: songs.length,
-      completedSongs: 0,
-      status: 'queued',
-      addedAt: 1,
-      queuePosition: 1,
+      queueId: 'queue-lyrics', itemId: 'album-lyrics', type: 'album', name: 'Lyrics Album',
+      totalSongs: 2, completedSongs: 0, status: 'queued', addedAt: 1, queuePosition: 1,
     }],
     cachedItems: {},
     cachedSongs: {},
@@ -220,33 +131,20 @@ beforeEach(() => {
     },
     addBytes: jest.fn(),
     addFiles: jest.fn(),
-    upsertCachedSong: (song: any) => {
-      mockState.cachedSongs[song.id] = song;
-    },
-    markItemComplete: (
-      queueId: string,
-      item: any,
-      songsToCommit: any[],
-      edges: Array<{ songId: string; position: number }>,
-    ) => {
-      for (const song of songsToCommit) {
-        mockState.cachedSongs[song.id] = song;
-      }
+    upsertCachedSong: (song: any) => { mockState.cachedSongs[song.id] = song; },
+    markItemComplete: (queueId: string, item: any, songs: any[], edges: any[]) => {
+      for (const song of songs) mockState.cachedSongs[song.id] = song;
       mockState.cachedItems[item.itemId] = {
         ...item,
-        songIds: [...edges]
-          .sort((a, b) => a.position - b.position)
-          .map((edge) => edge.songId),
+        songIds: [...edges].sort((a, b) => a.position - b.position).map((edge) => edge.songId),
       };
-      mockState.downloadQueue = mockState.downloadQueue.filter(
-        (queueItem: any) => queueItem.queueId !== queueId,
-      );
+      mockState.downloadQueue = mockState.downloadQueue.filter((q: any) => q.queueId !== queueId);
     },
   };
 });
 
 describe('offline lyrics download', () => {
-  it('prefetches lyrics for each song after a successful bulk audio download', async () => {
+  it('prefetches lyrics after a successful bulk audio download', async () => {
     resumeIfSpaceAvailable();
     await waitForQueueIdle();
 
@@ -256,7 +154,7 @@ describe('offline lyrics download', () => {
     expect(mockFetchLyrics).toHaveBeenCalledWith('two', 'Test Artist', 'Song two');
   });
 
-  it('keeps the completed audio download when lyric prefetch fails', async () => {
+  it('keeps the audio download complete when lyric prefetch fails', async () => {
     mockFetchLyrics.mockRejectedValue(new Error('lyrics unavailable'));
 
     resumeIfSpaceAvailable();
