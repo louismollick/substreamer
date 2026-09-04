@@ -1,7 +1,7 @@
 jest.mock('../../store/persistence/kvStorage', () => require('../../store/persistence/__mocks__/kvStorage'));
 
 import React from 'react';
-import { render } from '@testing-library/react-native';
+import { fireEvent, render } from '@testing-library/react-native';
 
 /* ------------------------------------------------------------------ */
 /*  Mutable mock state (read through closures by the mocks below)      */
@@ -15,6 +15,7 @@ type CachedItem =
 let mockCachedItems: Record<string, CachedItem> = {};
 let mockOfflineMode = false;
 let mockDownloadStatus: 'none' | 'queued' | 'downloading' | 'partial' | 'complete' = 'none';
+const mockAddArtistToQueue = jest.fn().mockResolvedValue(undefined);
 
 /* ------------------------------------------------------------------ */
 /*  Mocks                                                              */
@@ -75,6 +76,7 @@ jest.mock('../../hooks/useSongCoverArt', () => ({
 
 jest.mock('../../services/moreOptionsService', () => ({
   addAlbumToQueue: jest.fn(),
+  addArtistToQueue: (...args: unknown[]) => mockAddArtistToQueue(...args),
   addPlaylistToQueue: jest.fn(),
   addSongToQueue: jest.fn(),
   cancelDownload: jest.fn(),
@@ -99,7 +101,7 @@ jest.mock('../../services/downloadedArtistService', () => ({
 }));
 jest.mock('../../services/subsonicService', () => ({
   deletePlaylist: jest.fn(),
-  isVariousArtists: () => false,
+  isVariousArtists: (name: string) => name === 'Various Artists',
 }));
 jest.mock('../../services/serverCapabilityService', () => ({
   canUserShare: () => true,
@@ -170,7 +172,7 @@ jest.mock('../../db/detailNotifier', () => ({ bumpDetailChanged: jest.fn() }));
 
 import { MoreOptionsSheet } from '../MoreOptionsSheet';
 import { moreOptionsStore, type MoreOptionsSource } from '../../store/moreOptionsStore';
-import type { Child } from '../../services/subsonicService';
+import type { ArtistID3, Child } from '../../services/subsonicService';
 
 /* ------------------------------------------------------------------ */
 /*  Fixtures                                                           */
@@ -185,6 +187,11 @@ const song = {
   duration: 180,
 } as unknown as Child;
 
+const artist = {
+  id: 'ar1',
+  name: 'Test Artist',
+} as ArtistID3;
+
 /** The two states that make a song's per-song "Remove Download" eligible. */
 const songLevelClaim: Record<string, CachedItem> = {
   'song:s1': { type: 'song', songIds: ['s1'] },
@@ -197,10 +204,18 @@ function showSong(source?: MoreOptionsSource) {
   moreOptionsStore.getState().show({ type: 'song', item: song }, source);
 }
 
+function showArtist(name = artist.name) {
+  moreOptionsStore.getState().show({
+    type: 'artist',
+    item: { ...artist, name },
+  });
+}
+
 beforeEach(() => {
   mockCachedItems = {};
   mockOfflineMode = false;
   mockDownloadStatus = 'none';
+  mockAddArtistToQueue.mockClear();
   mockHasDownloadedArtist.mockReset();
   mockHasDownloadedArtist.mockResolvedValue(true);
   moreOptionsStore.setState({ visible: false, entity: null, source: 'default' });
@@ -308,6 +323,32 @@ describe('MoreOptionsSheet — isPlayerSource must not treat every non-default s
     showSong('player-phone-portrait');
     const { queryByText } = render(<MoreOptionsSheet />);
     expect(queryByText('Remove Download')).toBeTruthy();
+  });
+});
+
+describe('MoreOptionsSheet — artist Add to Queue', () => {
+  it('queues a regular artist from the Add to Queue action', () => {
+    showArtist();
+    const { getByText } = render(<MoreOptionsSheet />);
+
+    fireEvent.press(getByText('Add to Queue'));
+
+    expect(mockAddArtistToQueue).toHaveBeenCalledWith('ar1', 'Test Artist');
+  });
+
+  it('keeps Add to Queue available for artists while offline', () => {
+    mockOfflineMode = true;
+    showArtist();
+    const { queryByText } = render(<MoreOptionsSheet />);
+
+    expect(queryByText('Add to Queue')).toBeTruthy();
+  });
+
+  it('hides Add to Queue for Various Artists', () => {
+    showArtist('Various Artists');
+    const { queryByText } = render(<MoreOptionsSheet />);
+
+    expect(queryByText('Add to Queue')).toBeNull();
   });
 });
 
