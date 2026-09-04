@@ -1,0 +1,144 @@
+name: Apply PR 12 persistence cleanup
+
+on:
+  push:
+    branches:
+      - fix/parallel-download-queue-clear
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/parallel-download-queue-clear
+
+      - name: Move bulk queue delete into persistence layer
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          tables_path = Path('src/store/persistence/musicCacheTables.ts')
+          tables = tables_path.read_text()
+          anchor = """export async function removeDownloadQueueItem(queueId: string): Promise<void> {
+            const db = getDb();
+            if (db === null) return;
+            try {
+              await db.runAsync('DELETE FROM download_queue WHERE queue_id = ?;', [queueId]);
+            } catch {
+              /* dropped */
+            }
+          }
+          """
+          replacement = anchor + """
+
+          /**
+           * Delete every queue row at or before a snapshot position in one SQLite write.
+           * Queue positions are sparse but append monotonically, so later enqueues are
+           * left alone. Returns false when the write could not be persisted.
+           */
+          export async function removeDownloadQueueItemsThroughPosition(
+            maxQueuePosition: number,
+          ): Promise<boolean> {
+            const db = getDb();
+            if (db === null) return false;
+            try {
+              await db.runAsync(
+                'DELETE FROM download_queue WHERE queue_position <= ?;',
+                [maxQueuePosition],
+              );
+              return true;
+            } catch {
+              return false;
+            }
+          }
+          """
+          if anchor not in tables:
+            raise SystemExit('removeDownloadQueueItem anchor not found')
+          tables_path.write_text(tables.replace(anchor, replacement, 1))
+
+          service_path = Path('src/services/musicCacheService.ts')
+          service = service_path.read_text()
+          import_anchor = """  readDownloadQueueSongRefsAsync,
+            readDownloadQueueSongsAsync,
+          """
+          import_replacement = """  readDownloadQueueSongRefsAsync,
+            readDownloadQueueSongsAsync,
+            removeDownloadQueueItemsThroughPosition,
+          """
+          if import_anchor not in service:
+            raise SystemExit('service import anchor not found')
+          service = service.replace(import_anchor, import_replacement, 1)
+
+          old_bulk = """  const snapshotIds = new Set(queue.map((item) => item.queueId));
+            const db = getDb();
+            let bulkDeleted = false;
+            if (db) {
+              try {
+                await db.runAsync(
+                  'DELETE FROM download_queue WHERE queue_position <= ?;',
+                  [maxQueuePosition],
+                );
+                bulkDeleted = true;
+              } catch {
+                // Fall through to the existing per-item path. A failed bulk write must
+                // not make the in-memory queue disappear while rows remain on disk.
+              }
+            }
+          """
+          new_bulk = """  const snapshotIds = new Set(queue.map((item) => item.queueId));
+            const bulkDeleted = await removeDownloadQueueItemsThroughPosition(maxQueuePosition);
+          """
+          if old_bulk not in service:
+            raise SystemExit('direct bulk SQL block not found')
+          service_path.write_text(service.replace(old_bulk, new_bulk, 1))
+
+          test_path = Path('src/services/__tests__/musicCacheService.test.ts')
+          tests = test_path.read_text()
+          mock_anchor = """    removeDownloadQueueItem: jest.fn((queueId: string) => {
+                queueSongs.delete(queueId);
+              }),
+          """
+          mock_replacement = mock_anchor + """    removeDownloadQueueItemsThroughPosition: jest.fn(async () => true),
+          """
+          if mock_anchor not in tests:
+            raise SystemExit('persistence mock anchor not found')
+          tests = tests.replace(mock_anchor, mock_replacement, 1)
+
+          test_anchor = """    const readRefs = persistenceMock.readDownloadQueueSongRefsAsync as jest.Mock;
+              readRefs.mockClear();
+          """
+          test_replacement = """    const readRefs = persistenceMock.readDownloadQueueSongRefsAsync as jest.Mock;
+              const bulkRemove = persistenceMock.removeDownloadQueueItemsThroughPosition as jest.Mock;
+              readRefs.mockClear();
+              bulkRemove.mockClear();
+          """
+          if test_anchor not in tests:
+            raise SystemExit('bulk clear test setup anchor not found')
+          tests = tests.replace(test_anchor, test_replacement, 1)
+
+          assertion_anchor = """    expect(readRefs).not.toHaveBeenCalled();
+              expect(musicCacheStore.getState().downloadQueue).toHaveLength(0);
+          """
+          assertion_replacement = """    expect(readRefs).not.toHaveBeenCalled();
+              expect(bulkRemove).toHaveBeenCalledTimes(1);
+              expect(bulkRemove).toHaveBeenCalledWith(100);
+              expect(musicCacheStore.getState().downloadQueue).toHaveLength(0);
+          """
+          if assertion_anchor not in tests:
+            raise SystemExit('bulk clear test assertion anchor not found')
+          test_path.write_text(tests.replace(assertion_anchor, assertion_replacement, 1))
+          PY
+
+      - name: Commit persistence cleanup
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-pr12-persistence-cleanup.yml
+          git add src/store/persistence/musicCacheTables.ts src/services/musicCacheService.ts src/services/__tests__/musicCacheService.test.ts
+          git commit -m "refactor: keep bulk queue delete in persistence layer"
+          git push origin HEAD:fix/parallel-download-queue-clear
