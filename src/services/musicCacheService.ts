@@ -55,6 +55,7 @@ import {
   readDownloadQueueAlbumIdsAsync,
   readDownloadQueueSongRefsAsync,
   readDownloadQueueSongsAsync,
+  removeDownloadQueueItemsThroughPosition,
   readQueuedSongStatus,
 } from '../store/persistence/musicCacheTables';
 import { logImageCache } from './imageCacheLogger';
@@ -2110,12 +2111,56 @@ export async function cancelDownload(queueId: string): Promise<void> {
  */
 export async function clearDownloadQueue(): Promise<void> {
   const queue = [...musicCacheStore.getState().downloadQueue];
-  for (const item of queue) {
-    // Serial: each cancel reads its payload before dropping the row, and the resume
-    // below must not restart an item that is still being cancelled.
-    // eslint-disable-next-line no-await-in-loop
-    await cancelDownload(item.queueId);
+  if (queue.length === 0) {
+    resumeIfSpaceAvailable();
+    return;
   }
+
+  // An enqueue publishes to the mirror before its SQL batch lands. Wait for
+  // every row in this snapshot first so the bulk DELETE cannot run ahead of a
+  // parked insert and let that item reappear after the clear.
+  await Promise.all(queue.map((item) => whenQueuePayloadWritten(item.queueId)));
+
+  // Only the currently-downloading item can own live .tmp files: processQueue
+  // runs queue items serially. Keep that cleanup, but do not read every queued
+  // payload just to discover there is nothing partial on disk for it.
+  const activeItem = queue.find((item) => item.status === 'downloading');
+  if (activeItem) {
+    try {
+      await cleanupTmpFilesForQueueItem(activeItem);
+    } catch {
+      /* best-effort: downloadSong/reconciliation also reap tmp remnants */
+    }
+  }
+
+  // queue_position is sparse by design. Deleting through the snapshot maximum
+  // turns N queue-row deletes into one native SQLite operation. Mirror that exact
+  // position boundary in Zustand so a concurrent enqueue can never be deleted from
+  // SQLite while surviving only in memory.
+  const maxQueuePosition = queue.reduce(
+    (max, item) => Math.max(max, item.queuePosition),
+    queue[0].queuePosition,
+  );
+  const bulkDeleted = await removeDownloadQueueItemsThroughPosition(maxQueuePosition);
+
+  if (bulkDeleted) {
+    musicCacheStore.setState((state) => ({
+      downloadQueue: state.downloadQueue.filter(
+        (item) => item.queuePosition > maxQueuePosition,
+      ),
+    }));
+    scheduleRecalculate();
+  } else {
+    const result = await runPool(
+      queue,
+      async (item) => cancelDownload(item.queueId),
+      { concurrency: 5 },
+    );
+    if (result.rejected.length > 0) {
+      throw result.rejected[0].error;
+    }
+  }
+
   resumeIfSpaceAvailable();
 }
 

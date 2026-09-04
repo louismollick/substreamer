@@ -1852,6 +1852,27 @@ export async function removeDownloadQueueItem(queueId: string): Promise<void> {
 }
 
 /**
+ * Delete every queue row at or before a snapshot position in one SQLite write.
+ * Queue positions are sparse; callers must mirror the same position boundary
+ * in memory after this succeeds. Returns false when the write could not be persisted.
+ */
+export async function removeDownloadQueueItemsThroughPosition(
+  maxQueuePosition: number,
+): Promise<boolean> {
+  const db = getDb();
+  if (db === null) return false;
+  try {
+    await db.runAsync(
+      'DELETE FROM download_queue WHERE queue_position <= ?;',
+      [maxQueuePosition],
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Partial update of a queue row. Only status / completedSongs / error can be
  * updated via this path; other fields are immutable once the item is queued.
  */
