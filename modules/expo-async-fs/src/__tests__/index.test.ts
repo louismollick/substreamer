@@ -1,3 +1,6 @@
+import * as FileSystem from 'expo-file-system/legacy';
+import { Platform } from 'react-native';
+
 import ExpoAsyncFsModule from '../ExpoAsyncFsModule';
 import {
   listDirectoryAsync,
@@ -9,11 +12,23 @@ import {
 } from '../index';
 
 jest.mock('../ExpoAsyncFsModule');
+jest.mock('react-native', () => ({ Platform: { OS: 'android' } }));
+jest.mock('expo-file-system/legacy', () => ({
+  FileSystemSessionType: { BACKGROUND: 'background', FOREGROUND: 'foreground' },
+  createDownloadResumable: jest.fn(),
+  getInfoAsync: jest.fn(),
+}));
 
 const mockModule = jest.mocked(ExpoAsyncFsModule);
+const mockFileSystem = jest.mocked(FileSystem);
+
+function setPlatform(os: 'ios' | 'android'): void {
+  Object.defineProperty(Platform, 'OS', { value: os, configurable: true });
+}
 
 beforeEach(() => {
   jest.clearAllMocks();
+  setPlatform('android');
 });
 
 describe('listDirectoryAsync', () => {
@@ -92,7 +107,7 @@ describe('existsAsync', () => {
 });
 
 describe('downloadFileAsyncWithProgress', () => {
-  it('passes url, destinationUri, and downloadId to native', async () => {
+  it('passes url, destinationUri, and downloadId to native on Android', async () => {
     const expected = { uri: 'file:///dest/song.mp3', bytes: 5000 };
     mockModule.downloadFileAsyncWithProgress.mockResolvedValue(expected);
 
@@ -110,17 +125,98 @@ describe('downloadFileAsyncWithProgress', () => {
     expect(result).toEqual(expected);
   });
 
-  it('propagates native errors', async () => {
+  it('propagates native errors on Android', async () => {
     mockModule.downloadFileAsyncWithProgress.mockRejectedValue(new Error('Network error'));
 
     await expect(
       downloadFileAsyncWithProgress('https://fail.com/x', 'file:///dest', 'dl-002'),
     ).rejects.toThrow('Network error');
   });
+
+  it('uses an Expo FileSystem background session on iOS', async () => {
+    setPlatform('ios');
+    const downloadAsync = jest.fn().mockResolvedValue({
+      uri: 'file:///dest/song.mp3',
+      status: 200,
+      headers: {},
+    });
+    mockFileSystem.createDownloadResumable.mockReturnValue({ downloadAsync } as any);
+    mockFileSystem.getInfoAsync.mockResolvedValue({
+      exists: true,
+      uri: 'file:///dest/song.mp3',
+      size: 5000,
+      isDirectory: false,
+      modificationTime: 1,
+    } as any);
+
+    const result = await downloadFileAsyncWithProgress(
+      'https://server.com/song.mp3',
+      'file:///dest/song.mp3',
+      'dl-ios',
+    );
+
+    expect(mockFileSystem.createDownloadResumable).toHaveBeenCalledWith(
+      'https://server.com/song.mp3',
+      'file:///dest/song.mp3',
+      { sessionType: FileSystem.FileSystemSessionType.BACKGROUND },
+      expect.any(Function),
+    );
+    expect(downloadAsync).toHaveBeenCalledTimes(1);
+    expect(mockModule.downloadFileAsyncWithProgress).not.toHaveBeenCalled();
+    expect(result).toEqual({ uri: 'file:///dest/song.mp3', bytes: 5000 });
+  });
+
+  it('forwards Expo FileSystem progress events through the existing listener API on iOS', async () => {
+    setPlatform('ios');
+    const downloadAsync = jest.fn().mockResolvedValue({
+      uri: 'file:///dest/song.mp3',
+      status: 200,
+      headers: {},
+    });
+    mockFileSystem.createDownloadResumable.mockReturnValue({ downloadAsync } as any);
+    mockFileSystem.getInfoAsync.mockResolvedValue({
+      exists: true,
+      uri: 'file:///dest/song.mp3',
+      size: 5000,
+      isDirectory: false,
+      modificationTime: 1,
+    } as any);
+    const listener = jest.fn();
+    const subscription = addDownloadProgressListener(listener);
+
+    const promise = downloadFileAsyncWithProgress(
+      'https://server.com/song.mp3',
+      'file:///dest/song.mp3',
+      'dl-progress',
+    );
+    const progressCallback = mockFileSystem.createDownloadResumable.mock.calls[0][3];
+    progressCallback?.({
+      totalBytesWritten: 2000,
+      totalBytesExpectedToWrite: 5000,
+    });
+    await promise;
+
+    expect(listener).toHaveBeenCalledWith({
+      downloadId: 'dl-progress',
+      bytesWritten: 2000,
+      totalBytes: 5000,
+    });
+    subscription.remove();
+  });
+
+  it('rejects if an iOS background download produces no result', async () => {
+    setPlatform('ios');
+    const downloadAsync = jest.fn().mockResolvedValue(undefined);
+    mockFileSystem.createDownloadResumable.mockReturnValue({ downloadAsync } as any);
+
+    await expect(
+      downloadFileAsyncWithProgress('https://fail.com/x', 'file:///dest', 'dl-empty'),
+    ).rejects.toThrow('Background download did not complete: dl-empty');
+  });
 });
 
 describe('addDownloadProgressListener', () => {
-  it('subscribes to onDownloadProgress events', () => {
+  it('subscribes to native onDownloadProgress events on Android', () => {
     const listener = jest.fn();
     const mockSubscription = { remove: jest.fn() };
     mockModule.addListener.mockReturnValue(mockSubscription);
@@ -131,7 +227,7 @@ describe('addDownloadProgressListener', () => {
     expect(subscription).toBe(mockSubscription);
   });
 
-  it('returns a subscription with remove()', () => {
+  it('returns a native subscription with remove() on Android', () => {
     const mockRemove = jest.fn();
     mockModule.addListener.mockReturnValue({ remove: mockRemove });
 
@@ -139,5 +235,16 @@ describe('addDownloadProgressListener', () => {
     subscription.remove();
 
     expect(mockRemove).toHaveBeenCalled();
+  });
+
+  it('uses a local removable listener for Expo FileSystem progress on iOS', () => {
+    setPlatform('ios');
+    const listener = jest.fn();
+
+    const subscription = addDownloadProgressListener(listener);
+
+    expect(mockModule.addListener).not.toHaveBeenCalled();
+    expect(subscription).toEqual(expect.objectContaining({ remove: expect.any(Function) }));
+    subscription.remove();
   });
 });
