@@ -125,7 +125,7 @@ export async function downloadFileAsyncWithProgress(
     throw new Error(`Background download did not complete: ${downloadId}`);
   }
 
-  const info = await FileSystem.getInfoAsync(result.uri, { size: true });
+  const info = await FileSystem.getInfoAsync(result.uri);
   return {
     uri: result.uri,
     bytes: info.exists ? (info.size ?? 0) : 0,
