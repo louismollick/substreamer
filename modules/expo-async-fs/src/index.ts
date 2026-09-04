@@ -2,15 +2,13 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { type EventSubscription } from 'expo-modules-core';
 import { Platform } from 'react-native';
 
-import ExpoAsyncFsModule from './ExpoAsyncFsModule';
+import ExpoAsyncFsModule, {
+  type DownloadProgressEvent,
+  type DirectoryEntry,
+  type StatResult,
+} from './ExpoAsyncFsModule';
 
-export { type DownloadProgressEvent, type DirectoryEntry, type StatResult } from './ExpoAsyncFsModule';
-
-interface DownloadProgressEvent {
-  downloadId: string;
-  bytesWritten: number;
-  totalBytes: number;
-}
+export type { DownloadProgressEvent, DirectoryEntry, StatResult };
 
 const iosDownloadProgressListeners = new Set<(event: DownloadProgressEvent) => void>();
 
@@ -42,7 +40,7 @@ export function listDirectoryAsync(uri: string): Promise<string[]> {
  */
 export function listDirectoryWithSizesAsync(
   uri: string,
-): Promise<import('./ExpoAsyncFsModule').DirectoryEntry[]> {
+): Promise<DirectoryEntry[]> {
   return ExpoAsyncFsModule.listDirectoryWithSizesAsync(uri);
 }
 
@@ -52,9 +50,7 @@ export function listDirectoryWithSizesAsync(
  * directories. Use this instead of expo-file-system's sync `File.exists` /
  * `.size` on hot/interactive paths — those block the JS thread.
  */
-export function statAsync(
-  uri: string,
-): Promise<import('./ExpoAsyncFsModule').StatResult> {
+export function statAsync(uri: string): Promise<StatResult> {
   return ExpoAsyncFsModule.statAsync(uri);
 }
 
