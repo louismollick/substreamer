@@ -2110,12 +2110,11 @@ export async function cancelDownload(queueId: string): Promise<void> {
  */
 export async function clearDownloadQueue(): Promise<void> {
   const queue = [...musicCacheStore.getState().downloadQueue];
-  for (const item of queue) {
-    // Serial: each cancel reads its payload before dropping the row, and the resume
-    // below must not restart an item that is still being cancelled.
-    // eslint-disable-next-line no-await-in-loop
-    await cancelDownload(item.queueId);
-  }
+  await runPool(
+    queue,
+    async (item) => cancelDownload(item.queueId),
+    { concurrency: 5 },
+  );
   resumeIfSpaceAvailable();
 }
 
