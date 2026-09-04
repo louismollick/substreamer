@@ -1,0 +1,151 @@
+name: Apply PR 12 boundary fix
+
+on:
+  push:
+    branches:
+      - fix/parallel-download-queue-clear
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/parallel-download-queue-clear
+
+      - name: Keep SQLite and Zustand clear boundaries identical
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          service_path = Path('src/services/musicCacheService.ts')
+          service = service_path.read_text()
+          old = """  // queue_position is sparse by design, but new rows append after the current
+            // maximum. Deleting through the snapshot maximum turns N queue-row deletes
+            // into one native SQLite operation while preserving later enqueues.
+            const maxQueuePosition = queue.reduce(
+              (max, item) => Math.max(max, item.queuePosition),
+              queue[0].queuePosition,
+            );
+            const snapshotIds = new Set(queue.map((item) => item.queueId));
+            const bulkDeleted = await removeDownloadQueueItemsThroughPosition(maxQueuePosition);
+
+            if (bulkDeleted) {
+              musicCacheStore.setState((state) => ({
+                downloadQueue: state.downloadQueue.filter(
+                  (item) => !snapshotIds.has(item.queueId),
+                ),
+              }));
+          """
+          new = """  // queue_position is sparse by design. Deleting through the snapshot maximum
+            // turns N queue-row deletes into one native SQLite operation. Mirror that exact
+            // position boundary in Zustand so a concurrent enqueue can never be deleted from
+            // SQLite while surviving only in memory.
+            const maxQueuePosition = queue.reduce(
+              (max, item) => Math.max(max, item.queuePosition),
+              queue[0].queuePosition,
+            );
+            const bulkDeleted = await removeDownloadQueueItemsThroughPosition(maxQueuePosition);
+
+            if (bulkDeleted) {
+              musicCacheStore.setState((state) => ({
+                downloadQueue: state.downloadQueue.filter(
+                  (item) => item.queuePosition > maxQueuePosition,
+                ),
+              }));
+          """
+          if old not in service:
+            raise SystemExit('service boundary block not found')
+          service_path.write_text(service.replace(old, new, 1))
+
+          tables_path = Path('src/store/persistence/musicCacheTables.ts')
+          tables = tables_path.read_text()
+          tables = tables.replace(
+            """}\n\n\n/**\n * Delete every queue row at or before a snapshot position in one SQLite write.\n * Queue positions are sparse but append monotonically, so later enqueues are\n * left alone. Returns false when the write could not be persisted.\n */\n""",
+            """}\n\n/**\n * Delete every queue row at or before a snapshot position in one SQLite write.\n * Queue positions are sparse; callers must mirror the same position boundary\n * in memory after this succeeds. Returns false when the write could not be persisted.\n */\n""",
+            1,
+          )
+          tables_path.write_text(tables)
+
+          test_path = Path('src/services/__tests__/musicCacheService.test.ts')
+          tests = test_path.read_text()
+          anchor = """  it('does not read every queued payload when clearing a large queue', async () => {
+              const readRefs = persistenceMock.readDownloadQueueSongRefsAsync as jest.Mock;
+              const bulkRemove = persistenceMock.removeDownloadQueueItemsThroughPosition as jest.Mock;
+              readRefs.mockClear();
+              bulkRemove.mockClear();
+              musicCacheStore.setState({
+                downloadQueue: Array.from({ length: 100 }, (_, i) => ({
+                  queueId: `bulk-q${i}`,
+                  itemId: `bulk-a${i}`,
+                  type: 'album',
+                  name: 'X',
+                  status: 'queued',
+                  totalSongs: 1,
+                  completedSongs: 0,
+                  addedAt: i,
+                  queuePosition: i + 1,
+                })),
+              } as any);
+
+              await clearDownloadQueue();
+
+              expect(readRefs).not.toHaveBeenCalled();
+              expect(bulkRemove).toHaveBeenCalledTimes(1);
+              expect(bulkRemove).toHaveBeenCalledWith(100);
+              expect(musicCacheStore.getState().downloadQueue).toHaveLength(0);
+            });
+          """
+          addition = anchor + """
+
+            it('mirrors the SQL position boundary when an enqueue races the clear', async () => {
+              const bulkRemove = persistenceMock.removeDownloadQueueItemsThroughPosition as jest.Mock;
+              musicCacheStore.setState({
+                downloadQueue: [
+                  {
+                    queueId: 'snapshot', itemId: 'a1', type: 'album', name: 'X', status: 'queued',
+                    totalSongs: 1, completedSongs: 0, addedAt: 1, queuePosition: 100,
+                  },
+                ],
+              } as any);
+              bulkRemove.mockImplementationOnce(async () => {
+                musicCacheStore.setState((state: any) => ({
+                  downloadQueue: [
+                    ...state.downloadQueue,
+                    {
+                      queueId: 'raced-low', itemId: 'a2', type: 'album', name: 'X', status: 'queued',
+                      totalSongs: 1, completedSongs: 0, addedAt: 2, queuePosition: 100,
+                    },
+                    {
+                      queueId: 'raced-high', itemId: 'a3', type: 'album', name: 'X', status: 'queued',
+                      totalSongs: 1, completedSongs: 0, addedAt: 3, queuePosition: 101,
+                    },
+                  ],
+                }));
+                return true;
+              });
+
+              await clearDownloadQueue();
+
+              expect(musicCacheStore.getState().downloadQueue.map((item) => item.queueId)).toEqual([
+                'raced-high',
+              ]);
+            });
+          """
+          if anchor not in tests:
+            raise SystemExit('bulk clear regression anchor not found')
+          test_path.write_text(tests.replace(anchor, addition, 1))
+          PY
+
+      - name: Commit boundary fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-pr12-boundary-fix.yml
+          git add src/services/musicCacheService.ts src/services/__tests__/musicCacheService.test.ts src/store/persistence/musicCacheTables.ts
+          git commit -m "fix: mirror bulk queue clear boundary"
+          git push origin HEAD:fix/parallel-download-queue-clear
