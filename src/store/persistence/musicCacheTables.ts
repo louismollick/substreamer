@@ -1851,11 +1851,10 @@ export async function removeDownloadQueueItem(queueId: string): Promise<void> {
   }
 }
 
-
 /**
  * Delete every queue row at or before a snapshot position in one SQLite write.
- * Queue positions are sparse but append monotonically, so later enqueues are
- * left alone. Returns false when the write could not be persisted.
+ * Queue positions are sparse; callers must mirror the same position boundary
+ * in memory after this succeeds. Returns false when the write could not be persisted.
  */
 export async function removeDownloadQueueItemsThroughPosition(
   maxQueuePosition: number,

@@ -2133,20 +2133,20 @@ export async function clearDownloadQueue(): Promise<void> {
     }
   }
 
-  // queue_position is sparse by design, but new rows append after the current
-  // maximum. Deleting through the snapshot maximum turns N queue-row deletes
-  // into one native SQLite operation while preserving later enqueues.
+  // queue_position is sparse by design. Deleting through the snapshot maximum
+  // turns N queue-row deletes into one native SQLite operation. Mirror that exact
+  // position boundary in Zustand so a concurrent enqueue can never be deleted from
+  // SQLite while surviving only in memory.
   const maxQueuePosition = queue.reduce(
     (max, item) => Math.max(max, item.queuePosition),
     queue[0].queuePosition,
   );
-  const snapshotIds = new Set(queue.map((item) => item.queueId));
   const bulkDeleted = await removeDownloadQueueItemsThroughPosition(maxQueuePosition);
 
   if (bulkDeleted) {
     musicCacheStore.setState((state) => ({
       downloadQueue: state.downloadQueue.filter(
-        (item) => !snapshotIds.has(item.queueId),
+        (item) => item.queuePosition > maxQueuePosition,
       ),
     }));
     scheduleRecalculate();
