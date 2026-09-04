@@ -19,7 +19,7 @@ jest.mock('expo-file-system', () => {
     move = jest.fn().mockResolvedValue(undefined);
     static downloadFileAsync = jest.fn().mockResolvedValue(undefined);
   }
-  return { Directory, File, Paths: { document: { uri: 'file:///document' } };
+  return { Directory, File, Paths: { document: { uri: 'file:///document' } } };
 });
 
 jest.mock('expo-async-fs', () => ({
