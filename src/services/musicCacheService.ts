@@ -37,6 +37,7 @@ import { beginDownload, clearDownload } from './downloadSpeedTracker';
 import { fetchAlbumDetail, fetchPlaylistDetail } from './detailFetchService';
 import { favoritesStore } from '../store/favoritesStore';
 import { storageLimitStore } from '../store/storageLimitStore';
+import { lyricsStore } from '../store/lyricsStore';
 import {
   musicCacheStore,
   whenQueuePayloadWritten,
@@ -765,6 +766,15 @@ function cacheTrackCoverArt(tracks: Child[]): void {
   prefetchCoverArt(tracks);
 }
 
+function cacheTrackLyrics(song: Child): void {
+  void lyricsStore
+    .getState()
+    .fetchLyrics(song.id, song.artist, song.title)
+    .catch(() => {
+      /* best-effort — lyrics are optional metadata */
+    });
+}
+
 /** Enqueue an album download. */
 /**
  * Cache an item's cover source before its audio binaries so a downloaded item
@@ -1011,6 +1021,7 @@ export async function enqueueSongDownload(song: Child): Promise<void> {
     );
     insertCachedItemSong(itemId, 1, song.id);
     registerTrackToItem(song.id, itemId);
+    cacheTrackLyrics(song);
     return;
   }
 
@@ -1405,6 +1416,15 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
 
     for (const e of edgesForCommit) {
       registerTrackToItem(e.songId, queueItem.itemId);
+    }
+
+    // Lyrics are optional metadata. Start populating the same persistent
+    // lyrics cache the UI already reads only after the audio item has been
+    // finalised, so a slow/missing lyric response can never hold the song in
+    // a downloading state or turn a successful audio download into an error.
+    const lyricsSongs = new Map(songs.map((song) => [song.id, song]));
+    for (const song of lyricsSongs.values()) {
+      cacheTrackLyrics(song);
     }
   } else {
     musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
