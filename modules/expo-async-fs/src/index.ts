@@ -1,8 +1,22 @@
-import ExpoAsyncFsModule from './ExpoAsyncFsModule';
-
+import * as FileSystem from 'expo-file-system/legacy';
 import { type EventSubscription } from 'expo-modules-core';
+import { Platform } from 'react-native';
 
-export { type DownloadProgressEvent, type DirectoryEntry, type StatResult } from './ExpoAsyncFsModule';
+import ExpoAsyncFsModule, {
+  type DownloadProgressEvent,
+  type DirectoryEntry,
+  type StatResult,
+} from './ExpoAsyncFsModule';
+
+export type { DownloadProgressEvent, DirectoryEntry, StatResult };
+
+const iosDownloadProgressListeners = new Set<(event: DownloadProgressEvent) => void>();
+
+function emitIosDownloadProgress(event: DownloadProgressEvent): void {
+  for (const listener of iosDownloadProgressListeners) {
+    listener(event);
+  }
+}
 
 /**
  * List directory contents asynchronously on a native background thread.
@@ -26,7 +40,7 @@ export function listDirectoryAsync(uri: string): Promise<string[]> {
  */
 export function listDirectoryWithSizesAsync(
   uri: string,
-): Promise<import('./ExpoAsyncFsModule').DirectoryEntry[]> {
+): Promise<DirectoryEntry[]> {
   return ExpoAsyncFsModule.listDirectoryWithSizesAsync(uri);
 }
 
@@ -36,9 +50,7 @@ export function listDirectoryWithSizesAsync(
  * directories. Use this instead of expo-file-system's sync `File.exists` /
  * `.size` on hot/interactive paths — those block the JS thread.
  */
-export function statAsync(
-  uri: string,
-): Promise<import('./ExpoAsyncFsModule').StatResult> {
+export function statAsync(uri: string): Promise<StatResult> {
   return ExpoAsyncFsModule.statAsync(uri);
 }
 
@@ -76,23 +88,71 @@ export function getDirectorySizeAsync(uri: string): Promise<number> {
 }
 
 /**
- * Download a file on the native layer with progress events.
- * Returns the destination URI and total bytes written.
+ * Download a file with progress events.
+ *
+ * Android keeps the existing native implementation. On iOS, use Expo
+ * FileSystem's legacy DownloadResumable API with an explicit BACKGROUND
+ * session. That hands the transfer to iOS's background URLSession machinery,
+ * so the bytes can keep moving after React Native is suspended.
+ *
+ * Progress callbacks pause while JS is suspended and resume when the app gets
+ * execution again; the underlying iOS transfer itself continues.
  */
-export function downloadFileAsyncWithProgress(
+export async function downloadFileAsyncWithProgress(
   url: string,
   destinationUri: string,
   downloadId: string,
 ): Promise<{ uri: string; bytes: number }> {
-  return ExpoAsyncFsModule.downloadFileAsyncWithProgress(url, destinationUri, downloadId);
+  if (Platform.OS !== 'ios') {
+    return ExpoAsyncFsModule.downloadFileAsyncWithProgress(url, destinationUri, downloadId);
+  }
+
+  const resumable = FileSystem.createDownloadResumable(
+    url,
+    destinationUri,
+    { sessionType: FileSystem.FileSystemSessionType.BACKGROUND },
+    (progress) => {
+      emitIosDownloadProgress({
+        downloadId,
+        bytesWritten: progress.totalBytesWritten,
+        totalBytes: progress.totalBytesExpectedToWrite,
+      });
+    },
+  );
+
+  const result = await resumable.downloadAsync();
+  if (!result) {
+    throw new Error(`Background download did not complete: ${downloadId}`);
+  }
+  if (result.status < 200 || result.status >= 300) {
+    throw new Error(`Download failed with HTTP status ${result.status}`);
+  }
+
+  const info = await FileSystem.getInfoAsync(result.uri);
+  return {
+    uri: result.uri,
+    bytes: info.exists ? (info.size ?? 0) : 0,
+  };
 }
 
 /**
  * Subscribe to download progress events. Each event contains
  * downloadId, bytesWritten, and totalBytes (-1 if unknown).
+ *
+ * On iOS the events come from Expo FileSystem's progress callback. Elsewhere
+ * they continue to come from the expo-async-fs native module.
  */
 export function addDownloadProgressListener(
-  listener: (event: { downloadId: string; bytesWritten: number; totalBytes: number }) => void,
+  listener: (event: DownloadProgressEvent) => void,
 ): EventSubscription {
-  return ExpoAsyncFsModule.addListener('onDownloadProgress', listener);
+  if (Platform.OS !== 'ios') {
+    return ExpoAsyncFsModule.addListener('onDownloadProgress', listener);
+  }
+
+  iosDownloadProgressListeners.add(listener);
+  return {
+    remove: () => {
+      iosDownloadProgressListeners.delete(listener);
+    },
+  } as EventSubscription;
 }
