@@ -780,7 +780,9 @@ let lyricsPrefetchChain: Promise<void> = Promise.resolve();
 function queueTrackLyrics(songs: Child[]): void {
   if (songs.length === 0) return;
   lyricsPrefetchChain = lyricsPrefetchChain
-    .then(() => runPool(songs, cacheTrackLyrics, { concurrency: 3 }))
+    .then(async () => {
+      await runPool(songs, cacheTrackLyrics, { concurrency: 3 });
+    })
     .catch(() => {
       /* best-effort — lyrics are optional metadata */
     });
