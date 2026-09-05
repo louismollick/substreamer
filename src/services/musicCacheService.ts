@@ -37,6 +37,7 @@ import { beginDownload, clearDownload } from './downloadSpeedTracker';
 import { fetchAlbumDetail, fetchPlaylistDetail } from './detailFetchService';
 import { favoritesStore } from '../store/favoritesStore';
 import { storageLimitStore } from '../store/storageLimitStore';
+import { lyricsStore } from '../store/lyricsStore';
 import {
   musicCacheStore,
   whenQueuePayloadWritten,
@@ -765,6 +766,28 @@ function cacheTrackCoverArt(tracks: Child[]): void {
   prefetchCoverArt(tracks);
 }
 
+async function cacheTrackLyrics(song: Child): Promise<void> {
+  await lyricsStore
+    .getState()
+    .fetchLyrics(song.id, song.artist, song.title)
+    .catch(() => {
+      /* best-effort — lyrics are optional metadata */
+    });
+}
+
+let lyricsPrefetchChain: Promise<void> = Promise.resolve();
+
+function queueTrackLyrics(songs: Child[]): void {
+  if (songs.length === 0) return;
+  lyricsPrefetchChain = lyricsPrefetchChain
+    .then(async () => {
+      await runPool(songs, cacheTrackLyrics, { concurrency: 3 });
+    })
+    .catch(() => {
+      /* best-effort — lyrics are optional metadata */
+    });
+}
+
 /** Enqueue an album download. */
 /**
  * Cache an item's cover source before its audio binaries so a downloaded item
@@ -949,7 +972,10 @@ export async function enqueuePlaylistDownload(
 export async function enqueueSongDownload(song: Child): Promise<void> {
   if (!song?.id) return;
   const itemId = `song:${song.id}`;
-  if (itemId in musicCacheStore.getState().cachedItems) return;
+  if (itemId in musicCacheStore.getState().cachedItems) {
+    queueTrackLyrics([song]);
+    return;
+  }
   if (musicCacheStore.getState().downloadQueue.some((q) => q.itemId === itemId)) return;
 
   await ensureCoverArtAuth();
@@ -1011,6 +1037,7 @@ export async function enqueueSongDownload(song: Child): Promise<void> {
     );
     insertCachedItemSong(itemId, 1, song.id);
     registerTrackToItem(song.id, itemId);
+    queueTrackLyrics([song]);
     return;
   }
 
@@ -1406,6 +1433,13 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
     for (const e of edgesForCommit) {
       registerTrackToItem(e.songId, queueItem.itemId);
     }
+
+    // Lyrics are optional metadata. Start populating the same persistent
+    // lyrics cache the UI already reads only after the audio item has been
+    // finalised, so a slow/missing lyric response can never hold the song in
+    // a downloading state or turn a successful audio download into an error.
+    const lyricsSongs = new Map(songs.map((song) => [song.id, song]));
+    queueTrackLyrics([...lyricsSongs.values()]);
   } else {
     musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
       status: 'error',
