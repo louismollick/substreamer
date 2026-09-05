@@ -21,6 +21,10 @@ jobs:
           cache: npm
       - name: Apply patch
         run: python scripts/.tmp-apply-offline-rekey-fix.py
+      - name: Show patched album enqueue
+        run: nl -ba src/services/musicCacheService.ts | sed -n '800,915p'
+      - name: Show patched download completion
+        run: nl -ba src/services/musicCacheService.ts | sed -n '1380,1515p'
       - run: npm ci
       - name: Run focused regression tests
         run: npx jest src/services/__tests__/musicCacheService.test.ts --runInBand --no-coverage
