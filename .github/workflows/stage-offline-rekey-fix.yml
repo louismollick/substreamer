@@ -20,11 +20,21 @@ jobs:
           node-version: 22
           cache: npm
       - name: Apply patch
-        run: python scripts/.tmp-apply-offline-rekey-fix.py
-      - name: Show patched album enqueue
-        run: nl -ba src/services/musicCacheService.ts | sed -n '800,915p'
-      - name: Show patched download completion
-        run: nl -ba src/services/musicCacheService.ts | sed -n '1380,1515p'
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+          p = Path('scripts/.tmp-apply-offline-rekey-fix.py')
+          s = p.read_text()
+          old = """topup_start = service.index(
+              '  if (isTopUp) {\\n',
+              service.index('export async function enqueueAlbumDownload'),
+          )"""
+          new = """topup_start = service.index('  if (isTopUp) {\\n    // Top-up:')"""
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, new))
+          PY
+          python scripts/.tmp-apply-offline-rekey-fix.py
       - run: npm ci
       - name: Run focused regression tests
         run: npx jest src/services/__tests__/musicCacheService.test.ts --runInBand --no-coverage
