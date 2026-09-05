@@ -124,6 +124,9 @@ export async function downloadFileAsyncWithProgress(
   if (!result) {
     throw new Error(`Background download did not complete: ${downloadId}`);
   }
+  if (result.status < 200 || result.status >= 300) {
+    throw new Error(`Download failed with HTTP status ${result.status}`);
+  }
 
   const info = await FileSystem.getInfoAsync(result.uri);
   return {
