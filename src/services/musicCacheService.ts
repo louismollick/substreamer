@@ -766,8 +766,8 @@ function cacheTrackCoverArt(tracks: Child[]): void {
   prefetchCoverArt(tracks);
 }
 
-function cacheTrackLyrics(song: Child): void {
-  void lyricsStore
+async function cacheTrackLyrics(song: Child): Promise<void> {
+  await lyricsStore
     .getState()
     .fetchLyrics(song.id, song.artist, song.title)
     .catch(() => {
@@ -959,7 +959,10 @@ export async function enqueuePlaylistDownload(
 export async function enqueueSongDownload(song: Child): Promise<void> {
   if (!song?.id) return;
   const itemId = `song:${song.id}`;
-  if (itemId in musicCacheStore.getState().cachedItems) return;
+  if (itemId in musicCacheStore.getState().cachedItems) {
+    void cacheTrackLyrics(song);
+    return;
+  }
   if (musicCacheStore.getState().downloadQueue.some((q) => q.itemId === itemId)) return;
 
   await ensureCoverArtAuth();
@@ -1021,7 +1024,7 @@ export async function enqueueSongDownload(song: Child): Promise<void> {
     );
     insertCachedItemSong(itemId, 1, song.id);
     registerTrackToItem(song.id, itemId);
-    cacheTrackLyrics(song);
+    void cacheTrackLyrics(song);
     return;
   }
 
@@ -1423,9 +1426,11 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
     // finalised, so a slow/missing lyric response can never hold the song in
     // a downloading state or turn a successful audio download into an error.
     const lyricsSongs = new Map(songs.map((song) => [song.id, song]));
-    for (const song of lyricsSongs.values()) {
-      cacheTrackLyrics(song);
-    }
+    void runPool(
+      [...lyricsSongs.values()],
+      cacheTrackLyrics,
+      { concurrency: 3 },
+    );
   } else {
     musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
       status: 'error',
@@ -1797,7 +1802,6 @@ export async function demoteAlbumToPartial(
   }
 
   const { orphanSongIds } = await computeAlbumRemovalOutcome(itemId);
-
   if (orphanSongIds.length === initial.songIds.length) {
     // No survivors — full delete is the right outcome.
     await deleteCachedItem(itemId);
