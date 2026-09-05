@@ -819,53 +819,57 @@ export async function enqueueAlbumDownload(
   if (musicCacheStore.getState().downloadQueue.some((q) => q.itemId === albumId)) return;
 
   if (isTopUp) {
-    // Top-up: download only the songs that aren't already edged to this
-    // album. If the server-side album grew, the new `expectedSongCount`
-    // captures that; if it shrank, we still download whatever the server
-    // currently reports and the stale `expectedSongCount` self-corrects
-    // on merge via `markItemComplete`.
+    // A fresh, complete album response is also authoritative for membership.
+    // Some servers re-key song IDs after a rescan or retag. A delta-only
+    // top-up would append the new IDs beside stale downloaded IDs, producing
+    // duplicate offline rows. In that case queue the full fresh payload so
+    // the worker can keep the old cache intact until every current song is
+    // covered, then reconcile stale album edges.
+    const serverSongCount = typeof album.songCount === 'number'
+      ? Math.max(album.songCount, album.song.length)
+      : undefined;
+    const expectedSongCount = serverSongCount
+      ?? Math.max(existing.expectedSongCount, album.song.length);
+    const freshIds = new Set(album.song.map((s) => s.id));
+    const hasCompleteTrackList = album.song.length >= expectedSongCount;
+    const hasStaleSongIds =
+      hasCompleteTrackList && existing.songIds.some((id) => !freshIds.has(id));
+
     const haveIds = new Set(existing.songIds);
     const missingSongs = album.song.filter((s) => s.id && !haveIds.has(s.id));
+    const songsToQueue = hasStaleSongIds ? album.song : missingSongs;
 
-    // We just fetched a fresh album — carry its metadata into the row, reduced
+    // We just fetched a fresh album. Carry its metadata into the row, reduced
     // to the same `cached_albums` scalars the primary download path stores so
-    // the two writers can't diverge (see the plan's §2.3 decision).
+    // the two writers cannot diverge.
     const albumMeta = albumMetaFromAlbumID3(album);
 
-    if (missingSongs.length === 0) {
-      // No missing songs — refresh `expectedSongCount` so the defensive
-      // partial classification self-corrects and return. `derived: false`
-      // upgrades a partial row that reached full count via favorites/playlist
-      // into a real, explicit album download (overrides the spread's stale flag).
+    if (songsToQueue.length === 0) {
+      // No missing or stale songs. Refresh the authoritative count and metadata.
+      // `derived: false` upgrades a partial row reached via another download
+      // into a real, explicit album download.
       musicCacheStore.getState().upsertCachedItem({
         ...existing,
-        expectedSongCount: album.song.length,
+        expectedSongCount,
         albumMeta,
         derived: false,
       });
       return;
     }
 
-    // Refresh `expectedSongCount` on the existing row with the fresh server
-    // total BEFORE enqueueing. The top-up queue row's payload is only the
-    // missing delta, so the worker's derived count would be
-    // wrong — `markItemComplete` preserves this existing value on merge.
-    // Written unconditionally: the fresh metadata and the derived→real upgrade
-    // both belong on the row, and this runs once per explicit album top-up.
+    // Persist the fresh total before enqueueing. A normal top-up payload is only
+    // the missing delta, while a stale-ID repair deliberately carries the full
+    // current album. `markItemComplete` preserves this value on merge.
     musicCacheStore.getState().upsertCachedItem({
       ...existing,
-      expectedSongCount: album.song.length,
+      expectedSongCount,
       albumMeta,
-      // Explicit album download — upgrade a possibly-derived partial to real.
       derived: false,
     });
 
-    // Cover art keys off the album's `coverArt` value, never the entity ID
-    // (see src/utils/coverArtId.ts) — so the warmed/stored key matches what
-    // the grid renders and resolves on OpenSubsonic servers.
     const topUpCover = coverArtForAlbum(album);
     await ensureCoverBeforeBinary(topUpCover, awaitCover);
-    cacheTrackCoverArt(missingSongs);
+    cacheTrackCoverArt(songsToQueue);
 
     musicCacheStore.getState().enqueueTopUp(
       {
@@ -874,9 +878,9 @@ export async function enqueueAlbumDownload(
         name: album.name,
         artist: album.artist ?? album.displayArtist,
         coverArtId: topUpCover,
-        totalSongs: missingSongs.length,
+        totalSongs: songsToQueue.length,
       },
-      missingSongs,
+      songsToQueue,
     );
 
     processQueue();
@@ -1084,6 +1088,42 @@ function registerTrackToItem(songId: string, itemId: string): void {
     trackToItems.set(songId, bucket);
   }
   bucket.add(itemId);
+}
+
+/**
+ * Remove album memberships that a completed fresh album replacement no
+ * longer contains. The caller invokes this only after every current song is
+ * covered, so a failed replacement never destroys the previous offline copy.
+ * Cross-item refcounting stays in `removeCachedItemSong`: a stale file is
+ * deleted only when no other real download still references it.
+ */
+async function removeStaleAlbumEdges(
+  albumId: string,
+  keepIds: ReadonlySet<string>,
+): Promise<void> {
+  const initial = musicCacheStore.getState().cachedItems[albumId];
+  if (!initial || initial.type !== 'album') return;
+
+  const staleIds = initial.songIds.filter((id) => !keepIds.has(id));
+  for (const songId of staleIds) {
+    const current = musicCacheStore.getState().cachedItems[albumId];
+    if (!current) return;
+    const index = current.songIds.indexOf(songId);
+    if (index < 0) continue;
+    const song = musicCacheStore.getState().cachedSongs[songId];
+    // eslint-disable-next-line no-await-in-loop
+    const { orphanedSongId } = await musicCacheStore
+      .getState()
+      .removeCachedItemSong(albumId, index + 1);
+    trackToItems.get(songId)?.delete(albumId);
+    if (orphanedSongId) {
+      trackToItems.delete(orphanedSongId);
+      trackUriMap.delete(orphanedSongId);
+      if (song) {
+        void deleteFileAsync(resolveSongFile(song).uri).catch(() => { /* best-effort */ });
+      }
+    }
+  }
 }
 
 /**
@@ -1377,7 +1417,20 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
   const uniqueSongIds = new Set(itemEdges.map((e) => e.songId));
 
   if (uniqueSongIds.size === new Set(songs.map((s) => s.id)).size) {
-    // All unique songs covered — finalise the item.
+    // A stale-ID repair queues the full fresh album, while a normal top-up queues
+    // only its missing delta. Matching the persisted authoritative count is the
+    // durable signal that this successful payload may replace album membership.
+    const existingAlbum = musicCacheStore.getState().cachedItems[queueItem.itemId];
+    const replacesAlbumEdges =
+      queueItem.type === 'album'
+      && existingAlbum?.type === 'album'
+      && songs.length === existingAlbum.expectedSongCount;
+    const replacementIds = replacesAlbumEdges
+      ? new Set(songs.map((song) => song.id))
+      : null;
+
+    // All unique songs covered. Finalise the item first so current edges land
+    // before stale ones are removed.
     const cachedItem: Omit<CachedItemMeta, 'songIds'> = {
       itemId: queueItem.itemId,
       type: queueItem.type,
@@ -1405,6 +1458,24 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
 
     for (const e of edgesForCommit) {
       registerTrackToItem(e.songId, queueItem.itemId);
+    }
+
+    if (replacementIds) {
+      await removeStaleAlbumEdges(queueItem.itemId, replacementIds);
+
+      // Existing current songs kept their old edge positions while replacement
+      // IDs were appended. Reorder the repaired album to the fresh server order.
+      for (let targetIndex = 0; targetIndex < songs.length; targetIndex++) {
+        const latest = musicCacheStore.getState().cachedItems[queueItem.itemId];
+        if (!latest) break;
+        const currentIndex = latest.songIds.indexOf(songs[targetIndex].id);
+        if (currentIndex < 0 || currentIndex === targetIndex) continue;
+        musicCacheStore.getState().reorderCachedItemSongs(
+          queueItem.itemId,
+          currentIndex + 1,
+          targetIndex + 1,
+        );
+      }
     }
   } else {
     musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
