@@ -213,6 +213,21 @@ describe('downloadFileAsyncWithProgress', () => {
       downloadFileAsyncWithProgress('https://fail.com/x', 'file:///dest', 'dl-empty'),
     ).rejects.toThrow('Background download did not complete: dl-empty');
   });
+
+  it('rejects non-success HTTP responses on iOS', async () => {
+    setPlatform('ios');
+    const downloadAsync = jest.fn().mockResolvedValue({
+      uri: 'file:///dest/error.mp3',
+      status: 500,
+      headers: {},
+    });
+    mockFileSystem.createDownloadResumable.mockReturnValue({ downloadAsync } as any);
+
+    await expect(
+      downloadFileAsyncWithProgress('https://fail.com/x', 'file:///dest/error.mp3', 'dl-http'),
+    ).rejects.toThrow('Download failed with HTTP status 500');
+    expect(mockFileSystem.getInfoAsync).not.toHaveBeenCalled();
+  });
 });
 
 describe('addDownloadProgressListener', () => {
