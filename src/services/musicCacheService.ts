@@ -775,6 +775,17 @@ async function cacheTrackLyrics(song: Child): Promise<void> {
     });
 }
 
+let lyricsPrefetchChain: Promise<void> = Promise.resolve();
+
+function queueTrackLyrics(songs: Child[]): void {
+  if (songs.length === 0) return;
+  lyricsPrefetchChain = lyricsPrefetchChain
+    .then(() => runPool(songs, cacheTrackLyrics, { concurrency: 3 }))
+    .catch(() => {
+      /* best-effort — lyrics are optional metadata */
+    });
+}
+
 /** Enqueue an album download. */
 /**
  * Cache an item's cover source before its audio binaries so a downloaded item
@@ -960,7 +971,7 @@ export async function enqueueSongDownload(song: Child): Promise<void> {
   if (!song?.id) return;
   const itemId = `song:${song.id}`;
   if (itemId in musicCacheStore.getState().cachedItems) {
-    void cacheTrackLyrics(song);
+    queueTrackLyrics([song]);
     return;
   }
   if (musicCacheStore.getState().downloadQueue.some((q) => q.itemId === itemId)) return;
@@ -1024,7 +1035,7 @@ export async function enqueueSongDownload(song: Child): Promise<void> {
     );
     insertCachedItemSong(itemId, 1, song.id);
     registerTrackToItem(song.id, itemId);
-    void cacheTrackLyrics(song);
+    queueTrackLyrics([song]);
     return;
   }
 
@@ -1426,11 +1437,7 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
     // finalised, so a slow/missing lyric response can never hold the song in
     // a downloading state or turn a successful audio download into an error.
     const lyricsSongs = new Map(songs.map((song) => [song.id, song]));
-    void runPool(
-      [...lyricsSongs.values()],
-      cacheTrackLyrics,
-      { concurrency: 3 },
-    );
+    queueTrackLyrics([...lyricsSongs.values()]);
   } else {
     musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
       status: 'error',
@@ -1802,6 +1809,7 @@ export async function demoteAlbumToPartial(
   }
 
   const { orphanSongIds } = await computeAlbumRemovalOutcome(itemId);
+
   if (orphanSongIds.length === initial.songIds.length) {
     // No survivors — full delete is the right outcome.
     await deleteCachedItem(itemId);
