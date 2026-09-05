@@ -1,0 +1,396 @@
+from pathlib import Path
+
+service_path = Path('src/services/musicCacheService.ts')
+service = service_path.read_text()
+
+topup_start = service.index(
+    '  if (isTopUp) {\n',
+    service.index('export async function enqueueAlbumDownload'),
+)
+topup_end = service.index('  const albumCover = coverArtForAlbum(album);', topup_start)
+new_topup = '''  if (isTopUp) {
+    // A fresh, complete album response is also authoritative for membership.
+    // Some servers re-key song IDs after a rescan or retag. A delta-only
+    // top-up would append the new IDs beside stale downloaded IDs, producing
+    // duplicate offline rows. In that case queue the full fresh payload so
+    // the worker can keep the old cache intact until every current song is
+    // covered, then reconcile stale album edges.
+    const serverSongCount = typeof album.songCount === 'number'
+      ? Math.max(album.songCount, album.song.length)
+      : undefined;
+    const expectedSongCount = serverSongCount
+      ?? Math.max(existing.expectedSongCount, album.song.length);
+    const freshIds = new Set(album.song.map((s) => s.id));
+    const hasCompleteTrackList = album.song.length >= expectedSongCount;
+    const hasStaleSongIds =
+      hasCompleteTrackList && existing.songIds.some((id) => !freshIds.has(id));
+
+    const haveIds = new Set(existing.songIds);
+    const missingSongs = album.song.filter((s) => s.id && !haveIds.has(s.id));
+    const songsToQueue = hasStaleSongIds ? album.song : missingSongs;
+
+    // We just fetched a fresh album. Carry its metadata into the row, reduced
+    // to the same `cached_albums` scalars the primary download path stores so
+    // the two writers cannot diverge.
+    const albumMeta = albumMetaFromAlbumID3(album);
+
+    if (songsToQueue.length === 0) {
+      // No missing or stale songs. Refresh the authoritative count and metadata.
+      // `derived: false` upgrades a partial row reached via another download
+      // into a real, explicit album download.
+      musicCacheStore.getState().upsertCachedItem({
+        ...existing,
+        expectedSongCount,
+        albumMeta,
+        derived: false,
+      });
+      return;
+    }
+
+    // Persist the fresh total before enqueueing. A normal top-up payload is only
+    // the missing delta, while a stale-ID repair deliberately carries the full
+    // current album. `markItemComplete` preserves this value on merge.
+    musicCacheStore.getState().upsertCachedItem({
+      ...existing,
+      expectedSongCount,
+      albumMeta,
+      derived: false,
+    });
+
+    const topUpCover = coverArtForAlbum(album);
+    await ensureCoverBeforeBinary(topUpCover, awaitCover);
+    cacheTrackCoverArt(songsToQueue);
+
+    musicCacheStore.getState().enqueueTopUp(
+      {
+        itemId: albumId,
+        type: 'album',
+        name: album.name,
+        artist: album.artist ?? album.displayArtist,
+        coverArtId: topUpCover,
+        totalSongs: songsToQueue.length,
+      },
+      songsToQueue,
+    );
+
+    processQueue();
+    return;
+  }
+
+'''
+service = service[:topup_start] + new_topup + service[topup_end:]
+
+helper_marker = '''function registerTrackToItem(songId: string, itemId: string): void {
+  let bucket = trackToItems.get(songId);
+  if (!bucket) {
+    bucket = new Set<string>();
+    trackToItems.set(songId, bucket);
+  }
+  bucket.add(itemId);
+}
+
+'''
+assert service.count(helper_marker) == 1
+helper = helper_marker + '''/**
+ * Remove album memberships that a completed fresh album replacement no
+ * longer contains. The caller invokes this only after every current song is
+ * covered, so a failed replacement never destroys the previous offline copy.
+ * Cross-item refcounting stays in `removeCachedItemSong`: a stale file is
+ * deleted only when no other real download still references it.
+ */
+async function removeStaleAlbumEdges(
+  albumId: string,
+  keepIds: ReadonlySet<string>,
+): Promise<void> {
+  const initial = musicCacheStore.getState().cachedItems[albumId];
+  if (!initial || initial.type !== 'album') return;
+
+  const staleIds = initial.songIds.filter((id) => !keepIds.has(id));
+  for (const songId of staleIds) {
+    const current = musicCacheStore.getState().cachedItems[albumId];
+    if (!current) return;
+    const index = current.songIds.indexOf(songId);
+    if (index < 0) continue;
+    const song = musicCacheStore.getState().cachedSongs[songId];
+    // eslint-disable-next-line no-await-in-loop
+    const { orphanedSongId } = await musicCacheStore
+      .getState()
+      .removeCachedItemSong(albumId, index + 1);
+    trackToItems.get(songId)?.delete(albumId);
+    if (orphanedSongId) {
+      trackToItems.delete(orphanedSongId);
+      trackUriMap.delete(orphanedSongId);
+      if (song) {
+        void deleteFileAsync(resolveSongFile(song).uri).catch(() => { /* best-effort */ });
+      }
+    }
+  }
+}
+
+'''
+service = service.replace(helper_marker, helper)
+
+success_start = service.index('  const uniqueSongIds = new Set(itemEdges.map((e) => e.songId));')
+next_fn = service.index('/**\n * Download a single song to disk.', success_start)
+old_success = service[success_start:next_fn]
+assert old_success.rstrip().endswith('}')
+new_success = '''  const uniqueSongIds = new Set(itemEdges.map((e) => e.songId));
+
+  if (uniqueSongIds.size === new Set(songs.map((s) => s.id)).size) {
+    // A stale-ID repair queues the full fresh album, while a normal top-up queues
+    // only its missing delta. Matching the persisted authoritative count is the
+    // durable signal that this successful payload may replace album membership.
+    const existingAlbum = musicCacheStore.getState().cachedItems[queueItem.itemId];
+    const replacesAlbumEdges =
+      queueItem.type === 'album'
+      && existingAlbum?.type === 'album'
+      && songs.length === existingAlbum.expectedSongCount;
+    const replacementIds = replacesAlbumEdges
+      ? new Set(songs.map((song) => song.id))
+      : null;
+
+    // All unique songs covered. Finalise the item first so current edges land
+    // before stale ones are removed.
+    const cachedItem: Omit<CachedItemMeta, 'songIds'> = {
+      itemId: queueItem.itemId,
+      type: queueItem.type,
+      name: queueItem.name,
+      artist: queueItem.artist,
+      coverArtId: queueItem.coverArtId,
+      expectedSongCount: songs.length,
+      parentAlbumId: queueItem.type === 'song' ? songs[0]?.albumId : undefined,
+      lastSyncAt: Date.now(),
+      downloadedAt: Date.now(),
+      ...(await buildCachedItemMetadata(queueItem.itemId, queueItem.type)),
+    };
+    const songsToCommit = Array.from(itemSongsForCommit.values());
+    const edgesForCommit = itemEdges.map((e) => ({
+      songId: e.songId,
+      position: e.position,
+    }));
+    musicCacheStore.getState().markItemComplete(
+      queueItem.queueId,
+      cachedItem,
+      songsToCommit,
+      edgesForCommit,
+      childBySongId,
+    );
+
+    for (const e of edgesForCommit) {
+      registerTrackToItem(e.songId, queueItem.itemId);
+    }
+
+    if (replacementIds) {
+      await removeStaleAlbumEdges(queueItem.itemId, replacementIds);
+
+      // Existing current songs kept their old edge positions while replacement
+      // IDs were appended. Reorder the repaired album to the fresh server order.
+      for (let targetIndex = 0; targetIndex < songs.length; targetIndex++) {
+        const latest = musicCacheStore.getState().cachedItems[queueItem.itemId];
+        if (!latest) break;
+        const currentIndex = latest.songIds.indexOf(songs[targetIndex].id);
+        if (currentIndex < 0 || currentIndex === targetIndex) continue;
+        musicCacheStore.getState().reorderCachedItemSongs(
+          queueItem.itemId,
+          currentIndex + 1,
+          targetIndex + 1,
+        );
+      }
+    }
+  } else {
+    musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
+      status: 'error',
+      error: `Downloaded ${uniqueSongIds.size} of ${new Set(songs.map((s) => s.id)).size} songs`,
+      completedSongs: completedCount,
+    });
+  }
+}
+
+'''
+service = service[:success_start] + new_success + service[next_fn:]
+service_path.write_text(service)
+
+test_path = Path('src/services/__tests__/musicCacheService.test.ts')
+tests = test_path.read_text()
+
+enqueue_marker = "  it('does not notify onAlbumReferenced hook on top-up', async () => {\n"
+assert tests.count(enqueue_marker) == 1
+enqueue_tests = '''  it('queues the full fresh album when a complete response contains stale cached ids', async () => {
+    seedSong(makeCachedSong('old-id', { albumId: 'album-1', bytes: 253, title: 'Same song' }));
+    seedSong(makeCachedSong('keep-id', { albumId: 'album-1' }));
+    seedItem('album-1', {
+      type: 'album',
+      songIds: ['old-id', 'keep-id'],
+      expectedSongCount: 2,
+      downloadedAt: 111,
+    });
+    mockFetchAlbum.mockResolvedValue({
+      id: 'album-1',
+      name: 'Rekeyed',
+      songCount: 2,
+      song: [
+        makeChild('new-id', { albumId: 'album-1', title: 'Same song' }),
+        makeChild('keep-id', { albumId: 'album-1' }),
+      ],
+    });
+    mockCheckStorageLimit.mockReturnValue(true);
+
+    await enqueueAlbumDownload('album-1');
+
+    const queue = musicCacheStore.getState().downloadQueue;
+    expect(queue).toHaveLength(1);
+    expect(queue[0].totalSongs).toBe(2);
+    await whenQueuePayloadWritten(queue[0].queueId);
+    const payload = persistenceMock.__queueSongs.get(queue[0].queueId) as Array<{ id: string }>;
+    expect(payload.map((s) => s.id)).toEqual(['new-id', 'keep-id']);
+    expect(musicCacheStore.getState().cachedItems['album-1'].downloadedAt).toBe(111);
+  });
+
+  it('does not replace stale ids from a truncated album response', async () => {
+    seedSong(makeCachedSong('old-id', { albumId: 'album-1' }));
+    seedSong(makeCachedSong('keep-id', { albumId: 'album-1' }));
+    seedItem('album-1', {
+      type: 'album',
+      songIds: ['old-id', 'keep-id'],
+      expectedSongCount: 3,
+    });
+    mockFetchAlbum.mockResolvedValue({
+      id: 'album-1',
+      name: 'Truncated',
+      songCount: 3,
+      song: [
+        makeChild('keep-id', { albumId: 'album-1' }),
+        makeChild('new-id', { albumId: 'album-1' }),
+      ],
+    });
+    mockCheckStorageLimit.mockReturnValue(true);
+
+    await enqueueAlbumDownload('album-1');
+
+    const queue = musicCacheStore.getState().downloadQueue;
+    expect(queue).toHaveLength(1);
+    expect(queue[0].totalSongs).toBe(1);
+    await whenQueuePayloadWritten(queue[0].queueId);
+    const payload = persistenceMock.__queueSongs.get(queue[0].queueId) as Array<{ id: string }>;
+    expect(payload.map((s) => s.id)).toEqual(['new-id']);
+    expect(musicCacheStore.getState().cachedItems['album-1'].songIds).toEqual([
+      'old-id',
+      'keep-id',
+    ]);
+  });
+
+'''
+tests = tests.replace(enqueue_marker, enqueue_tests + enqueue_marker)
+
+pipeline_marker = "  it('partial-album bookkeeping: playlist download creates partial album row for new song', async () => {\n"
+assert tests.count(pipeline_marker) == 1
+pipeline_tests = '''  it('replaces stale album ids after the full fresh payload succeeds', async () => {
+    mockFileExists = true;
+    mockFileSize = 5000;
+    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    seedSong(makeCachedSong('old-id', {
+      albumId: 'album-rekey',
+      bytes: 253,
+      title: 'Same song',
+    }));
+    seedSong(makeCachedSong('keep-id', { albumId: 'album-rekey' }));
+    seedItem('album-rekey', {
+      type: 'album',
+      songIds: ['old-id', 'keep-id'],
+      expectedSongCount: 2,
+      downloadedAt: 111,
+    });
+    mockFetchAlbum.mockResolvedValue({
+      id: 'album-rekey',
+      name: 'Rekeyed',
+      songCount: 2,
+      song: [
+        makeChild('new-id', { albumId: 'album-rekey', title: 'Same song' }),
+        makeChild('keep-id', { albumId: 'album-rekey' }),
+      ],
+    });
+
+    await enqueueAlbumDownload('album-rekey');
+    await waitForQueueIdle();
+
+    const album = musicCacheStore.getState().cachedItems['album-rekey'];
+    expect(album.songIds).toEqual(['new-id', 'keep-id']);
+    expect(album.downloadedAt).toBe(111);
+    expect(musicCacheStore.getState().cachedSongs['old-id']).toBeUndefined();
+    expect(musicCacheStore.getState().cachedSongs['new-id']).toBeDefined();
+    expect(fileDeletesAsync.some((uri) => uri.includes('old-id'))).toBe(true);
+    expect(mockDownloadFileAsyncWithProgress).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps stale album ids when a replacement download fails', async () => {
+    mockFileExists = true;
+    seedSong(makeCachedSong('old-id', { albumId: 'album-rekey', bytes: 253 }));
+    seedSong(makeCachedSong('keep-id', { albumId: 'album-rekey' }));
+    seedItem('album-rekey', {
+      type: 'album',
+      songIds: ['old-id', 'keep-id'],
+      expectedSongCount: 2,
+    });
+    mockFetchAlbum.mockResolvedValue({
+      id: 'album-rekey',
+      name: 'Rekeyed',
+      songCount: 2,
+      song: [
+        makeChild('new-id', { albumId: 'album-rekey' }),
+        makeChild('keep-id', { albumId: 'album-rekey' }),
+      ],
+    });
+    mockDownloadFileAsyncWithProgress.mockRejectedValue(new Error('network'));
+
+    await enqueueAlbumDownload('album-rekey');
+    await waitForQueueIdle();
+
+    expect(musicCacheStore.getState().cachedItems['album-rekey'].songIds).toEqual([
+      'old-id',
+      'keep-id',
+    ]);
+    expect(musicCacheStore.getState().cachedSongs['old-id']).toBeDefined();
+    expect(fileDeletesAsync.some((uri) => uri.includes('old-id'))).toBe(false);
+    const queued = musicCacheStore.getState().downloadQueue.find(
+      (q: any) => q.itemId === 'album-rekey',
+    );
+    expect(queued?.status).toBe('error');
+  });
+
+  it('drops a stale album edge but preserves its file when another item references it', async () => {
+    mockFileExists = true;
+    mockFileSize = 5000;
+    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    seedSong(makeCachedSong('old-id', { albumId: 'album-rekey', bytes: 253 }));
+    seedSong(makeCachedSong('keep-id', { albumId: 'album-rekey' }));
+    seedItem('album-rekey', {
+      type: 'album',
+      songIds: ['old-id', 'keep-id'],
+      expectedSongCount: 2,
+    });
+    seedItem('pl-old', { type: 'playlist', songIds: ['old-id'] });
+    mockFetchAlbum.mockResolvedValue({
+      id: 'album-rekey',
+      name: 'Rekeyed',
+      songCount: 2,
+      song: [
+        makeChild('new-id', { albumId: 'album-rekey' }),
+        makeChild('keep-id', { albumId: 'album-rekey' }),
+      ],
+    });
+
+    await enqueueAlbumDownload('album-rekey');
+    await waitForQueueIdle();
+
+    expect(musicCacheStore.getState().cachedItems['album-rekey'].songIds).toEqual([
+      'new-id',
+      'keep-id',
+    ]);
+    expect(musicCacheStore.getState().cachedItems['pl-old'].songIds).toEqual(['old-id']);
+    expect(musicCacheStore.getState().cachedSongs['old-id']).toBeDefined();
+    expect(fileDeletesAsync.some((uri) => uri.includes('old-id'))).toBe(false);
+  });
+
+'''
+tests = tests.replace(pipeline_marker, pipeline_tests + pipeline_marker)
+test_path.write_text(tests)
