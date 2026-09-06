@@ -1,0 +1,81 @@
+name: PR 15 takeover patch
+
+on:
+  push:
+    branches:
+      - fix/offline-rekeyed-song-duplicates
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Apply review fix
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one match, found {count}')
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              'src/store/persistence/musicCacheTables.ts',
+              """  try {\n    await db.runAsync('DELETE FROM download_queue WHERE queue_id = ?;', [queueId]);\n  } catch {\n    /* dropped */\n  }\n}\n\n/**\n * Partial update of a queue row.""",
+              """  try {\n    // Batched so this delete cannot overtake earlier edge-reorder batches. A\n    // replacement repair removes the queue only after those batches are queued,\n    // and submission order is what makes that final delete the durability barrier.\n    await db.runAtomicBatchAsync([\n      ['DELETE FROM download_queue WHERE queue_id = ?;', [queueId]],\n    ]);\n  } catch {\n    /* dropped */\n  }\n}\n\n/**\n * Partial update of a queue row.""",
+          )
+
+          replace_once(
+              'src/store/persistence/musicCacheTables.ts',
+              """/**\n * Atomically finalise a download: delete the queue row, upsert the item, upsert\n * all songs, and append every edge — ONE `runAtomicBatchAsync`, so consumers\n * never observe a half-committed state and nothing can interleave mid-write.\n *\n * The queue DELETE cascades `download_queue_songs` and its five array tables, so the\n * payload goes with the item it belonged to. A row left in `error` status is NOT\n * deleted (the user may still retry it), and keeps its songs for the same reason.\n *\n * The vacated `queue_position` stays vacant, deliberately — see\n * `removeDownloadQueueItem`. This is the path that makes renumbering untenable:\n * the queue drains from the front, so a shift here would rewrite every remaining\n * row once per completed album.\n *\n * Statement order is load-bearing: `cached_items` and `cached_songs` are the FK\n * parents of `cached_item_songs`, so both must land before any edge.\n *\n * `songs` is a MIX of `Child`-derived rows and rows rebuilt from memory, and\n * nothing on the row distinguishes them — so `childBySongId` is the explicit\n * channel for the real `Child`s, and only ids present in it get their\n * `cached_song_*` mirrors rewritten.\n */\nexport async function markDownloadComplete(\n  queueId: string,\n  item: Omit<CachedItemRow, 'songIds'>,\n  songs: CachedSongRow[],\n  edges: Array<{ songId: string; position: number }>,\n  childBySongId?: Map<string, Child>,\n): Promise<void> {\n  const db = getDb();\n  if (db === null) return;\n  try {\n    const commands: BatchCommand[] = [\n      ['DELETE FROM download_queue WHERE queue_id = ?;', [queueId]],\n      ...cachedItemCommands(item),\n    ];\n    for (const song of songs) {\n      if (!song.id || !song.albumId) continue;\n      commands.push(...cachedSongCommands(song, childBySongId?.get(song.id)));\n    }\n    // Edges append after whatever the item already holds, so a top-up merging\n    // into an existing row doesn't collide with its 1..K edges (the caller's\n    // positions are 1-based within the queue item's payload, not the cached\n    // row). Sorting fixes the statement order, which fixes the resulting order.\n    const sortedEdges = [...edges].sort((a, b) => a.position - b.position);\n    for (const edge of sortedEdges) {\n      if (!edge.songId) continue;\n      commands.push([APPEND_CACHED_ITEM_SONG_SQL, [item.itemId, item.itemId, edge.songId]]);\n    }\n    await db.runAtomicBatchAsync(commands);\n  } catch {\n    /* dropped */\n  }\n}\n""",
+              """/**\n * Atomically write a completed download: upsert the item, all songs, and every\n * edge in ONE `runAtomicBatchAsync`, so consumers never observe a half-committed\n * item and nothing can interleave mid-write.\n *\n * The normal path deletes the queue row in this same batch. A re-key repair sets\n * `keepQueue` so crash recovery retains the full fresh payload until stale-edge\n * cleanup and reordering finish; its caller removes the queue row afterward.\n *\n * The queue DELETE cascades `download_queue_songs` and its five array tables, so the\n * payload goes with the item it belonged to. A row left in `error` status is NOT\n * deleted (the user may still retry it), and keeps its songs for the same reason.\n *\n * The vacated `queue_position` stays vacant, deliberately — see\n * `removeDownloadQueueItem`. This is the path that makes renumbering untenable:\n * the queue drains from the front, so a shift here would rewrite every remaining\n * row once per completed album.\n *\n * Statement order is load-bearing: `cached_items` and `cached_songs` are the FK\n * parents of `cached_item_songs`, so both must land before any edge.\n *\n * `songs` is a MIX of `Child`-derived rows and rows rebuilt from memory, and\n * nothing on the row distinguishes them — so `childBySongId` is the explicit\n * channel for the real `Child`s, and only ids present in it get their\n * `cached_song_*` mirrors rewritten.\n */\nexport async function markDownloadComplete(\n  queueId: string,\n  item: Omit<CachedItemRow, 'songIds'>,\n  songs: CachedSongRow[],\n  edges: Array<{ songId: string; position: number }>,\n  childBySongId?: Map<string, Child>,\n  options?: { keepQueue?: boolean },\n): Promise<boolean> {\n  const db = getDb();\n  if (db === null) return false;\n  try {\n    const commands: BatchCommand[] = [];\n    if (!options?.keepQueue) {\n      commands.push(['DELETE FROM download_queue WHERE queue_id = ?;', [queueId]]);\n    }\n    commands.push(...cachedItemCommands(item));\n    for (const song of songs) {\n      if (!song.id || !song.albumId) continue;\n      commands.push(...cachedSongCommands(song, childBySongId?.get(song.id)));\n    }\n    // Edges append after whatever the item already holds, so a top-up merging\n    // into an existing row doesn't collide with its 1..K edges (the caller's\n    // positions are 1-based within the queue item's payload, not the cached\n    // row). Sorting fixes the statement order, which fixes the resulting order.\n    const sortedEdges = [...edges].sort((a, b) => a.position - b.position);\n    for (const edge of sortedEdges) {\n      if (!edge.songId) continue;\n      commands.push([APPEND_CACHED_ITEM_SONG_SQL, [item.itemId, item.itemId, edge.songId]]);\n    }\n    await db.runAtomicBatchAsync(commands);\n    return true;\n  } catch {\n    return false;\n  }\n}\n""",
+          )
+
+          replace_once(
+              'src/store/musicCacheStore.ts',
+              """  /**\n   * Finalise a download: remove the queue row, upsert the item + songs, and\n   * insert the edges -- atomic in SQL, then mirrored in memory.\n   *\n   * `childBySongId` carries the real server `Child` for the songs that have one;\n   * only those get their `cached_song_*` mirrors rewritten.\n   */\n  markItemComplete: (\n    queueId: string,\n    item: Omit<CachedItemMeta, 'songIds'>,\n    songs: CachedSongMeta[],\n    edges: Array<{ songId: string; position: number }>,\n    childBySongId?: Map<string, Child>,\n  ) => void;\n""",
+              """  /**\n   * Write a completed download to SQL, then mirror it in memory. The normal path\n   * removes the queue row. `keepQueue` leaves it recoverable while a re-key repair\n   * removes stale edges and restores order.\n   *\n   * `childBySongId` carries the real server `Child` for the songs that have one;\n   * only those get their `cached_song_*` mirrors rewritten.\n   */\n  markItemComplete: (\n    queueId: string,\n    item: Omit<CachedItemMeta, 'songIds'>,\n    songs: CachedSongMeta[],\n    edges: Array<{ songId: string; position: number }>,\n    childBySongId?: Map<string, Child>,\n    options?: { keepQueue?: boolean },\n  ) => Promise<boolean>;\n""",
+          )
+
+          store_path = Path('src/store/musicCacheStore.ts')
+          store_text = store_path.read_text()
+          start = store_text.index('  markItemComplete: (queueId, item, songs, edges, childBySongId) => {')
+          end = store_text.index('\n\n  upsertCachedItem:', start)
+          old_block = store_text[start:end]
+          new_block = """  markItemComplete: (queueId, item, songs, edges, childBySongId, options) => {\n    const existing = get().cachedItems[item.itemId];\n    // For top-ups (existing row):\n    //   - preserve `downloadedAt` (user \"downloaded\" this earlier).\n    //   - preserve `expectedSongCount`: the worker derives it from `songs.length`,\n    //     which for a top-up is only the missing-song delta. The existing row already\n    //     holds the authoritative album total from `enqueueAlbumDownload`; clobbering\n    //     it misclassifies a later remove-with-survivors as complete.\n    const itemToPersist: Omit<CachedItemMeta, 'songIds'> = existing\n      ? {\n          ...preserveItemMetadata(item, existing),\n          downloadedAt: existing.downloadedAt,\n          expectedSongCount: existing.expectedSongCount,\n        }\n      : item;\n\n    // Keep a Promise even under lightweight Jest mocks that return `undefined`;\n    // production returns an explicit boolean. Only `false` means the SQL batch failed.\n    const persisted = Promise.resolve(\n      markDownloadComplete(queueId, itemToPersist, songs, edges, childBySongId, options),\n    ).then((ok) => ok !== false);\n\n    // New songIds from this run, in caller-supplied position order.\n    const newSongIdsInOrder = [...edges]\n      .sort((a, b) => a.position - b.position)\n      .map((e) => e.songId);\n\n    // Merge: keep existing order, append new songs that aren't already edged.\n    let songIds: string[];\n    if (existing) {\n      const existingSet = new Set(existing.songIds);\n      const additions = newSongIdsInOrder.filter((id) => !existingSet.has(id));\n      songIds = [...existing.songIds, ...additions];\n    } else {\n      songIds = newSongIdsInOrder;\n    }\n\n    const applyMirror = (): void => {\n      set((state) => {\n        const nextSongs = { ...state.cachedSongs };\n        for (const s of songs) {\n          nextSongs[s.id] = mergeCachedSong(state.cachedSongs[s.id], s, childBySongId?.get(s.id));\n        }\n        return bumped(state, {\n          downloadQueue: options?.keepQueue\n            ? state.downloadQueue\n            : dropFromQueueMirror(state.downloadQueue, queueId),\n          cachedItems: {\n            ...state.cachedItems,\n            [item.itemId]: { ...itemToPersist, songIds },\n          },\n          cachedSongs: nextSongs,\n        });\n      });\n    };\n\n    // Replacement cleanup is destructive, so do not publish the fresh edges until\n    // their atomic SQL write has succeeded. The normal path keeps its long-standing\n    // optimistic mirror behaviour.\n    if (options?.keepQueue) {\n      return persisted.then((ok) => {\n        if (ok) applyMirror();\n        return ok;\n      });\n    }\n    applyMirror();\n    return persisted;\n  },"""
+          store_path.write_text(store_text[:start] + new_block + store_text[end:])
+
+          service_path = Path('src/services/musicCacheService.ts')
+          service_text = service_path.read_text()
+          old_call = """    musicCacheStore.getState().markItemComplete(\n      queueItem.queueId,\n      cachedItem,\n      songsToCommit,\n      edgesForCommit,\n      childBySongId,\n    );\n\n    for (const e of edgesForCommit) {\n      registerTrackToItem(e.songId, queueItem.itemId);\n    }\n\n    if (replacementIds) {\n      await removeStaleAlbumEdges(queueItem.itemId, replacementIds);\n\n      // Existing current songs kept their old edge positions while replacement\n      // IDs were appended. Reorder the repaired album to the fresh server order.\n      for (let targetIndex = 0; targetIndex < songs.length; targetIndex++) {\n        const latest = musicCacheStore.getState().cachedItems[queueItem.itemId];\n        if (!latest) break;\n        const currentIndex = latest.songIds.indexOf(songs[targetIndex].id);\n        if (currentIndex < 0 || currentIndex === targetIndex) continue;\n        musicCacheStore.getState().reorderCachedItemSongs(\n          queueItem.itemId,\n          currentIndex + 1,\n          targetIndex + 1,\n        );\n      }\n    }\n"""
+          new_call = """    const completion = musicCacheStore.getState().markItemComplete(\n      queueItem.queueId,\n      cachedItem,\n      songsToCommit,\n      edgesForCommit,\n      childBySongId,\n      replacementIds ? { keepQueue: true } : undefined,\n    );\n\n    if (replacementIds) {\n      // A replacement is destructive only after the fresh item/edge batch is on disk.\n      // Until then the queue row remains the recovery record and the old album stays\n      // untouched. If the batch fails, keep both and expose a retryable queue error.\n      const persisted = await completion;\n      if (!persisted) {\n        musicCacheStore.getState().updateQueueItem(queueItem.queueId, {\n          status: 'error',\n          error: 'Failed to finalize download',\n        });\n        return;\n      }\n    }\n\n    for (const e of edgesForCommit) {\n      registerTrackToItem(e.songId, queueItem.itemId);\n    }\n\n    if (replacementIds) {\n      await removeStaleAlbumEdges(queueItem.itemId, replacementIds);\n\n      // Existing current songs kept their old edge positions while replacement\n      // IDs were appended. Reorder the repaired album to the fresh server order.\n      for (let targetIndex = 0; targetIndex < songs.length; targetIndex++) {\n        const latest = musicCacheStore.getState().cachedItems[queueItem.itemId];\n        if (!latest) break;\n        const currentIndex = latest.songIds.indexOf(songs[targetIndex].id);\n        if (currentIndex < 0 || currentIndex === targetIndex) continue;\n        musicCacheStore.getState().reorderCachedItemSongs(\n          queueItem.itemId,\n          currentIndex + 1,\n          targetIndex + 1,\n        );\n      }\n\n      // Queue deletion is batched behind the reorder writes, so if this row is gone\n      // after a crash the repaired edge set and order are already durable.\n      musicCacheStore.getState().removeFromQueue(queueItem.queueId);\n    }\n"""
+          if service_text.count(old_call) != 1:
+              raise SystemExit(f'musicCacheService.ts: expected one completion block, found {service_text.count(old_call)}')
+          service_path.write_text(service_text.replace(old_call, new_call, 1))
+          PY
+      - name: TypeScript
+        run: npx tsc --noEmit
+      - name: Focused music cache tests
+        run: npx jest src/services/__tests__/musicCacheService.test.ts src/store/__tests__/musicCacheStore.test.ts --runInBand --no-coverage
+      - name: Commit review fix
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/services/musicCacheService.ts src/store/musicCacheStore.ts src/store/persistence/musicCacheTables.ts
+          git commit -m "fix(offline): keep rekey repair recoverable"
+          git push origin HEAD:${GITHUB_REF_NAME}
