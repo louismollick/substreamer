@@ -4,6 +4,7 @@ import { Platform } from 'react-native';
 import ExpoAsyncFsModule from './ExpoAsyncFsModule';
 import {
   addBackgroundDownloadProgressListener,
+  canUseBackgroundDownloadUrl,
   consumeBackgroundDownload,
   primeBackgroundDownloads,
   stopBackgroundDownloadsForQueue,
@@ -12,6 +13,7 @@ import {
 
 export { type DownloadProgressEvent, type DirectoryEntry, type StatResult } from './ExpoAsyncFsModule';
 export {
+  canUseBackgroundDownloadUrl,
   primeBackgroundDownloads,
   stopBackgroundDownloadsForQueue,
   type BackgroundDownloadRequest,
@@ -79,15 +81,16 @@ export function getDirectorySizeAsync(uri: string): Promise<number> {
  * Download a file with progress events.
  *
  * Android keeps the existing native expo-async-fs implementation. iOS consumes
- * a persistent react-native-background-downloader task, which may already have
- * been submitted by the queue scheduler before React Native was suspended.
+ * a persistent background task when the URL is reachable by a system background
+ * session. Trusted self-signed hosts stay on the existing foreground path because
+ * their custom trust handler is process-local.
  */
 export function downloadFileAsyncWithProgress(
   url: string,
   destinationUri: string,
   downloadId: string,
 ): Promise<{ uri: string; bytes: number }> {
-  if (Platform.OS === 'ios') {
+  if (Platform.OS === 'ios' && canUseBackgroundDownloadUrl(url)) {
     return consumeBackgroundDownload(url, destinationUri, downloadId);
   }
   return ExpoAsyncFsModule.downloadFileAsyncWithProgress(url, destinationUri, downloadId);
