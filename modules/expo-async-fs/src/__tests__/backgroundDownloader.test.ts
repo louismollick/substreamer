@@ -74,18 +74,21 @@ function createFakeTask(id: string) {
     state: 'PENDING',
     bytesDownloaded: 0,
     bytesTotal: 0,
-    progress: jest.fn(() => task),
-    done: jest.fn(() => task),
-    error: jest.fn((handler: ErrorHandler) => {
-      errorHandler = handler;
-      return task;
-    }),
+    progress: jest.fn(),
+    done: jest.fn(),
+    error: jest.fn(),
     start: jest.fn(),
     stop: jest.fn(async () => undefined),
     fail(error = 'network failed', errorCode = -1009): void {
       errorHandler?.({ error, errorCode });
     },
   };
+  task.progress.mockImplementation(() => task);
+  task.done.mockImplementation(() => task);
+  task.error.mockImplementation((handler: ErrorHandler) => {
+    errorHandler = handler;
+    return task;
+  });
   return task;
 }
 
