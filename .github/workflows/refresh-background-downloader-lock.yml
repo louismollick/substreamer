@@ -1,0 +1,33 @@
+name: Refresh background downloader lockfile
+
+on:
+  push:
+    branches: [fix/native-background-download-queue]
+
+permissions:
+  contents: write
+
+jobs:
+  refresh-lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: fix/native-background-download-queue
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Regenerate package lock
+        run: npm install --package-lock-only --ignore-scripts
+
+      - name: Commit lockfile and remove this workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/refresh-background-downloader-lock.yml
+          git add package-lock.json
+          git commit -m "Update background downloader lockfile"
+          git push origin HEAD:fix/native-background-download-queue
