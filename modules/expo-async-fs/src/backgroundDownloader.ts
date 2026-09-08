@@ -7,6 +7,8 @@ import {
 import { Directory, File, Paths } from 'expo-file-system';
 import { type EventSubscription } from 'expo-modules-core';
 
+import { resolveServerBase } from '../../expo-ssl-trust/src';
+
 import { type DownloadProgressEvent } from './ExpoAsyncFsModule';
 
 const STAGING_DIR_NAME = 'substreamer-background-downloads';
@@ -60,6 +62,10 @@ function taskMetadata(task: BackgroundTask): BackgroundMetadata {
   return metadata as BackgroundMetadata;
 }
 
+function acknowledgeBackgroundEvents(taskId: string): void {
+  void Promise.resolve(completeHandler(taskId)).catch(() => undefined);
+}
+
 function attachTask(
   task: BackgroundTask,
   queueId: string,
@@ -76,26 +82,47 @@ function attachTask(
   // rejection handled now; awaiting the original promise later still rejects.
   void completion.catch(() => undefined);
 
+  const managed = { task, queueId, downloadId, stagingUri, completion };
+  // Register before attaching callbacks or inspecting state. Reconnected tasks
+  // may synchronously report a terminal state while handlers are attached.
+  downloadsById.set(downloadId, managed);
+
+  let settled = false;
+  const finish = (bytes: number): void => {
+    if (settled) return;
+    settled = true;
+    resolveCompletion({ bytes });
+  };
+  const fail = (error: Error): void => {
+    if (settled) return;
+    settled = true;
+    if (downloadsById.get(downloadId) === managed) {
+      downloadsById.delete(downloadId);
+    }
+    // iOS can relaunch the app to deliver a terminal background-session event.
+    // Tell the OS that JS has processed the failure as well as successful jobs.
+    acknowledgeBackgroundEvents(task.id);
+    rejectCompletion(error);
+  };
+
   task
     .progress(({ bytesDownloaded, bytesTotal }) => {
       emitProgress(downloadId, bytesDownloaded, bytesTotal);
     })
     .done(({ bytesDownloaded, bytesTotal }) => {
       emitProgress(downloadId, bytesDownloaded, bytesTotal);
-      resolveCompletion({ bytes: bytesDownloaded });
+      finish(bytesDownloaded);
     })
     .error(({ error, errorCode }) => {
-      rejectCompletion(new Error(`${error} (${errorCode})`));
+      fail(new Error(`${error} (${errorCode})`));
     });
 
   if (task.state === 'DONE') {
-    resolveCompletion({ bytes: task.bytesDownloaded });
+    finish(task.bytesDownloaded);
   } else if (task.state === 'FAILED' || task.state === 'STOPPED') {
-    rejectCompletion(new Error(`Background download ${task.state.toLowerCase()}: ${downloadId}`));
+    fail(new Error(`Background download ${task.state.toLowerCase()}: ${downloadId}`));
   }
 
-  const managed = { task, queueId, downloadId, stagingUri, completion };
-  downloadsById.set(downloadId, managed);
   return managed;
 }
 
@@ -152,6 +179,15 @@ function createManagedDownload(
   const managed = attachTask(task, queueId, request.downloadId, staging.uri);
   task.start();
   return managed;
+}
+
+/**
+ * True when an iOS background URLSession can reach this URL directly.
+ * Trusted self-signed servers are handled by expo-ssl-trust's in-process
+ * URLProtocol/proxy path, neither of which is available to background sessions.
+ */
+export function canUseBackgroundDownloadUrl(url: string): boolean {
+  return resolveServerBase(url) === url;
 }
 
 /**
@@ -224,7 +260,9 @@ export async function consumeBackgroundDownload(
 
     const bytes = destination.exists ? (destination.size ?? result.bytes) : result.bytes;
     await Promise.resolve(completeHandler(managed.task.id));
-    downloadsById.delete(downloadId);
+    if (downloadsById.get(downloadId) === managed) {
+      downloadsById.delete(downloadId);
+    }
     return { uri: destination.uri, bytes };
   } catch (error) {
     // Network/native failures should allow downloadSong's retry-once path to
@@ -253,12 +291,20 @@ export async function stopBackgroundDownloadsForQueue(queueId: string): Promise<
     matching.map(async (download) => {
       cancelledDownloadIds.add(download.downloadId);
       try { await download.task.stop(); } catch { /* best-effort */ }
+
+      // A retry/re-prime may have replaced this task while stop() was in flight.
+      // Never let stale cleanup delete the replacement's staging file or map entry.
+      const current = downloadsById.get(download.downloadId);
+      if (current && current !== download) return;
+
       try {
         const staging = new File(download.stagingUri);
         if (staging.exists) staging.delete();
       } catch { /* best-effort */ }
       activeProgressIds.delete(download.downloadId);
-      downloadsById.delete(download.downloadId);
+      if (current === download) {
+        downloadsById.delete(download.downloadId);
+      }
     }),
   );
 }
