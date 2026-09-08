@@ -36,9 +36,11 @@ export type BackgroundDownloadRequest = {
 };
 
 const downloadsById = new Map<string, ManagedDownload>();
+const cancelledDownloadIds = new Set<string>();
 const activeProgressIds = new Set<string>();
 const progressListeners = new Set<(event: DownloadProgressEvent) => void>();
 let existingTasksPromise: Promise<void> | null = null;
+let directSequence = 0;
 
 function stagingDirectory(): Directory {
   const dir = new Directory(Paths.cache, STAGING_DIR_NAME);
@@ -70,6 +72,9 @@ function attachTask(
     resolveCompletion = resolve;
     rejectCompletion = reject;
   });
+  // Primed tasks can fail before the JS worker reaches their song. Mark the
+  // rejection handled now; awaiting the original promise later still rejects.
+  void completion.catch(() => undefined);
 
   task
     .progress(({ bytesDownloaded, bytesTotal }) => {
@@ -164,8 +169,14 @@ export async function primeBackgroundDownloads(
   setConfig({ maxParallelDownloads });
 
   for (const request of requests) {
+    cancelledDownloadIds.delete(request.downloadId);
     const existing = downloadsById.get(request.downloadId);
-    if (existing) continue;
+    if (existing) {
+      // The worker may have created a direct fallback before proactive priming
+      // won the race. Adopt it into the real queue so a later park/cancel stops it.
+      existing.queueId = queueId;
+      continue;
+    }
     createManagedDownload(queueId, request);
   }
 }
@@ -184,7 +195,13 @@ export async function consumeBackgroundDownload(
 
   let managed = downloadsById.get(downloadId);
   if (!managed) {
-    managed = createManagedDownload(`direct-${Date.now()}`, {
+    // A queue transition deliberately stopped this song. The existing music
+    // worker retries once after a failed transfer, so block that retry until
+    // the queue is claimed again and primeBackgroundDownloads clears the mark.
+    if (cancelledDownloadIds.has(downloadId)) {
+      throw new Error(`Background download cancelled: ${downloadId}`);
+    }
+    managed = createManagedDownload(`direct-${Date.now()}-${++directSequence}`, {
       downloadId,
       url,
       position: 0,
@@ -209,6 +226,17 @@ export async function consumeBackgroundDownload(
     await Promise.resolve(completeHandler(managed.task.id));
     downloadsById.delete(downloadId);
     return { uri: destination.uri, bytes };
+  } catch (error) {
+    // Network/native failures should allow downloadSong's retry-once path to
+    // create a fresh task. Cancellation is tracked separately above.
+    if (downloadsById.get(downloadId) === managed) {
+      downloadsById.delete(downloadId);
+    }
+    try {
+      const staging = new File(managed.stagingUri);
+      if (staging.exists) staging.delete();
+    } catch { /* best-effort */ }
+    throw error;
   } finally {
     activeProgressIds.delete(downloadId);
   }
@@ -223,6 +251,7 @@ export async function stopBackgroundDownloadsForQueue(queueId: string): Promise<
 
   await Promise.all(
     matching.map(async (download) => {
+      cancelledDownloadIds.add(download.downloadId);
       try { await download.task.stop(); } catch { /* best-effort */ }
       try {
         const staging = new File(download.stagingUri);
