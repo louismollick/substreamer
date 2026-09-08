@@ -4,6 +4,7 @@ import ExpoAsyncFsModule from '../ExpoAsyncFsModule';
 import {
   consumeBackgroundDownload,
   addBackgroundDownloadProgressListener,
+  canUseBackgroundDownloadUrl,
 } from '../backgroundDownloader';
 import {
   listDirectoryAsync,
@@ -18,6 +19,7 @@ jest.mock('../ExpoAsyncFsModule');
 jest.mock('../backgroundDownloader', () => ({
   consumeBackgroundDownload: jest.fn(),
   addBackgroundDownloadProgressListener: jest.fn(),
+  canUseBackgroundDownloadUrl: jest.fn(),
   primeBackgroundDownloads: jest.fn(),
   stopBackgroundDownloadsForQueue: jest.fn(),
 }));
@@ -27,6 +29,7 @@ const mockConsumeBackgroundDownload = jest.mocked(consumeBackgroundDownload);
 const mockAddBackgroundDownloadProgressListener = jest.mocked(
   addBackgroundDownloadProgressListener,
 );
+const mockCanUseBackgroundDownloadUrl = jest.mocked(canUseBackgroundDownloadUrl);
 
 function setPlatform(os: 'ios' | 'android'): void {
   Object.defineProperty(Platform, 'OS', { value: os, configurable: true });
@@ -35,6 +38,7 @@ function setPlatform(os: 'ios' | 'android'): void {
 beforeEach(() => {
   jest.clearAllMocks();
   setPlatform('android');
+  mockCanUseBackgroundDownloadUrl.mockReturnValue(true);
 });
 
 describe('listDirectoryAsync', () => {
@@ -143,12 +147,36 @@ describe('downloadFileAsyncWithProgress', () => {
       'dl-ios',
     );
 
+    expect(mockCanUseBackgroundDownloadUrl).toHaveBeenCalledWith(
+      'https://server.com/song.mp3',
+    );
     expect(mockConsumeBackgroundDownload).toHaveBeenCalledWith(
       'https://server.com/song.mp3',
       'file:///dest/song.mp3',
       'dl-ios',
     );
     expect(mockModule.downloadFileAsyncWithProgress).not.toHaveBeenCalled();
+    expect(result).toEqual(expected);
+  });
+
+  it('keeps unsupported iOS URLs on the existing native path', async () => {
+    setPlatform('ios');
+    mockCanUseBackgroundDownloadUrl.mockReturnValue(false);
+    const expected = { uri: 'file:///dest/song.mp3', bytes: 5000 };
+    mockModule.downloadFileAsyncWithProgress.mockResolvedValue(expected);
+
+    const result = await downloadFileAsyncWithProgress(
+      'https://self-signed.example/song.mp3',
+      'file:///dest/song.mp3',
+      'dl-self-signed',
+    );
+
+    expect(mockConsumeBackgroundDownload).not.toHaveBeenCalled();
+    expect(mockModule.downloadFileAsyncWithProgress).toHaveBeenCalledWith(
+      'https://self-signed.example/song.mp3',
+      'file:///dest/song.mp3',
+      'dl-self-signed',
+    );
     expect(result).toEqual(expected);
   });
 
@@ -174,16 +202,21 @@ describe('addDownloadProgressListener', () => {
     expect(subscription).toBe(mockSubscription);
   });
 
-  it('subscribes to background downloader progress on iOS', () => {
+  it('subscribes to both iOS progress sources and removes both', () => {
     setPlatform('ios');
     const listener = jest.fn();
-    const mockSubscription = { remove: jest.fn() };
-    mockAddBackgroundDownloadProgressListener.mockReturnValue(mockSubscription as never);
+    const backgroundSubscription = { remove: jest.fn() };
+    const foregroundSubscription = { remove: jest.fn() };
+    mockAddBackgroundDownloadProgressListener.mockReturnValue(backgroundSubscription as never);
+    mockModule.addListener.mockReturnValue(foregroundSubscription);
 
     const subscription = addDownloadProgressListener(listener);
 
     expect(mockAddBackgroundDownloadProgressListener).toHaveBeenCalledWith(listener);
-    expect(mockModule.addListener).not.toHaveBeenCalled();
-    expect(subscription).toBe(mockSubscription);
+    expect(mockModule.addListener).toHaveBeenCalledWith('onDownloadProgress', listener);
+
+    subscription.remove();
+    expect(backgroundSubscription.remove).toHaveBeenCalledTimes(1);
+    expect(foregroundSubscription.remove).toHaveBeenCalledTimes(1);
   });
 });
