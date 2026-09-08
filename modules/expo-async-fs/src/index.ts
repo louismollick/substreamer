@@ -1,8 +1,21 @@
-import ExpoAsyncFsModule from './ExpoAsyncFsModule';
-
 import { type EventSubscription } from 'expo-modules-core';
+import { Platform } from 'react-native';
+
+import ExpoAsyncFsModule from './ExpoAsyncFsModule';
+import {
+  addBackgroundDownloadProgressListener,
+  consumeBackgroundDownload,
+  primeBackgroundDownloads,
+  stopBackgroundDownloadsForQueue,
+  type BackgroundDownloadRequest,
+} from './backgroundDownloader';
 
 export { type DownloadProgressEvent, type DirectoryEntry, type StatResult } from './ExpoAsyncFsModule';
+export {
+  primeBackgroundDownloads,
+  stopBackgroundDownloadsForQueue,
+  type BackgroundDownloadRequest,
+};
 
 /**
  * List directory contents asynchronously on a native background thread.
@@ -42,57 +55,50 @@ export function statAsync(
   return ExpoAsyncFsModule.statAsync(uri);
 }
 
-/**
- * Convenience over {@link statAsync}: resolves true when the path exists.
- */
+/** Convenience over {@link statAsync}: resolves true when the path exists. */
 export function existsAsync(uri: string): Promise<boolean> {
   return ExpoAsyncFsModule.statAsync(uri).then((r) => r.exists);
 }
 
-/**
- * Delete a single file on a native background thread. Resolves true if a file
- * existed and was deleted, false otherwise.
- */
+/** Delete a single file on a native background thread. */
 export function deleteFileAsync(uri: string): Promise<boolean> {
   return ExpoAsyncFsModule.deleteFileAsync(uri);
 }
 
-/**
- * Recursively delete a directory and all its contents on a native background
- * thread (Android: Dispatchers.IO). For whole-cache wipes — expo-file-system's
- * `Directory.delete()` is sync-only and would block the JS thread unlinking
- * thousands of files. Resolves true if the directory existed and was removed.
- */
+/** Recursively delete a directory and all its contents off the JS thread. */
 export function deleteDirectoryAsync(uri: string): Promise<boolean> {
   return ExpoAsyncFsModule.deleteDirectoryAsync(uri);
 }
 
-/**
- * Calculate total size (in bytes) of a directory recursively
- * on a native background thread.
- */
+/** Calculate total size (in bytes) of a directory recursively off-thread. */
 export function getDirectorySizeAsync(uri: string): Promise<number> {
   return ExpoAsyncFsModule.getDirectorySizeAsync(uri);
 }
 
 /**
- * Download a file on the native layer with progress events.
- * Returns the destination URI and total bytes written.
+ * Download a file with progress events.
+ *
+ * Android keeps the existing native expo-async-fs implementation. iOS consumes
+ * a persistent react-native-background-downloader task, which may already have
+ * been submitted by the queue scheduler before React Native was suspended.
  */
 export function downloadFileAsyncWithProgress(
   url: string,
   destinationUri: string,
   downloadId: string,
 ): Promise<{ uri: string; bytes: number }> {
+  if (Platform.OS === 'ios') {
+    return consumeBackgroundDownload(url, destinationUri, downloadId);
+  }
   return ExpoAsyncFsModule.downloadFileAsyncWithProgress(url, destinationUri, downloadId);
 }
 
-/**
- * Subscribe to download progress events. Each event contains
- * downloadId, bytesWritten, and totalBytes (-1 if unknown).
- */
+/** Subscribe to download progress events. */
 export function addDownloadProgressListener(
   listener: (event: { downloadId: string; bytesWritten: number; totalBytes: number }) => void,
 ): EventSubscription {
+  if (Platform.OS === 'ios') {
+    return addBackgroundDownloadProgressListener(listener);
+  }
   return ExpoAsyncFsModule.addListener('onDownloadProgress', listener);
 }
