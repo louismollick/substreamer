@@ -1,6 +1,7 @@
 import { Platform } from 'react-native';
 
 import {
+  canUseBackgroundDownloadUrl,
   primeBackgroundDownloads,
   stopBackgroundDownloadsForQueue,
   type BackgroundDownloadRequest,
@@ -14,12 +15,23 @@ import {
 import { readDownloadQueueSongsAsync } from '../store/persistence/musicCacheTables';
 import { ensureCoverArtAuth, getDownloadStreamUrl } from './subsonicService';
 
-const primingQueueIds = new Set<string>();
+const queueOperations = new Map<string, Promise<void>>();
+
+function scheduleQueueOperation(queueId: string, operation: () => Promise<void>): void {
+  const previous = queueOperations.get(queueId) ?? Promise.resolve();
+  const next = previous
+    .catch(() => undefined)
+    .then(operation)
+    .finally(() => {
+      if (queueOperations.get(queueId) === next) {
+        queueOperations.delete(queueId);
+      }
+    });
+  queueOperations.set(queueId, next);
+  void next.catch(() => undefined);
+}
 
 async function primeQueueItem(item: DownloadQueueItem): Promise<void> {
-  if (primingQueueIds.has(item.queueId)) return;
-  primingQueueIds.add(item.queueId);
-
   try {
     await whenQueuePayloadWritten(item.queueId);
 
@@ -48,7 +60,7 @@ async function primeQueueItem(item: DownloadQueueItem): Promise<void> {
       seen.add(song.id);
 
       const url = getDownloadStreamUrl(song.id);
-      if (!url) continue;
+      if (!url || !canUseBackgroundDownloadUrl(url)) continue;
       requests.push({
         downloadId: song.id,
         url,
@@ -77,8 +89,6 @@ async function primeQueueItem(item: DownloadQueueItem): Promise<void> {
     // create a background task directly if proactive priming fails.
     // eslint-disable-next-line no-console
     console.warn('[iosBackgroundDownloadScheduler] Failed to prime queue item:', error);
-  } finally {
-    primingQueueIds.delete(item.queueId);
   }
 }
 
@@ -92,7 +102,7 @@ function onQueueChanged(
   for (const item of state.downloadQueue) {
     const before = previousById.get(item.queueId);
     if (item.status === 'downloading' && before?.status !== 'downloading') {
-      void primeQueueItem(item);
+      scheduleQueueOperation(item.queueId, () => primeQueueItem(item));
     }
   }
 
@@ -100,7 +110,7 @@ function onQueueChanged(
     if (item.status !== 'downloading') continue;
     const current = currentById.get(item.queueId);
     if (!current || current.status !== 'downloading') {
-      void stopBackgroundDownloadsForQueue(item.queueId).catch(() => undefined);
+      scheduleQueueOperation(item.queueId, () => stopBackgroundDownloadsForQueue(item.queueId));
     }
   }
 }
