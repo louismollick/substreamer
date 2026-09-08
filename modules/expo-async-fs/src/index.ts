@@ -101,7 +101,14 @@ export function addDownloadProgressListener(
   listener: (event: { downloadId: string; bytesWritten: number; totalBytes: number }) => void,
 ): EventSubscription {
   if (Platform.OS === 'ios') {
-    return addBackgroundDownloadProgressListener(listener);
+    const backgroundSubscription = addBackgroundDownloadProgressListener(listener);
+    const foregroundSubscription = ExpoAsyncFsModule.addListener('onDownloadProgress', listener);
+    return {
+      remove: () => {
+        backgroundSubscription.remove();
+        foregroundSubscription.remove();
+      },
+    } as EventSubscription;
   }
   return ExpoAsyncFsModule.addListener('onDownloadProgress', listener);
 }
