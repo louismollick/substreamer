@@ -1,14 +1,11 @@
 const mockCreateDownloadTask = jest.fn();
 const mockGetExistingDownloadTasks = jest.fn();
 const mockCompleteHandler = jest.fn();
-const mockSetConfig = jest.fn();
-const mockResolveServerBase = jest.fn((url: string) => url);
 
 jest.mock('@kesha-antonov/react-native-background-downloader', () => ({
   completeHandler: (...args: unknown[]) => mockCompleteHandler(...args),
   createDownloadTask: (...args: unknown[]) => mockCreateDownloadTask(...args),
   getExistingDownloadTasks: (...args: unknown[]) => mockGetExistingDownloadTasks(...args),
-  setConfig: (...args: unknown[]) => mockSetConfig(...args),
 }));
 
 jest.mock('expo-file-system', () => {
@@ -54,12 +51,7 @@ jest.mock('expo-file-system', () => {
   };
 });
 
-jest.mock('../../../expo-ssl-trust/src', () => ({
-  resolveServerBase: (url: string) => mockResolveServerBase(url),
-}));
-
 import {
-  canUseBackgroundDownloadUrl,
   consumeBackgroundDownload,
   primeBackgroundDownloads,
 } from '../backgroundDownloader';
@@ -96,7 +88,6 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockGetExistingDownloadTasks.mockResolvedValue([]);
   mockCompleteHandler.mockResolvedValue(undefined);
-  mockResolveServerBase.mockImplementation((url: string) => url);
 });
 
 describe('backgroundDownloader', () => {
@@ -110,7 +101,6 @@ describe('backgroundDownloader', () => {
     await primeBackgroundDownloads(
       'queue-1',
       [{ downloadId: 'song-1', url: 'https://server/song-1', position: 1 }],
-      2,
     );
 
     firstTask.fail();
@@ -128,11 +118,5 @@ describe('backgroundDownloader', () => {
 
     retryTask.fail('retry failed', -1001);
     await expect(retry).rejects.toThrow('retry failed (-1001)');
-  });
-
-  it('rejects URLs that need the in-process trust proxy', () => {
-    mockResolveServerBase.mockReturnValue('http://127.0.0.1:1234/token');
-
-    expect(canUseBackgroundDownloadUrl('https://self-signed.example/rest/stream.view')).toBe(false);
   });
 });
