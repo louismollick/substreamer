@@ -1,7 +1,6 @@
 import { Platform } from 'react-native';
 
 import {
-  canUseBackgroundDownloadUrl,
   primeBackgroundDownloads,
   stopBackgroundDownloadsForQueue,
   type BackgroundDownloadRequest,
@@ -60,7 +59,7 @@ async function primeQueueItem(item: DownloadQueueItem): Promise<void> {
       seen.add(song.id);
 
       const url = getDownloadStreamUrl(song.id);
-      if (!url || !canUseBackgroundDownloadUrl(url)) continue;
+      if (!url) continue;
       requests.push({
         downloadId: song.id,
         url,
@@ -70,11 +69,7 @@ async function primeQueueItem(item: DownloadQueueItem): Promise<void> {
 
     if (requests.length === 0) return;
 
-    await primeBackgroundDownloads(
-      item.queueId,
-      requests,
-      musicCacheStore.getState().maxConcurrentDownloads,
-    );
+    await primeBackgroundDownloads(item.queueId, requests);
 
     // A cancel/offline/storage transition may have raced the async payload/auth
     // work above. Never leave newly-created native tasks running for a parked item.
