@@ -35,7 +35,6 @@ export type BackgroundDownloadRequest = {
 };
 
 const downloadsById = new Map<string, ManagedDownload>();
-const cancelledDownloadIds = new Set<string>();
 const activeProgressIds = new Set<string>();
 const progressListeners = new Set<(event: DownloadProgressEvent) => void>();
 let existingTasksPromise: Promise<void> | null = null;
@@ -191,7 +190,6 @@ export async function primeBackgroundDownloads(
   await loadExistingTasks();
 
   for (const request of requests) {
-    cancelledDownloadIds.delete(request.downloadId);
     const existing = downloadsById.get(request.downloadId);
     if (existing) {
       // The worker may have created a direct fallback before proactive priming
@@ -217,12 +215,6 @@ export async function consumeBackgroundDownload(
 
   let managed = downloadsById.get(downloadId);
   if (!managed) {
-    // A queue transition deliberately stopped this song. The existing music
-    // worker retries once after a failed transfer, so block that retry until
-    // the queue is claimed again and primeBackgroundDownloads clears the mark.
-    if (cancelledDownloadIds.has(downloadId)) {
-      throw new Error(`Background download cancelled: ${downloadId}`);
-    }
     managed = createManagedDownload(`direct-${Date.now()}-${++directSequence}`, {
       downloadId,
       url,
@@ -251,8 +243,6 @@ export async function consumeBackgroundDownload(
     }
     return { uri: destination.uri, bytes };
   } catch (error) {
-    // Network/native failures should allow downloadSong's retry-once path to
-    // create a fresh task. Cancellation is tracked separately above.
     if (downloadsById.get(downloadId) === managed) {
       downloadsById.delete(downloadId);
     }
@@ -275,7 +265,6 @@ export async function stopBackgroundDownloadsForQueue(queueId: string): Promise<
 
   await Promise.all(
     matching.map(async (download) => {
-      cancelledDownloadIds.add(download.downloadId);
       try { await download.task.stop(); } catch { /* best-effort */ }
 
       // A retry/re-prime may have replaced this task while stop() was in flight.
