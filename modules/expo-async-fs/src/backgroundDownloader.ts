@@ -2,12 +2,9 @@ import {
   completeHandler,
   createDownloadTask,
   getExistingDownloadTasks,
-  setConfig,
 } from '@kesha-antonov/react-native-background-downloader';
 import { Directory, File, Paths } from 'expo-file-system';
 import { type EventSubscription } from 'expo-modules-core';
-
-import { resolveServerBase } from '../../expo-ssl-trust/src';
 
 import { type DownloadProgressEvent } from './ExpoAsyncFsModule';
 
@@ -182,27 +179,16 @@ function createManagedDownload(
 }
 
 /**
- * True when an iOS background URLSession can reach this URL directly.
- * Trusted self-signed servers are handled by expo-ssl-trust's in-process
- * URLProtocol/proxy path, neither of which is available to background sessions.
- */
-export function canUseBackgroundDownloadUrl(url: string): boolean {
-  return resolveServerBase(url) === url;
-}
-
-/**
  * Submit every transfer for the active queue item to iOS before React Native
- * can be suspended. The native URLSession owns scheduling from this point on;
- * maxParallelDownloads limits simultaneous connections without leaving later
- * tracks dependent on a JS worker wake-up.
+ * can be suspended. The native background URLSession owns scheduling from this
+ * point on. We deliberately do not reconfigure that session from JS because
+ * changing its concurrency invalidates and cancels existing native tasks.
  */
 export async function primeBackgroundDownloads(
   queueId: string,
   requests: readonly BackgroundDownloadRequest[],
-  maxParallelDownloads: number,
 ): Promise<void> {
   await loadExistingTasks();
-  setConfig({ maxParallelDownloads });
 
   for (const request of requests) {
     cancelledDownloadIds.delete(request.downloadId);
