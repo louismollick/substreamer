@@ -4,7 +4,6 @@ import { Platform } from 'react-native';
 import ExpoAsyncFsModule from './ExpoAsyncFsModule';
 import {
   addBackgroundDownloadProgressListener,
-  canUseBackgroundDownloadUrl,
   consumeBackgroundDownload,
   primeBackgroundDownloads,
   stopBackgroundDownloadsForQueue,
@@ -13,7 +12,6 @@ import {
 
 export { type DownloadProgressEvent, type DirectoryEntry, type StatResult } from './ExpoAsyncFsModule';
 export {
-  canUseBackgroundDownloadUrl,
   primeBackgroundDownloads,
   stopBackgroundDownloadsForQueue,
   type BackgroundDownloadRequest,
@@ -80,17 +78,16 @@ export function getDirectorySizeAsync(uri: string): Promise<number> {
 /**
  * Download a file with progress events.
  *
- * Android keeps the existing native expo-async-fs implementation. iOS consumes
- * a persistent background task when the URL is reachable by a system background
- * session. Trusted self-signed hosts stay on the existing foreground path because
- * their custom trust handler is process-local.
+ * Android keeps the existing native expo-async-fs implementation. iOS uses the
+ * persistent background downloader for every URL, including trusted self-signed
+ * hosts whose pinned certificate is checked by the native background session.
  */
 export function downloadFileAsyncWithProgress(
   url: string,
   destinationUri: string,
   downloadId: string,
 ): Promise<{ uri: string; bytes: number }> {
-  if (Platform.OS === 'ios' && canUseBackgroundDownloadUrl(url)) {
+  if (Platform.OS === 'ios') {
     return consumeBackgroundDownload(url, destinationUri, downloadId);
   }
   return ExpoAsyncFsModule.downloadFileAsyncWithProgress(url, destinationUri, downloadId);
@@ -101,14 +98,7 @@ export function addDownloadProgressListener(
   listener: (event: { downloadId: string; bytesWritten: number; totalBytes: number }) => void,
 ): EventSubscription {
   if (Platform.OS === 'ios') {
-    const backgroundSubscription = addBackgroundDownloadProgressListener(listener);
-    const foregroundSubscription = ExpoAsyncFsModule.addListener('onDownloadProgress', listener);
-    return {
-      remove: () => {
-        backgroundSubscription.remove();
-        foregroundSubscription.remove();
-      },
-    } as EventSubscription;
+    return addBackgroundDownloadProgressListener(listener);
   }
   return ExpoAsyncFsModule.addListener('onDownloadProgress', listener);
 }
