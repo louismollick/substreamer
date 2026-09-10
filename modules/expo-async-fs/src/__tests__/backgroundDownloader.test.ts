@@ -54,6 +54,7 @@ jest.mock('expo-file-system', () => {
 import {
   consumeBackgroundDownload,
   primeBackgroundDownloads,
+  stopBackgroundDownloadsForQueue,
 } from '../backgroundDownloader';
 
 type ErrorHandler = (event: { error: string; errorCode: number }) => void;
@@ -118,5 +119,34 @@ describe('backgroundDownloader', () => {
 
     retryTask.fail('retry failed', -1001);
     await expect(retry).rejects.toThrow('retry failed (-1001)');
+  });
+
+  it('allows a later transfer after a queue stop', async () => {
+    const firstTask = createFakeTask('substreamer-queue-2-1');
+    const laterTask = createFakeTask('substreamer-direct-2-0');
+    mockCreateDownloadTask
+      .mockReturnValueOnce(firstTask)
+      .mockReturnValueOnce(laterTask);
+
+    await primeBackgroundDownloads(
+      'queue-2',
+      [{ downloadId: 'song-2', url: 'https://server/song-2', position: 1 }],
+    );
+    await stopBackgroundDownloadsForQueue('queue-2');
+
+    const later = consumeBackgroundDownload(
+      'https://server/song-2',
+      'file:///cache/song-2.tmp',
+      'song-2',
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(firstTask.stop).toHaveBeenCalledTimes(1);
+    expect(mockCreateDownloadTask).toHaveBeenCalledTimes(2);
+    expect(laterTask.start).toHaveBeenCalledTimes(1);
+
+    laterTask.fail('later failed', -1001);
+    await expect(later).rejects.toThrow('later failed (-1001)');
   });
 });
