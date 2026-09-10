@@ -9,7 +9,7 @@ diff --git a/node_modules/@kesha-antonov/react-native-background-downloader/ios/
  #import <MMKV/MMKV.h>
  #import <React/RCTBridge.h>
 +#import <Security/Security.h>
-@@ -1337,6 +1339,110 @@
+@@ -1337,8 +1339,112 @@
          [pendingEmitEvents removeAllObjects];
      }
  }
