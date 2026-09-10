@@ -1,19 +1,30 @@
-const mockSubscribe = jest.fn();
 const mockGetState = jest.fn();
 const mockWhenQueuePayloadWritten = jest.fn();
 const mockReadDownloadQueueSongsAsync = jest.fn();
 const mockEnsureCoverArtAuth = jest.fn();
 const mockGetDownloadStreamUrl = jest.fn();
-const mockCanUseBackgroundDownloadUrl = jest.fn();
 const mockPrimeBackgroundDownloads = jest.fn();
 const mockStopBackgroundDownloadsForQueue = jest.fn();
+
+type QueueState = {
+  downloadQueue: Array<{ queueId: string; status: string }>;
+  cachedSongs: Record<string, unknown>;
+  maxConcurrentDownloads: number;
+};
+
+type QueueListener = (state: QueueState, previous: QueueState) => void;
+
+let subscribedListener: QueueListener | undefined;
+const mockSubscribe = jest.fn((listener: QueueListener) => {
+  subscribedListener = listener;
+  return () => undefined;
+});
 
 jest.mock('react-native', () => ({
   Platform: { OS: 'ios' },
 }));
 
 jest.mock('expo-async-fs', () => ({
-  canUseBackgroundDownloadUrl: (...args: unknown[]) => mockCanUseBackgroundDownloadUrl(...args),
   primeBackgroundDownloads: (...args: unknown[]) => mockPrimeBackgroundDownloads(...args),
   stopBackgroundDownloadsForQueue: (...args: unknown[]) =>
     mockStopBackgroundDownloadsForQueue(...args),
@@ -38,14 +49,6 @@ jest.mock('../subsonicService', () => ({
 
 import '../iosBackgroundDownloadScheduler';
 
-type QueueState = {
-  downloadQueue: Array<{ queueId: string; status: string }>;
-  cachedSongs: Record<string, unknown>;
-  maxConcurrentDownloads: number;
-};
-
-type QueueListener = (state: QueueState, previous: QueueState) => void;
-
 function state(status: string): QueueState {
   return {
     downloadQueue: [{ queueId: 'queue-1', status }],
@@ -66,11 +69,11 @@ describe('iosBackgroundDownloadScheduler', () => {
     mockReadDownloadQueueSongsAsync.mockResolvedValue([{ id: 'song-1' }]);
     mockEnsureCoverArtAuth.mockResolvedValue(undefined);
     mockGetDownloadStreamUrl.mockReturnValue('https://server.example/rest/stream.view?id=song-1');
-    mockCanUseBackgroundDownloadUrl.mockReturnValue(true);
     mockPrimeBackgroundDownloads.mockResolvedValue(undefined);
 
-    const listener = mockSubscribe.mock.calls[0]?.[0] as QueueListener;
+    const listener = subscribedListener;
     expect(listener).toBeDefined();
+    if (!listener) throw new Error('scheduler did not subscribe');
 
     const queued = state('queued');
     const downloading = state('downloading');
@@ -79,6 +82,14 @@ describe('iosBackgroundDownloadScheduler', () => {
     await flushPromises();
 
     expect(mockPrimeBackgroundDownloads).toHaveBeenCalledTimes(1);
+    expect(mockPrimeBackgroundDownloads).toHaveBeenLastCalledWith(
+      'queue-1',
+      [{
+        downloadId: 'song-1',
+        url: 'https://server.example/rest/stream.view?id=song-1',
+        position: 1,
+      }],
+    );
 
     let resolveStop!: () => void;
     mockStopBackgroundDownloadsForQueue.mockImplementationOnce(
