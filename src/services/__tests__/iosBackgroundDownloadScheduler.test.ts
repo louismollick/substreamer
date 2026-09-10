@@ -33,7 +33,7 @@ jest.mock('expo-async-fs', () => ({
 jest.mock('../../store/musicCacheStore', () => ({
   musicCacheStore: {
     getState: (...args: unknown[]) => mockGetState(...args),
-    subscribe: (...args: unknown[]) => mockSubscribe(...args),
+    subscribe: (listener: QueueListener) => mockSubscribe(listener),
   },
   whenQueuePayloadWritten: (...args: unknown[]) => mockWhenQueuePayloadWritten(...args),
 }));
