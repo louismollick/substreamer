@@ -1,0 +1,224 @@
+diff --git a/node_modules/@kesha-antonov/react-native-background-downloader/ios/RNBackgroundDownloader.mm b/node_modules/@kesha-antonov/react-native-background-downloader/ios/RNBackgroundDownloader.mm
+index 9f693bf..ada96df 100644
+--- a/node_modules/@kesha-antonov/react-native-background-downloader/ios/RNBackgroundDownloader.mm
++++ b/node_modules/@kesha-antonov/react-native-background-downloader/ios/RNBackgroundDownloader.mm
+@@ -1,8 +1,10 @@
+ #import "RNBackgroundDownloader.h"
+ #import "RNBGDTaskConfig.h"
+ #import "RNBGDUploadTaskConfig.h"
++#import <CommonCrypto/CommonDigest.h>
+ #import <MMKV/MMKV.h>
+ #import <React/RCTBridge.h>
++#import <Security/Security.h>
+ 
+ #ifdef RCT_NEW_ARCH_ENABLED
+ #import <RNBackgroundDownloaderSpec/RNBackgroundDownloaderSpec.h>
+@@ -984,6 +986,15 @@ RCT_EXPORT_METHOD(updateTaskHeaders:(NSString *)id headers:(NSDictionary *)heade
+ - (void)completeHandler:(NSString *)jobId resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+     DLog(nil, @"[RNBackgroundDownloader] - [completeHandlerIOS]");
+     @try {
++        @synchronized (sharedLock) {
++            RNBGDTaskConfig *config = [self findConfigById:jobId];
++            if (config != nil && config.state == NSURLSessionTaskStateCompleted) {
++                NSNumber *key = [self findTaskKeyById:jobId];
++                if (key != nil) [taskToConfigMap removeObjectForKey:key];
++                [idToTaskMap removeObjectForKey:jobId];
++                [mmkv setData:[self serialize:taskToConfigMap] forKey:ID_TO_CONFIG_MAP_KEY];
++            }
++        }
+         [[NSOperationQueue mainQueue] addOperationWithBlock:^{
+             if (storedCompletionHandler) {
+                 storedCompletionHandler();
+@@ -1033,6 +1044,11 @@ RCT_EXPORT_METHOD(completeHandler:(nonnull NSString *)jobId resolver:(RCTPromise
+                     RNBGDTaskConfig *taskConfig = [self findAndReconcileTaskConfig:task];
+ 
+                     if (taskConfig) {
++                        if (taskConfig.state == NSURLSessionTaskStateCompleted || pendingMoves[taskConfig.id] != nil) {
++                            [foundTasks addObject:[self createTaskInfoFromConfig:taskConfig]];
++                            [processedIds addObject:taskConfig.id];
++                            continue;
++                        }
+                         NSURLSessionDownloadTask *mutableTask = task;
+                         [self restoreTaskIfNeeded:&mutableTask];
+                         [self updateTaskMappings:mutableTask config:taskConfig];
+@@ -1043,6 +1059,15 @@ RCT_EXPORT_METHOD(completeHandler:(nonnull NSString *)jobId resolver:(RCTPromise
+                     }
+                 }
+ 
++                // Completed files and locked-device moves outlive their URLSession task.
++                for (RNBGDTaskConfig *config in [taskToConfigMap allValues]) {
++                    if (![processedIds containsObject:config.id] &&
++                        (config.state == NSURLSessionTaskStateCompleted || pendingMoves[config.id] != nil)) {
++                        [foundTasks addObject:[self createTaskInfoFromConfig:config]];
++                        [processedIds addObject:config.id];
++                    }
++                }
++
+                 // Phase 2: Add paused tasks with resume data (not in active session)
+                 [self addPausedTasksToResults:foundTasks processedIds:processedIds];
+ 
+@@ -1339,6 +1364,111 @@ RCT_EXPORT_METHOD(getExistingDownloadTasks: (RCTPromiseResolveBlock)resolve reje
+ }
+ #endif
+ 
++#pragma mark - Substreamer trusted self-signed certificates
++
++- (NSString *)substreamerSha256FingerprintForCertificate:(SecCertificateRef)certificate {
++    CFDataRef certificateData = SecCertificateCopyData(certificate);
++    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
++    CC_SHA256(
++        CFDataGetBytePtr(certificateData),
++        (CC_LONG)CFDataGetLength(certificateData),
++        digest
++    );
++    CFRelease(certificateData);
++
++    NSMutableString *fingerprint = [NSMutableString string];
++    for (NSUInteger i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) {
++        if (i > 0) {
++            [fingerprint appendString:@":"];
++        }
++        [fingerprint appendFormat:@"%02X", digest[i]];
++    }
++    return fingerprint;
++}
++
++- (NSString *)substreamerTrustedFingerprintForHost:(NSString *)host {
++    NSData *data = [[NSUserDefaults standardUserDefaults] dataForKey:@"expo_ssl_trust_store"];
++    if (data == nil) {
++        return nil;
++    }
++
++    id decoded = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
++    if (![decoded isKindOfClass:[NSDictionary class]]) {
++        return nil;
++    }
++
++    NSDictionary *entries = (NSDictionary *)decoded;
++    id candidate = entries[host];
++    if (![candidate isKindOfClass:[NSDictionary class]]) {
++        for (id key in entries) {
++            if ([key isKindOfClass:[NSString class]] &&
++                [(NSString *)key caseInsensitiveCompare:host] == NSOrderedSame) {
++                candidate = entries[key];
++                break;
++            }
++        }
++    }
++    if (![candidate isKindOfClass:[NSDictionary class]]) {
++        return nil;
++    }
++
++    id fingerprint = ((NSDictionary *)candidate)[@"sha256Fingerprint"];
++    return [fingerprint isKindOfClass:[NSString class]] ? fingerprint : nil;
++}
++
++- (void)URLSession:(NSURLSession *)session
++    didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
++    completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition disposition,
++                                NSURLCredential *credential))completionHandler
++{
++    if (![challenge.protectionSpace.authenticationMethod
++            isEqualToString:NSURLAuthenticationMethodServerTrust]) {
++        completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
++        return;
++    }
++
++    SecTrustRef serverTrust = challenge.protectionSpace.serverTrust;
++    if (serverTrust == nil) {
++        completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
++        return;
++    }
++
++    CFErrorRef trustError = nil;
++    BOOL systemTrusted = SecTrustEvaluateWithError(serverTrust, &trustError);
++    if (trustError != nil) {
++        CFRelease(trustError);
++    }
++    if (systemTrusted) {
++        completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
++        return;
++    }
++
++    NSString *expected =
++        [self substreamerTrustedFingerprintForHost:challenge.protectionSpace.host];
++
++    CFArrayRef chain = SecTrustCopyCertificateChain(serverTrust);
++    NSString *actual = nil;
++    if (chain != nil && CFArrayGetCount(chain) > 0) {
++        SecCertificateRef leaf = (SecCertificateRef)CFArrayGetValueAtIndex(chain, 0);
++        actual = [self substreamerSha256FingerprintForCertificate:leaf];
++    }
++    if (chain != nil) {
++        CFRelease(chain);
++    }
++
++    if (expected != nil &&
++        actual != nil &&
++        [expected caseInsensitiveCompare:actual] == NSOrderedSame) {
++        completionHandler(
++            NSURLSessionAuthChallengeUseCredential,
++            [NSURLCredential credentialForTrust:serverTrust]
++        );
++        return;
++    }
++
++    completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
++}
++
+ #pragma mark - NSURLSessionDownloadDelegate methods
+ - (void)URLSession:(nonnull NSURLSession *)session downloadTask:(nonnull NSURLSessionDownloadTask *)downloadTask didFinishDownloadingToURL:(nonnull NSURL *)location {
+     @synchronized (sharedLock) {
+@@ -1365,7 +1495,9 @@ RCT_EXPORT_METHOD(getExistingDownloadTasks: (RCTPromiseResolveBlock)resolve reje
+             // The bytes are staged and the move (and the downloadComplete event) will happen
+             // once protected data becomes available. Do not emit complete/failed now. See #101.
+             [self sendDebugLog:@"didFinishDownloadingToURL: move deferred until device unlock" taskId:taskConfig.id];
+-            [self removeTaskFromMap:downloadTask];
++            taskConfig.state = NSURLSessionTaskStateRunning;
++            [mmkv setData:[self serialize:taskToConfigMap] forKey:ID_TO_CONFIG_MAP_KEY];
++            [idToTaskMap removeObjectForKey:taskConfig.id];
+             return;
+         }
+ 
+@@ -1373,12 +1505,28 @@ RCT_EXPORT_METHOD(getExistingDownloadTasks: (RCTPromiseResolveBlock)resolve reje
+             [self sendDebugLog:[NSString stringWithFormat:@"didFinishDownloadingToURL: error - %@", error.localizedDescription] taskId:taskConfig.id];
+         }
+ 
++        if (error) {
++            [self removeTaskFromMap:downloadTask];
++        } else {
++            [self retainCompletedDownload:taskConfig bytes:downloadTask.countOfBytesReceived];
++        }
+         [self sendDownloadCompletionEvent:taskConfig task:downloadTask error:error];
+-
+-        [self removeTaskFromMap:downloadTask];
+     }
+ }
+ 
++// Keep the existing persisted config until JS consumes the completed file.
++- (void)retainCompletedDownload:(RNBGDTaskConfig *)config bytes:(int64_t)bytes {
++    config.state = NSURLSessionTaskStateCompleted;
++    config.bytesDownloaded = bytes;
++    config.bytesTotal = bytes;
++    config.errorCode = 0;
++    [idToTaskMap removeObjectForKey:config.id];
++    [idToPercentMap removeObjectForKey:config.id];
++    [idToLastBytesMap removeObjectForKey:config.id];
++    [decodeErrorRetriedIds removeObject:config.id];
++    [mmkv setData:[self serialize:taskToConfigMap] forKey:ID_TO_CONFIG_MAP_KEY];
++}
++
+ - (void)sendDownloadCompletionEvent:(RNBGDTaskConfig *)taskConfig task:(NSURLSessionDownloadTask *)task error:(NSError *)error {
+     if (error) {
+ #ifdef RCT_NEW_ARCH_ENABLED
+@@ -2347,6 +2495,10 @@ RCT_EXPORT_METHOD(getExistingUploadTasks:(RCTPromiseResolveBlock)resolve rejecte
+                 NSString *protection = [self nsFileProtectionFromKey:(info[@"dataProtection"] != nil && [info[@"dataProtection"] length] > 0 ? info[@"dataProtection"] : nil)];
+                 [fileManager setAttributes:@{NSFileProtectionKey: protection} ofItemAtPath:destinationURL.path error:nil];
+ 
++                RNBGDTaskConfig *config = [self findConfigById:taskId];
++                if (config != nil) {
++                    [self retainCompletedDownload:config bytes:[info[@"bytesDownloaded"] longLongValue]];
++                }
+                 [self->pendingMoves removeObjectForKey:taskId];
+                 changed = YES;
+ 

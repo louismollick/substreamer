@@ -1,8 +1,21 @@
-import ExpoAsyncFsModule from './ExpoAsyncFsModule';
-
 import { type EventSubscription } from 'expo-modules-core';
+import { Platform } from 'react-native';
+
+import ExpoAsyncFsModule from './ExpoAsyncFsModule';
+import {
+  addBackgroundDownloadProgressListener,
+  consumeBackgroundDownload,
+  primeBackgroundDownloads,
+  stopBackgroundDownloadsForQueue,
+  type BackgroundDownloadRequest,
+} from './backgroundDownloader';
 
 export { type DownloadProgressEvent, type DirectoryEntry, type StatResult } from './ExpoAsyncFsModule';
+export {
+  primeBackgroundDownloads,
+  stopBackgroundDownloadsForQueue,
+  type BackgroundDownloadRequest,
+};
 
 /**
  * List directory contents asynchronously on a native background thread.
@@ -76,23 +89,29 @@ export function getDirectorySizeAsync(uri: string): Promise<number> {
 }
 
 /**
- * Download a file on the native layer with progress events.
- * Returns the destination URI and total bytes written.
+ * Download a file with progress events.
+ *
+ * Android keeps the existing native expo-async-fs implementation. iOS uses the
+ * persistent background downloader for every URL, including trusted self-signed
+ * hosts whose pinned certificate is checked by the native background session.
  */
 export function downloadFileAsyncWithProgress(
   url: string,
   destinationUri: string,
   downloadId: string,
 ): Promise<{ uri: string; bytes: number }> {
+  if (Platform.OS === 'ios') {
+    return consumeBackgroundDownload(url, destinationUri, downloadId);
+  }
   return ExpoAsyncFsModule.downloadFileAsyncWithProgress(url, destinationUri, downloadId);
 }
 
-/**
- * Subscribe to download progress events. Each event contains
- * downloadId, bytesWritten, and totalBytes (-1 if unknown).
- */
+/** Subscribe to download progress events. */
 export function addDownloadProgressListener(
   listener: (event: { downloadId: string; bytesWritten: number; totalBytes: number }) => void,
 ): EventSubscription {
+  if (Platform.OS === 'ios') {
+    return addBackgroundDownloadProgressListener(listener);
+  }
   return ExpoAsyncFsModule.addListener('onDownloadProgress', listener);
 }

@@ -90,6 +90,12 @@
         }
       ],
       [
+        "@kesha-antonov/react-native-background-downloader",
+        {
+          "skipMmkvDependency": true
+        }
+      ],
+      [
         "expo-build-properties",
         {
           "android": {
