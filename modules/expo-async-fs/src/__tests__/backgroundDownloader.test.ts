@@ -1,6 +1,7 @@
 const mockCreateDownloadTask = jest.fn();
 const mockGetExistingDownloadTasks = jest.fn();
 const mockCompleteHandler = jest.fn();
+const mockFiles = new Map<string, number>();
 
 jest.mock('@kesha-antonov/react-native-background-downloader', () => ({
   completeHandler: (...args: unknown[]) => mockCompleteHandler(...args),
@@ -22,8 +23,6 @@ jest.mock('expo-file-system', () => {
 
   class MockFile {
     uri: string;
-    exists = false;
-    size = 0;
 
     constructor(base: string | { uri: string }, name?: string) {
       this.uri = name
@@ -33,14 +32,21 @@ jest.mock('expo-file-system', () => {
           : base.uri;
     }
 
+    get exists(): boolean {
+      return mockFiles.has(this.uri);
+    }
+
+    get size(): number {
+      return mockFiles.get(this.uri) ?? 0;
+    }
+
     delete(): void {
-      this.exists = false;
+      mockFiles.delete(this.uri);
     }
 
     async move(destination: MockFile): Promise<void> {
-      destination.exists = true;
-      destination.size = this.size;
-      this.exists = false;
+      mockFiles.set(destination.uri, this.size);
+      mockFiles.delete(this.uri);
     }
   }
 
@@ -63,7 +69,7 @@ function createFakeTask(id: string) {
   let errorHandler: ErrorHandler | null = null;
   const task = {
     id,
-    metadata: {},
+    metadata: {} as Record<string, string>,
     state: 'PENDING',
     bytesDownloaded: 0,
     bytesTotal: 0,
@@ -87,11 +93,35 @@ function createFakeTask(id: string) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockFiles.clear();
   mockGetExistingDownloadTasks.mockResolvedValue([]);
   mockCompleteHandler.mockResolvedValue(undefined);
 });
 
 describe('backgroundDownloader', () => {
+  it('consumes a completed task restored after process restart', async () => {
+    const task = createFakeTask('substreamer-queue-4-1');
+    task.state = 'DONE';
+    task.bytesDownloaded = 456;
+    task.bytesTotal = 456;
+    task.metadata = {
+      owner: 'substreamer',
+      queueId: 'queue-4',
+      downloadId: 'song-4',
+      stagingUri: 'file:///cache/restored.download',
+    };
+    mockFiles.set(task.metadata.stagingUri, 456);
+    mockGetExistingDownloadTasks.mockResolvedValue([task]);
+
+    await expect(consumeBackgroundDownload(
+      'https://server/song-4',
+      'file:///cache/song-4.tmp',
+      'song-4',
+    )).resolves.toEqual({ uri: 'file:///cache/song-4.tmp', bytes: 456 });
+    expect(mockCreateDownloadTask).not.toHaveBeenCalled();
+    expect(mockCompleteHandler).toHaveBeenCalledWith(task.id);
+  });
+
   it('creates a fresh task after a primed task fails before consumption', async () => {
     const firstTask = createFakeTask('substreamer-queue-1-1');
     const retryTask = createFakeTask('substreamer-direct-1-0');
@@ -111,8 +141,7 @@ describe('backgroundDownloader', () => {
       'file:///cache/song-1.tmp',
       'song-1',
     );
-    await Promise.resolve();
-    await Promise.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(mockCreateDownloadTask).toHaveBeenCalledTimes(2);
     expect(mockCompleteHandler).toHaveBeenCalledWith(firstTask.id);
@@ -139,8 +168,7 @@ describe('backgroundDownloader', () => {
       'file:///cache/song-2.tmp',
       'song-2',
     );
-    await Promise.resolve();
-    await Promise.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(firstTask.stop).toHaveBeenCalledTimes(1);
     expect(mockCreateDownloadTask).toHaveBeenCalledTimes(2);
@@ -148,5 +176,22 @@ describe('backgroundDownloader', () => {
 
     laterTask.fail('later failed', -1001);
     await expect(later).rejects.toThrow('later failed (-1001)');
+  });
+
+  it('rejects a waiting consumer when stop emits no native error', async () => {
+    const task = createFakeTask('substreamer-queue-3-1');
+    mockCreateDownloadTask.mockReturnValue(task);
+    await primeBackgroundDownloads(
+      'queue-3',
+      [{ downloadId: 'song-3', url: 'https://server/song-3', position: 1 }],
+    );
+    const pending = consumeBackgroundDownload(
+      'https://server/song-3',
+      'file:///cache/song-3.tmp',
+      'song-3',
+    );
+    const assertion = expect(pending).rejects.toThrow('Background download stopped');
+    await stopBackgroundDownloadsForQueue('queue-3');
+    await assertion;
   });
 });

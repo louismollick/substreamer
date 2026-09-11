@@ -19,6 +19,7 @@ const queueOperations = new Map<string, Promise<void>>();
 function scheduleQueueOperation(queueId: string, operation: () => Promise<void>): void {
   const previous = queueOperations.get(queueId) ?? Promise.resolve();
   const next = previous
+    // A failed operation must not block the next queue transition.
     .catch(() => undefined)
     .then(operation)
     .finally(() => {
@@ -27,6 +28,7 @@ function scheduleQueueOperation(queueId: string, operation: () => Promise<void>)
       }
     });
   queueOperations.set(queueId, next);
+  // Observe failures immediately, even when no later transition is scheduled.
   void next.catch(() => undefined);
 }
 
@@ -77,7 +79,7 @@ async function primeQueueItem(item: DownloadQueueItem): Promise<void> {
       (queued) => queued.queueId === item.queueId,
     );
     if (current?.status !== 'downloading') {
-      await stopBackgroundDownloadsForQueue(item.queueId);
+      await stopBackgroundDownloadsForQueue(item.queueId, current?.status === 'queued');
     }
   } catch (error) {
     // The normal worker remains a fallback: its first download call can still
@@ -102,10 +104,13 @@ function onQueueChanged(
   }
 
   for (const item of previous.downloadQueue) {
-    if (item.status !== 'downloading') continue;
     const current = currentById.get(item.queueId);
+    if (item.status !== 'downloading' && current) continue;
     if (!current || current.status !== 'downloading') {
-      scheduleQueueOperation(item.queueId, () => stopBackgroundDownloadsForQueue(item.queueId));
+      // Parked items can consume completed staging files when they resume.
+      scheduleQueueOperation(item.queueId, () =>
+        stopBackgroundDownloadsForQueue(item.queueId, current?.status === 'queued'),
+      );
     }
   }
 }

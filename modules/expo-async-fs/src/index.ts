@@ -55,22 +55,35 @@ export function statAsync(
   return ExpoAsyncFsModule.statAsync(uri);
 }
 
-/** Convenience over {@link statAsync}: resolves true when the path exists. */
+/**
+ * Convenience over {@link statAsync}: resolves true when the path exists.
+ */
 export function existsAsync(uri: string): Promise<boolean> {
   return ExpoAsyncFsModule.statAsync(uri).then((r) => r.exists);
 }
 
-/** Delete a single file on a native background thread. */
+/**
+ * Delete a single file on a native background thread. Resolves true if a file
+ * existed and was deleted, false otherwise.
+ */
 export function deleteFileAsync(uri: string): Promise<boolean> {
   return ExpoAsyncFsModule.deleteFileAsync(uri);
 }
 
-/** Recursively delete a directory and all its contents off the JS thread. */
+/**
+ * Recursively delete a directory and all its contents on a native background
+ * thread (Android: Dispatchers.IO). For whole-cache wipes — expo-file-system's
+ * `Directory.delete()` is sync-only and would block the JS thread unlinking
+ * thousands of files. Resolves true if the directory existed and was removed.
+ */
 export function deleteDirectoryAsync(uri: string): Promise<boolean> {
   return ExpoAsyncFsModule.deleteDirectoryAsync(uri);
 }
 
-/** Calculate total size (in bytes) of a directory recursively off-thread. */
+/**
+ * Calculate total size (in bytes) of a directory recursively
+ * on a native background thread.
+ */
 export function getDirectorySizeAsync(uri: string): Promise<number> {
   return ExpoAsyncFsModule.getDirectorySizeAsync(uri);
 }

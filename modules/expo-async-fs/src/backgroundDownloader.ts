@@ -26,6 +26,7 @@ type ManagedDownload = {
   downloadId: string;
   stagingUri: string;
   completion: Promise<{ bytes: number }>;
+  cancel: () => void;
 };
 
 export type BackgroundDownloadRequest = {
@@ -78,11 +79,6 @@ function attachTask(
   // rejection handled now; awaiting the original promise later still rejects.
   void completion.catch(() => undefined);
 
-  const managed = { task, queueId, downloadId, stagingUri, completion };
-  // Register before attaching callbacks or inspecting state. Reconnected tasks
-  // may synchronously report a terminal state while handlers are attached.
-  downloadsById.set(downloadId, managed);
-
   let settled = false;
   const finish = (bytes: number): void => {
     if (settled) return;
@@ -100,6 +96,17 @@ function attachTask(
     acknowledgeBackgroundEvents(task.id);
     rejectCompletion(error);
   };
+  const managed: ManagedDownload = {
+    task,
+    queueId,
+    downloadId,
+    stagingUri,
+    completion,
+    cancel: () => fail(new Error(`Background download stopped: ${downloadId}`)),
+  };
+  // Register before attaching callbacks or inspecting state. Reconnected tasks
+  // may synchronously report a terminal state while handlers are attached.
+  downloadsById.set(downloadId, managed);
 
   task
     .progress(({ bytesDownloaded, bytesTotal }) => {
@@ -223,8 +230,10 @@ export async function consumeBackgroundDownload(
   }
 
   activeProgressIds.add(downloadId);
+  let completed = false;
   try {
     const result = await managed.completion;
+    completed = true;
     const source = new File(managed.stagingUri);
     if (!source.exists) {
       throw new Error(`Background download completed without a staged file: ${downloadId}`);
@@ -243,6 +252,7 @@ export async function consumeBackgroundDownload(
     }
     return { uri: destination.uri, bytes };
   } catch (error) {
+    if (completed) acknowledgeBackgroundEvents(managed.task.id);
     if (downloadsById.get(downloadId) === managed) {
       downloadsById.delete(downloadId);
     }
@@ -257,10 +267,15 @@ export async function consumeBackgroundDownload(
 }
 
 /** Stop native transfers belonging to a queue item that was cancelled/parked. */
-export async function stopBackgroundDownloadsForQueue(queueId: string): Promise<void> {
+export async function stopBackgroundDownloadsForQueue(
+  queueId: string,
+  preserveCompleted = false,
+): Promise<void> {
   await loadExistingTasks().catch(() => undefined);
   const matching = Array.from(downloadsById.values()).filter(
-    (download) => download.queueId === queueId,
+    (download) =>
+      download.queueId === queueId &&
+      !(preserveCompleted && download.task.state === 'DONE'),
   );
 
   await Promise.all(
@@ -270,7 +285,10 @@ export async function stopBackgroundDownloadsForQueue(queueId: string): Promise<
       // A retry/re-prime may have replaced this task while stop() was in flight.
       // Never let stale cleanup delete the replacement's staging file or map entry.
       const current = downloadsById.get(download.downloadId);
-      if (current && current !== download) return;
+      if (current && current !== download) {
+        download.cancel();
+        return;
+      }
 
       try {
         const staging = new File(download.stagingUri);
@@ -280,6 +298,8 @@ export async function stopBackgroundDownloadsForQueue(queueId: string): Promise<
       if (current === download) {
         downloadsById.delete(download.downloadId);
       }
+      // stop() removes the native task without delivering an error callback.
+      download.cancel();
     }),
   );
 }

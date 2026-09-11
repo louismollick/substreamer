@@ -15,10 +15,10 @@ type QueueState = {
 type QueueListener = (state: QueueState, previous: QueueState) => void;
 
 let subscribedListener: QueueListener | undefined;
-const mockSubscribe = jest.fn((listener: QueueListener) => {
+function mockSubscribe(listener: QueueListener): () => undefined {
   subscribedListener = listener;
   return () => undefined;
-});
+}
 
 jest.mock('react-native', () => ({
   Platform: { OS: 'ios' },
@@ -33,7 +33,7 @@ jest.mock('expo-async-fs', () => ({
 jest.mock('../../store/musicCacheStore', () => ({
   musicCacheStore: {
     getState: (...args: unknown[]) => mockGetState(...args),
-    subscribe: (listener: QueueListener) => mockSubscribe(listener),
+    subscribe: jest.fn(mockSubscribe),
   },
   whenQueuePayloadWritten: (...args: unknown[]) => mockWhenQueuePayloadWritten(...args),
 }));
@@ -58,7 +58,7 @@ function state(status: string): QueueState {
 }
 
 async function flushPromises(): Promise<void> {
-  for (let i = 0; i < 8; i++) await Promise.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 describe('iosBackgroundDownloadScheduler', () => {
@@ -115,5 +115,15 @@ describe('iosBackgroundDownloadScheduler', () => {
     await flushPromises();
 
     expect(mockPrimeBackgroundDownloads).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves completed staging when an item is parked', async () => {
+    mockStopBackgroundDownloadsForQueue.mockResolvedValue(undefined);
+    const downloading = state('downloading');
+    const parked = state('queued');
+    mockGetState.mockReturnValue(parked);
+    subscribedListener!(parked, downloading);
+    await flushPromises();
+    expect(mockStopBackgroundDownloadsForQueue).toHaveBeenLastCalledWith('queue-1', true);
   });
 });
