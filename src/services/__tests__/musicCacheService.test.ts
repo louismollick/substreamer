@@ -296,6 +296,7 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
     removeDownloadQueueItem: jest.fn((queueId: string) => {
       queueSongs.delete(queueId);
     }),
+    removeDownloadQueueItemsThroughPosition: jest.fn(async () => true),
     updateDownloadQueueItem: jest.fn(),
     reorderDownloadQueue: jest.fn(),
     markDownloadComplete: jest.fn((queueId, item, songs, incomingEdges) => {
@@ -1938,6 +1939,68 @@ describe('clearDownloadQueue', () => {
     } as any);
     await clearDownloadQueue();
     expect(musicCacheStore.getState().downloadQueue).toHaveLength(0);
+  });
+
+  it('does not read every queued payload when clearing a large queue', async () => {
+    const readRefs = persistenceMock.readDownloadQueueSongRefsAsync as jest.Mock;
+    const bulkRemove = persistenceMock.removeDownloadQueueItemsThroughPosition as jest.Mock;
+    readRefs.mockClear();
+    bulkRemove.mockClear();
+    musicCacheStore.setState({
+      downloadQueue: Array.from({ length: 100 }, (_, i) => ({
+        queueId: `bulk-q${i}`,
+        itemId: `bulk-a${i}`,
+        type: 'album',
+        name: 'X',
+        status: 'queued',
+        totalSongs: 1,
+        completedSongs: 0,
+        addedAt: i,
+        queuePosition: i + 1,
+      })),
+    } as any);
+
+    await clearDownloadQueue();
+
+    expect(readRefs).not.toHaveBeenCalled();
+    expect(bulkRemove).toHaveBeenCalledTimes(1);
+    expect(bulkRemove).toHaveBeenCalledWith(100);
+    expect(musicCacheStore.getState().downloadQueue).toHaveLength(0);
+  });
+
+
+  it('mirrors the SQL position boundary when an enqueue races the clear', async () => {
+    const bulkRemove = persistenceMock.removeDownloadQueueItemsThroughPosition as jest.Mock;
+    musicCacheStore.setState({
+      downloadQueue: [
+        {
+          queueId: 'snapshot', itemId: 'a1', type: 'album', name: 'X', status: 'queued',
+          totalSongs: 1, completedSongs: 0, addedAt: 1, queuePosition: 100,
+        },
+      ],
+    } as any);
+    bulkRemove.mockImplementationOnce(async () => {
+      musicCacheStore.setState((state: any) => ({
+        downloadQueue: [
+          ...state.downloadQueue,
+          {
+            queueId: 'raced-low', itemId: 'a2', type: 'album', name: 'X', status: 'queued',
+            totalSongs: 1, completedSongs: 0, addedAt: 2, queuePosition: 100,
+          },
+          {
+            queueId: 'raced-high', itemId: 'a3', type: 'album', name: 'X', status: 'queued',
+            totalSongs: 1, completedSongs: 0, addedAt: 3, queuePosition: 101,
+          },
+        ],
+      }));
+      return true;
+    });
+
+    await clearDownloadQueue();
+
+    expect(musicCacheStore.getState().downloadQueue.map((item) => item.queueId)).toEqual([
+      'raced-high',
+    ]);
   });
 });
 
