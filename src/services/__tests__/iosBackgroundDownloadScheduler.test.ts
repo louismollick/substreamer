@@ -165,6 +165,60 @@ describe('iosBackgroundDownloadScheduler', () => {
     );
   });
 
+  it('serializes native priming across queued items', async () => {
+    mockWhenQueuePayloadWritten.mockResolvedValue(undefined);
+    mockReadDownloadQueueSongsAsync.mockImplementation(async (queueId: string) => [
+      { id: `song-${queueId}` },
+    ]);
+    mockEnsureCoverArtAuth.mockResolvedValue(undefined);
+    mockGetDownloadStreamUrl.mockImplementation(
+      (songId: string) => `https://server.example/rest/stream.view?id=${songId}`,
+    );
+
+    let resolveFirst!: () => void;
+    mockPrimeBackgroundDownloads
+      .mockImplementationOnce(
+        () => new Promise<void>((resolve) => {
+          resolveFirst = resolve;
+        }),
+      )
+      .mockResolvedValue(undefined);
+
+    const before: QueueState = {
+      downloadQueue: [{ queueId: 'queue-1', status: 'downloading' }],
+      cachedSongs: {},
+      maxConcurrentDownloads: 2,
+    };
+    const after: QueueState = {
+      downloadQueue: [
+        { queueId: 'queue-1', status: 'downloading' },
+        { queueId: 'queue-2', status: 'queued' },
+        { queueId: 'queue-3', status: 'queued' },
+      ],
+      cachedSongs: {},
+      maxConcurrentDownloads: 2,
+    };
+    mockGetState.mockReturnValue(after);
+
+    subscribedListener!(after, before);
+    await flushPromises();
+
+    expect(mockPrimeBackgroundDownloads).toHaveBeenCalledTimes(1);
+    expect(mockPrimeBackgroundDownloads).toHaveBeenLastCalledWith(
+      'queue-2',
+      expect.any(Array),
+    );
+
+    resolveFirst();
+    await flushPromises();
+
+    expect(mockPrimeBackgroundDownloads).toHaveBeenCalledTimes(2);
+    expect(mockPrimeBackgroundDownloads).toHaveBeenLastCalledWith(
+      'queue-3',
+      expect.any(Array),
+    );
+  });
+
   it('stops primed queued siblings when the active item is parked', async () => {
     mockStopBackgroundDownloadsForQueue.mockResolvedValue(undefined);
     const downloading: QueueState = {
