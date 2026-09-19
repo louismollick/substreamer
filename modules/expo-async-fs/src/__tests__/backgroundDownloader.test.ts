@@ -178,6 +178,23 @@ describe('backgroundDownloader', () => {
     await expect(later).rejects.toThrow('later failed (-1001)');
   });
 
+  it('keeps a shared native task until every queue owner releases it', async () => {
+    const task = createFakeTask('substreamer-queue-1-1');
+    mockCreateDownloadTask.mockReturnValue(task);
+
+    const request = [{ downloadId: 'song-shared', url: 'https://server/shared', position: 1 }];
+    await primeBackgroundDownloads('queue-1', request);
+    await primeBackgroundDownloads('queue-2', request);
+
+    expect(mockCreateDownloadTask).toHaveBeenCalledTimes(1);
+
+    await stopBackgroundDownloadsForQueue('queue-2');
+    expect(task.stop).not.toHaveBeenCalled();
+
+    await stopBackgroundDownloadsForQueue('queue-1');
+    expect(task.stop).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects a waiting consumer when stop emits no native error', async () => {
     const task = createFakeTask('substreamer-queue-3-1');
     mockCreateDownloadTask.mockReturnValue(task);
