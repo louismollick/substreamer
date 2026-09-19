@@ -166,8 +166,9 @@ export interface MusicCacheState {
     update: Partial<Pick<DownloadQueueItem, 'status' | 'completedSongs' | 'error'>>,
   ) => void;
   /**
-   * Finalise a download: remove the queue row, upsert the item + songs, and
-   * insert the edges -- atomic in SQL, then mirrored in memory.
+   * Write a completed download to SQL, then mirror it in memory. The normal path
+   * removes the queue row. `keepQueue` leaves it recoverable while a re-key repair
+   * removes stale edges and restores order.
    *
    * `childBySongId` carries the real server `Child` for the songs that have one;
    * only those get their `cached_song_*` mirrors rewritten.
@@ -178,7 +179,8 @@ export interface MusicCacheState {
     songs: CachedSongMeta[],
     edges: Array<{ songId: string; position: number }>,
     childBySongId?: Map<string, Child>,
-  ) => void;
+    options?: { keepQueue?: boolean },
+  ) => Promise<boolean>;
 
   /* Cached item / song actions */
   upsertCachedItem: (
@@ -467,14 +469,13 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
     }));
   },
 
-  markItemComplete: (queueId, item, songs, edges, childBySongId) => {
+  markItemComplete: (queueId, item, songs, edges, childBySongId, options) => {
     const existing = get().cachedItems[item.itemId];
     // For top-ups (existing row):
     //   - preserve `downloadedAt` (user "downloaded" this earlier).
     //   - preserve `expectedSongCount`: the worker derives it from `songs.length`,
     //     which for a top-up is only the missing-song delta. The existing row already
-    //     holds the authoritative album total from `enqueueAlbumDownload`; clobbering
-    //     it misclassifies a later remove-with-survivors as complete.
+    //     holds the authoritative album total from `enqueueAlbumDownload`.
     const itemToPersist: Omit<CachedItemMeta, 'songIds'> = existing
       ? {
           ...preserveItemMetadata(item, existing),
@@ -483,14 +484,17 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
         }
       : item;
 
-    markDownloadComplete(queueId, itemToPersist, songs, edges, childBySongId);
+    // Keep the old five-argument call shape on the normal path. That avoids
+    // changing every mock/caller just because replacement repairs need one option.
+    const persistence = options
+      ? markDownloadComplete(queueId, itemToPersist, songs, edges, childBySongId, options)
+      : markDownloadComplete(queueId, itemToPersist, songs, edges, childBySongId);
+    const persisted = Promise.resolve(persistence).then((ok) => ok !== false);
 
-    // New songIds from this run, in caller-supplied position order.
     const newSongIdsInOrder = [...edges]
       .sort((a, b) => a.position - b.position)
       .map((e) => e.songId);
 
-    // Merge: keep existing order, append new songs that aren't already edged.
     let songIds: string[];
     if (existing) {
       const existingSet = new Set(existing.songIds);
@@ -500,20 +504,36 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
       songIds = newSongIdsInOrder;
     }
 
-    set((state) => {
-      const nextSongs = { ...state.cachedSongs };
-      for (const s of songs) {
-        nextSongs[s.id] = mergeCachedSong(state.cachedSongs[s.id], s, childBySongId?.get(s.id));
-      }
-      return bumped(state, {
-        downloadQueue: dropFromQueueMirror(state.downloadQueue, queueId),
-        cachedItems: {
-          ...state.cachedItems,
-          [item.itemId]: { ...itemToPersist, songIds },
-        },
-        cachedSongs: nextSongs,
+    const applyMirror = (): void => {
+      set((state) => {
+        const nextSongs = { ...state.cachedSongs };
+        for (const s of songs) {
+          nextSongs[s.id] = mergeCachedSong(state.cachedSongs[s.id], s, childBySongId?.get(s.id));
+        }
+        return bumped(state, {
+          downloadQueue: options?.keepQueue
+            ? state.downloadQueue
+            : dropFromQueueMirror(state.downloadQueue, queueId),
+          cachedItems: {
+            ...state.cachedItems,
+            [item.itemId]: { ...itemToPersist, songIds },
+          },
+          cachedSongs: nextSongs,
+        });
       });
-    });
+    };
+
+    // Replacement cleanup is destructive. Do not publish the fresh edges until
+    // their SQL batch has succeeded. The normal path keeps its existing optimistic
+    // mirror behaviour.
+    if (options?.keepQueue) {
+      return persisted.then((ok) => {
+        if (ok) applyMirror();
+        return ok;
+      });
+    }
+    applyMirror();
+    return persisted;
   },
 
   upsertCachedItem: (item, songIds) => {
