@@ -617,8 +617,8 @@ function describeDegraded(label: string, install: () => void): void {
       await expect(upsertCachedItem(makeItem())).resolves.toBeUndefined();
       await expect(deleteCachedItem('alb-1')).resolves.toBeUndefined();
       await expect(insertCachedItemSong('alb-1', 1, 's1')).resolves.toBeUndefined();
-      await expect(removeCachedItemSong('alb-1', 1)).resolves.toBeUndefined();
-      await expect(reorderCachedItemSongs('alb-1', 1, 2)).resolves.toBeUndefined();
+      await expect(removeCachedItemSong('alb-1', 1)).resolves.toBe(false);
+      await expect(reorderCachedItemSongs('alb-1', 1, 2)).resolves.toBe(false);
       await expect(insertDownloadQueueItem(makeQueueRow(), [])).resolves.toBeNull();
       await expect(removeDownloadQueueItem('q-1')).resolves.toBeUndefined();
       await expect(
