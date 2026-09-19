@@ -627,7 +627,7 @@ function describeDegraded(label: string, install: () => void): void {
       await expect(reorderDownloadQueue(1, 2)).resolves.toBeUndefined();
       await expect(
         markDownloadComplete('q-1', makeItem(), [makeSong()], [{ songId: 's1', position: 1 }]),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe(false);
       await expect(
         bulkReplace({ items: [], songs: [], edges: [], queue: [] }),
       ).resolves.toBeUndefined();
