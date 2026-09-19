@@ -1367,9 +1367,9 @@ export async function insertCachedItemSong(itemId: string, position: number, son
  * Remove an edge at a specific position and shift higher positions down by 1
  * so positions remain contiguous within the item.
  */
-export async function removeCachedItemSong(itemId: string, position: number): Promise<void> {
+export async function removeCachedItemSong(itemId: string, position: number): Promise<boolean> {
   const db = getDb();
-  if (db === null) return;
+  if (db === null) return false;
   const tailShift = positionShiftCommands({
     table: 'cached_item_songs',
     column: 'position',
@@ -1385,8 +1385,9 @@ export async function removeCachedItemSong(itemId: string, position: number): Pr
       tailShift.shift,
       tailShift.restore,
     ]);
+    return true;
   } catch {
-    /* dropped */
+    return false;
   }
 }
 
@@ -1403,10 +1404,10 @@ export async function reorderCachedItemSongs(
   itemId: string,
   fromPosition: number,
   toPosition: number,
-): Promise<void> {
+): Promise<boolean> {
   const db = getDb();
-  if (db === null) return;
-  if (fromPosition === toPosition) return;
+  if (db === null) return false;
+  if (fromPosition === toPosition) return true;
   const step = fromPosition < toPosition ? -1 : 1;
   const move = positionShiftCommands({
     table: 'cached_item_songs',
@@ -1426,8 +1427,9 @@ export async function reorderCachedItemSongs(
   });
   try {
     await db.runAtomicBatchAsync([move.shift, move.restore]);
+    return true;
   } catch {
-    /* dropped */
+    return false;
   }
 }
 
