@@ -577,7 +577,8 @@ async function reconcileRowsToFiles(): Promise<number> {
         const idx = current.songIds.indexOf(song.id);
         if (idx < 0) break;
         // eslint-disable-next-line no-await-in-loop
-        await musicCacheStore.getState().removeCachedItemSong(itemId, idx + 1);
+        const { persisted } = await musicCacheStore.getState().removeCachedItemSong(itemId, idx + 1);
+        if (!persisted) break;
       }
     }
 
@@ -1100,21 +1101,22 @@ function registerTrackToItem(songId: string, itemId: string): void {
 async function removeStaleAlbumEdges(
   albumId: string,
   keepIds: ReadonlySet<string>,
-): Promise<void> {
+): Promise<boolean> {
   const initial = musicCacheStore.getState().cachedItems[albumId];
-  if (!initial || initial.type !== 'album') return;
+  if (!initial || initial.type !== 'album') return true;
 
   const staleIds = initial.songIds.filter((id) => !keepIds.has(id));
   for (const songId of staleIds) {
     const current = musicCacheStore.getState().cachedItems[albumId];
-    if (!current) return;
+    if (!current) return false;
     const index = current.songIds.indexOf(songId);
     if (index < 0) continue;
     const song = musicCacheStore.getState().cachedSongs[songId];
     // eslint-disable-next-line no-await-in-loop
-    const { orphanedSongId } = await musicCacheStore
+    const { orphanedSongId, persisted } = await musicCacheStore
       .getState()
       .removeCachedItemSong(albumId, index + 1);
+    if (!persisted) return false;
     trackToItems.get(songId)?.delete(albumId);
     if (orphanedSongId) {
       trackToItems.delete(orphanedSongId);
@@ -1124,6 +1126,7 @@ async function removeStaleAlbumEdges(
       }
     }
   }
+  return true;
 }
 
 /**
@@ -1475,7 +1478,14 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
     }
 
     if (replacementIds) {
-      await removeStaleAlbumEdges(queueItem.itemId, replacementIds);
+      const staleEdgesRemoved = await removeStaleAlbumEdges(queueItem.itemId, replacementIds);
+      if (!staleEdgesRemoved) {
+        musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
+          status: 'error',
+          error: 'Failed to reconcile stale album tracks',
+        });
+        return;
+      }
 
       // Existing current songs kept their old edge positions while replacement
       // IDs were appended. Reorder the repaired album to the fresh server order.
@@ -1484,15 +1494,23 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
         if (!latest) break;
         const currentIndex = latest.songIds.indexOf(songs[targetIndex].id);
         if (currentIndex < 0 || currentIndex === targetIndex) continue;
-        musicCacheStore.getState().reorderCachedItemSongs(
+        // eslint-disable-next-line no-await-in-loop
+        const reordered = await musicCacheStore.getState().reorderCachedItemSongs(
           queueItem.itemId,
           currentIndex + 1,
           targetIndex + 1,
         );
+        if (!reordered) {
+          musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
+            status: 'error',
+            error: 'Failed to persist repaired album order',
+          });
+          return;
+        }
       }
 
-      // Queue deletion is submitted after the reorder batches, so a vanished
-      // recovery row means the repaired edge set and order were already queued.
+      // The recovery row is removed only after every destructive edge mutation
+      // has landed. A retry can therefore continue any interrupted repair.
       musicCacheStore.getState().removeFromQueue(queueItem.queueId);
     }
   } else {
@@ -1893,7 +1911,8 @@ export async function demoteAlbumToPartial(
     const idx = current.songIds.indexOf(songId);
     if (idx < 0) continue;
     // eslint-disable-next-line no-await-in-loop
-    await musicCacheStore.getState().removeCachedItemSong(itemId, idx + 1);
+    const { persisted } = await musicCacheStore.getState().removeCachedItemSong(itemId, idx + 1);
+    if (!persisted) return { demoted: false, removed: false };
     // `removeCachedItemSong` has already deleted the cached_songs row and
     // decremented refcount-via-COUNT. Update the in-memory mirrors.
     trackToItems.delete(songId);
@@ -1936,10 +1955,11 @@ export async function removeCachedPlaylistTrack(itemId: string, trackIndex: numb
   const songId = cached.songIds[trackIndex];
   const song = musicCacheStore.getState().cachedSongs[songId];
 
-  const { orphanedSongId } = await musicCacheStore.getState().removeCachedItemSong(
+  const { orphanedSongId, persisted } = await musicCacheStore.getState().removeCachedItemSong(
     itemId,
     trackIndex + 1, // SQL positions are 1-indexed
   );
+  if (!persisted) return;
 
   trackToItems.get(songId)?.delete(itemId);
 
@@ -1970,10 +1990,11 @@ export async function removeCachedAlbumSong(albumItemId: string, songId: string)
   }
 
   const song = musicCacheStore.getState().cachedSongs[songId];
-  const { orphanedSongId } = await musicCacheStore.getState().removeCachedItemSong(
+  const { orphanedSongId, persisted } = await musicCacheStore.getState().removeCachedItemSong(
     albumItemId,
     idx + 1, // SQL positions are 1-indexed
   );
+  if (!persisted) return false;
   trackToItems.get(songId)?.delete(albumItemId);
   if (orphanedSongId && song) {
     trackToItems.delete(orphanedSongId);
@@ -1991,7 +2012,7 @@ export function reorderCachedPlaylistTracks(
   fromIndex: number,
   toIndex: number,
 ): void {
-  musicCacheStore.getState().reorderCachedItemSongs(
+  void musicCacheStore.getState().reorderCachedItemSongs(
     itemId,
     fromIndex + 1,
     toIndex + 1,
@@ -2021,10 +2042,11 @@ export async function syncCachedPlaylistTracks(
     const sid = originalSongIds[idx];
     if (keepSet.has(sid)) continue;
     const song = musicCacheStore.getState().cachedSongs[sid];
-    const { orphanedSongId } = await musicCacheStore.getState().removeCachedItemSong(
+    const { orphanedSongId, persisted } = await musicCacheStore.getState().removeCachedItemSong(
       playlistId,
       idx + 1,
     );
+    if (!persisted) return;
     trackToItems.get(sid)?.delete(playlistId);
     if (orphanedSongId && song) {
       trackToItems.delete(orphanedSongId);
@@ -2048,11 +2070,13 @@ export async function syncCachedPlaylistTracks(
     if (!latest) break;
     const currentPos = latest.songIds.indexOf(targetIds[targetPos]);
     if (currentPos < 0 || currentPos === targetPos) continue;
-    musicCacheStore.getState().reorderCachedItemSongs(
+    // eslint-disable-next-line no-await-in-loop
+    const persisted = await musicCacheStore.getState().reorderCachedItemSongs(
       playlistId,
       currentPos + 1,
       targetPos + 1,
     );
+    if (!persisted) return;
   }
 }
 
