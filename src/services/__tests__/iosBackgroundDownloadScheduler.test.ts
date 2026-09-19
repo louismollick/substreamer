@@ -117,6 +117,128 @@ describe('iosBackgroundDownloadScheduler', () => {
     expect(mockPrimeBackgroundDownloads).toHaveBeenCalledTimes(2);
   });
 
+  it('primes newly queued items before the current item finishes', async () => {
+    mockWhenQueuePayloadWritten.mockResolvedValue(undefined);
+    mockReadDownloadQueueSongsAsync.mockImplementation(async (queueId: string) => [
+      { id: `song-${queueId}` },
+    ]);
+    mockEnsureCoverArtAuth.mockResolvedValue(undefined);
+    mockGetDownloadStreamUrl.mockImplementation(
+      (songId: string) => `https://server.example/rest/stream.view?id=${songId}`,
+    );
+    mockPrimeBackgroundDownloads.mockResolvedValue(undefined);
+
+    const before: QueueState = {
+      downloadQueue: [{ queueId: 'queue-1', status: 'downloading' }],
+      cachedSongs: {},
+      maxConcurrentDownloads: 2,
+    };
+    const after: QueueState = {
+      downloadQueue: [
+        { queueId: 'queue-1', status: 'downloading' },
+        { queueId: 'queue-2', status: 'queued' },
+        { queueId: 'queue-3', status: 'queued' },
+      ],
+      cachedSongs: {},
+      maxConcurrentDownloads: 2,
+    };
+    mockGetState.mockReturnValue(after);
+
+    subscribedListener!(after, before);
+    await flushPromises();
+
+    expect(mockPrimeBackgroundDownloads).toHaveBeenCalledWith(
+      'queue-2',
+      [{
+        downloadId: 'song-queue-2',
+        url: 'https://server.example/rest/stream.view?id=song-queue-2',
+        position: 1,
+      }],
+    );
+    expect(mockPrimeBackgroundDownloads).toHaveBeenCalledWith(
+      'queue-3',
+      [{
+        downloadId: 'song-queue-3',
+        url: 'https://server.example/rest/stream.view?id=song-queue-3',
+        position: 1,
+      }],
+    );
+  });
+
+  it('stops primed queued siblings when the active item is parked', async () => {
+    mockStopBackgroundDownloadsForQueue.mockResolvedValue(undefined);
+    const downloading: QueueState = {
+      downloadQueue: [
+        { queueId: 'queue-1', status: 'downloading' },
+        { queueId: 'queue-2', status: 'queued' },
+        { queueId: 'queue-3', status: 'queued' },
+      ],
+      cachedSongs: {},
+      maxConcurrentDownloads: 2,
+    };
+    const parked: QueueState = {
+      ...downloading,
+      downloadQueue: downloading.downloadQueue.map((item) => ({
+        ...item,
+        status: 'queued',
+      })),
+    };
+    mockGetState.mockReturnValue(parked);
+
+    subscribedListener!(parked, downloading);
+    await flushPromises();
+
+    expect(mockStopBackgroundDownloadsForQueue).toHaveBeenCalledWith('queue-1', true);
+    expect(mockStopBackgroundDownloadsForQueue).toHaveBeenCalledWith('queue-2', true);
+    expect(mockStopBackgroundDownloadsForQueue).toHaveBeenCalledWith('queue-3', true);
+  });
+
+  it('re-primes the whole queue when processing resumes', async () => {
+    mockWhenQueuePayloadWritten.mockResolvedValue(undefined);
+    mockReadDownloadQueueSongsAsync.mockImplementation(async (queueId: string) => [
+      { id: `song-${queueId}` },
+    ]);
+    mockEnsureCoverArtAuth.mockResolvedValue(undefined);
+    mockGetDownloadStreamUrl.mockImplementation(
+      (songId: string) => `https://server.example/rest/stream.view?id=${songId}`,
+    );
+    mockPrimeBackgroundDownloads.mockResolvedValue(undefined);
+
+    const parked: QueueState = {
+      downloadQueue: [
+        { queueId: 'queue-1', status: 'queued' },
+        { queueId: 'queue-2', status: 'queued' },
+        { queueId: 'queue-3', status: 'queued' },
+      ],
+      cachedSongs: {},
+      maxConcurrentDownloads: 2,
+    };
+    const resumed: QueueState = {
+      ...parked,
+      downloadQueue: parked.downloadQueue.map((item, index) => ({
+        ...item,
+        status: index === 0 ? 'downloading' : 'queued',
+      })),
+    };
+    mockGetState.mockReturnValue(resumed);
+
+    subscribedListener!(resumed, parked);
+    await flushPromises();
+
+    expect(mockPrimeBackgroundDownloads).toHaveBeenCalledWith(
+      'queue-1',
+      expect.any(Array),
+    );
+    expect(mockPrimeBackgroundDownloads).toHaveBeenCalledWith(
+      'queue-2',
+      expect.any(Array),
+    );
+    expect(mockPrimeBackgroundDownloads).toHaveBeenCalledWith(
+      'queue-3',
+      expect.any(Array),
+    );
+  });
+
   it('preserves completed staging when an item is parked', async () => {
     mockStopBackgroundDownloadsForQueue.mockResolvedValue(undefined);
     const downloading = state('downloading');
