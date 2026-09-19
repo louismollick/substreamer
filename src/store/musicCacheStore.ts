@@ -201,12 +201,16 @@ export interface MusicCacheState {
   removeCachedItemSong: (
     itemId: string,
     position: number,
-  ) => Promise<{ orphanedSongId: string | null }>;
+  ) => Promise<{ orphanedSongId: string | null; persisted: boolean }>;
+  /**
+   * Reorder one cached item edge. Memory changes only after the SQL batch lands,
+   * so callers doing recovery work can safely keep their queue row on failure.
+   */
   reorderCachedItemSongs: (
     itemId: string,
     fromPosition: number,
     toPosition: number,
-  ) => void;
+  ) => Promise<boolean>;
   /** `child` is the real server `Child` behind this write, when there is one —
    *  the only thing that rewrites the song's `cached_song_*` mirrors. */
   upsertCachedSong: (song: CachedSongMeta, child?: Child) => void;
@@ -615,14 +619,22 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
   removeCachedItemSong: async (itemId, position) => {
     const state = get();
     const item = state.cachedItems[itemId];
-    if (!item) return { orphanedSongId: null };
+    if (!item) return { orphanedSongId: null, persisted: true };
     // position is 1-indexed in SQL; songIds array is 0-indexed.
     const index = position - 1;
     if (index < 0 || index >= item.songIds.length) {
-      return { orphanedSongId: null };
+      return { orphanedSongId: null, persisted: true };
     }
     const songId = item.songIds[index];
-    // Optimistic: drop the edge from the item's in-memory songIds immediately.
+
+    // Lightweight tests historically return undefined from the mock. In production
+    // the persistence function returns an explicit boolean; only false means failure.
+    const persisted = await Promise.resolve(removeCachedItemSongRow(itemId, position))
+      .then((ok) => ok !== false);
+    if (!persisted) return { orphanedSongId: null, persisted: false };
+
+    // Publish the edge removal only after SQL succeeds. Recovery callers can now
+    // retry from the queue row without memory getting ahead of disk.
     set((prev) => {
       const prevItem = prev.cachedItems[itemId];
       if (!prevItem) return {}; // no-op — must not bump
@@ -633,12 +645,11 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
       };
       return bumped(prev, { cachedItems: nextItems });
     });
-    // Persist: remove the edge row (so a real-ref count of 0 means no OTHER real
-    // holder remains), then atomically orphan the song iff unreferenced.
-    await removeCachedItemSongRow(itemId, position);
+
+    // The edge is gone, so a real-ref count of 0 means no OTHER real holder remains.
     const { orphaned, affectedItems, prunedItems } =
       await orphanSongIfUnreferencedAsync(songId);
-    if (!orphaned) return { orphanedSongId: null };
+    if (!orphaned) return { orphanedSongId: null, persisted: true };
     const orphanedSongId = songId;
     set((prev) => {
       const nextItems = { ...prev.cachedItems };
@@ -661,25 +672,30 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
         totalFiles: Math.max(0, prev.totalFiles - 1),
       });
     });
-    return { orphanedSongId };
+    return { orphanedSongId, persisted: true };
   },
 
-  reorderCachedItemSongs: (itemId, fromPosition, toPosition) => {
+  reorderCachedItemSongs: async (itemId, fromPosition, toPosition) => {
     const state = get();
     const item = state.cachedItems[itemId];
-    if (!item) return;
+    if (!item) return false;
     const fromIdx = fromPosition - 1;
     const toIdx = toPosition - 1;
     if (
       fromIdx < 0 ||
       fromIdx >= item.songIds.length ||
       toIdx < 0 ||
-      toIdx >= item.songIds.length ||
-      fromIdx === toIdx
+      toIdx >= item.songIds.length
     ) {
-      return;
+      return false;
     }
-    void reorderCachedItemSongsRow(itemId, fromPosition, toPosition);
+    if (fromIdx === toIdx) return true;
+
+    const persisted = await Promise.resolve(
+      reorderCachedItemSongsRow(itemId, fromPosition, toPosition),
+    ).then((ok) => ok !== false);
+    if (!persisted) return false;
+
     const nextSongIds = [...item.songIds];
     const [moved] = nextSongIds.splice(fromIdx, 1);
     nextSongIds.splice(toIdx, 0, moved);
@@ -691,6 +707,7 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
         },
       }),
     );
+    return true;
   },
 
   upsertCachedSong: (song, child) => {
