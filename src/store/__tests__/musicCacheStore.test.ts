@@ -827,7 +827,7 @@ describe('removeCachedItemSong', () => {
     expect(mockRemoveCachedItemSong).toHaveBeenCalledWith('a', 2);
     expect(mockOrphanSongIfUnreferencedAsync).toHaveBeenCalledWith('s2');
     expect(mockDeleteCachedSong).not.toHaveBeenCalled();
-    expect(result).toEqual({ orphanedSongId: 's2' });
+    expect(result).toEqual({ orphanedSongId: 's2', persisted: true });
     const state = musicCacheStore.getState();
     expect(state.cachedItems['a'].songIds).toEqual(['s1', 's3']);
     expect(state.cachedSongs['s2']).toBeUndefined();
@@ -852,7 +852,7 @@ describe('removeCachedItemSong', () => {
 
     const result = await musicCacheStore.getState().removeCachedItemSong('a', 1);
 
-    expect(result).toEqual({ orphanedSongId: null });
+    expect(result).toEqual({ orphanedSongId: null, persisted: true });
     expect(mockDeleteCachedSong).not.toHaveBeenCalled();
     const state = musicCacheStore.getState();
     expect(state.cachedItems['a'].songIds).toEqual(['s2']);
@@ -861,7 +861,7 @@ describe('removeCachedItemSong', () => {
 
   it('returns null orphanedSongId when item is unknown', async () => {
     const result = await musicCacheStore.getState().removeCachedItemSong('unknown', 1);
-    expect(result).toEqual({ orphanedSongId: null });
+    expect(result).toEqual({ orphanedSongId: null, persisted: true });
     expect(mockRemoveCachedItemSong).not.toHaveBeenCalled();
     expect(mockDeleteCachedSong).not.toHaveBeenCalled();
   });
@@ -869,15 +869,29 @@ describe('removeCachedItemSong', () => {
   it('returns null when position is out of range (low)', async () => {
     musicCacheStore.setState({ cachedItems: { a: makeItem('a', ['s1']) } });
     const result = await musicCacheStore.getState().removeCachedItemSong('a', 0);
-    expect(result).toEqual({ orphanedSongId: null });
+    expect(result).toEqual({ orphanedSongId: null, persisted: true });
     expect(mockRemoveCachedItemSong).not.toHaveBeenCalled();
   });
 
   it('returns null when position is out of range (high)', async () => {
     musicCacheStore.setState({ cachedItems: { a: makeItem('a', ['s1']) } });
     const result = await musicCacheStore.getState().removeCachedItemSong('a', 2);
-    expect(result).toEqual({ orphanedSongId: null });
+    expect(result).toEqual({ orphanedSongId: null, persisted: true });
     expect(mockRemoveCachedItemSong).not.toHaveBeenCalled();
+  });
+
+  it('keeps the mirror unchanged when the edge delete fails', async () => {
+    musicCacheStore.setState({
+      cachedItems: { a: makeItem('a', ['s1', 's2']) },
+      cachedSongs: { s1: makeSong('s1'), s2: makeSong('s2') },
+    });
+    mockRemoveCachedItemSong.mockResolvedValueOnce(false);
+
+    const result = await musicCacheStore.getState().removeCachedItemSong('a', 1);
+
+    expect(result).toEqual({ orphanedSongId: null, persisted: false });
+    expect(mockOrphanSongIfUnreferencedAsync).not.toHaveBeenCalled();
+    expect(musicCacheStore.getState().cachedItems['a'].songIds).toEqual(['s1', 's2']);
   });
 });
 
@@ -997,7 +1011,7 @@ describe('removeCachedItemSong — derived-holder orphan matrix', () => {
 
     const result = await musicCacheStore.getState().removeCachedItemSong('__starred__', 1);
 
-    expect(result).toEqual({ orphanedSongId: 'S' });
+    expect(result).toEqual({ orphanedSongId: 'S', persisted: true });
     expect(mockRemoveCachedItemSong).toHaveBeenCalledWith('__starred__', 1);
     expect(mockOrphanSongIfUnreferencedAsync).toHaveBeenCalledWith('S');
     const state = musicCacheStore.getState();
@@ -1027,7 +1041,7 @@ describe('removeCachedItemSong — derived-holder orphan matrix', () => {
 
     const result = await musicCacheStore.getState().removeCachedItemSong('__starred__', 1);
 
-    expect(result).toEqual({ orphanedSongId: 'S' });
+    expect(result).toEqual({ orphanedSongId: 'S', persisted: true });
     const state = musicCacheStore.getState();
     expect(state.cachedItems['__starred__'].songIds).toEqual([]);
     // album:A survives with only S2 — S filtered out of its songIds.
@@ -1054,7 +1068,7 @@ describe('removeCachedItemSong — derived-holder orphan matrix', () => {
 
     const result = await musicCacheStore.getState().removeCachedItemSong('pl-1', 1);
 
-    expect(result).toEqual({ orphanedSongId: null });
+    expect(result).toEqual({ orphanedSongId: null, persisted: true });
     const state = musicCacheStore.getState();
     expect(state.cachedItems['pl-1'].songIds).toEqual(['S2']);
     expect(state.cachedItems['pl-2'].songIds).toEqual(['S1']);
@@ -1068,44 +1082,55 @@ describe('removeCachedItemSong — derived-holder orphan matrix', () => {
 /* ------------------------------------------------------------------ */
 
 describe('reorderCachedItemSongs', () => {
-  it('moves forward and updates both SQL and in-memory order', () => {
+  it('moves forward and updates both SQL and in-memory order', async () => {
     musicCacheStore.setState({
       cachedItems: { a: makeItem('a', ['s1', 's2', 's3', 's4']) },
     });
-    musicCacheStore.getState().reorderCachedItemSongs('a', 1, 3);
+    await expect(musicCacheStore.getState().reorderCachedItemSongs('a', 1, 3)).resolves.toBe(true);
     expect(mockReorderCachedItemSongs).toHaveBeenCalledWith('a', 1, 3);
     expect(musicCacheStore.getState().cachedItems['a'].songIds).toEqual([
       's2', 's3', 's1', 's4',
     ]);
   });
 
-  it('moves backward', () => {
+  it('moves backward', async () => {
     musicCacheStore.setState({
       cachedItems: { a: makeItem('a', ['s1', 's2', 's3', 's4']) },
     });
-    musicCacheStore.getState().reorderCachedItemSongs('a', 4, 2);
+    await expect(musicCacheStore.getState().reorderCachedItemSongs('a', 4, 2)).resolves.toBe(true);
     expect(mockReorderCachedItemSongs).toHaveBeenCalledWith('a', 4, 2);
     expect(musicCacheStore.getState().cachedItems['a'].songIds).toEqual([
       's1', 's4', 's2', 's3',
     ]);
   });
 
-  it('no-op when item is unknown', () => {
-    musicCacheStore.getState().reorderCachedItemSongs('unknown', 1, 2);
+  it('no-op when item is unknown', async () => {
+    await expect(musicCacheStore.getState().reorderCachedItemSongs('unknown', 1, 2)).resolves.toBe(false);
     expect(mockReorderCachedItemSongs).not.toHaveBeenCalled();
   });
 
-  it('no-op when from===to', () => {
+  it('no-op when from===to', async () => {
     musicCacheStore.setState({ cachedItems: { a: makeItem('a', ['s1', 's2']) } });
-    musicCacheStore.getState().reorderCachedItemSongs('a', 1, 1);
+    await expect(musicCacheStore.getState().reorderCachedItemSongs('a', 1, 1)).resolves.toBe(true);
     expect(mockReorderCachedItemSongs).not.toHaveBeenCalled();
   });
 
-  it('no-op when positions are out of range', () => {
+  it('no-op when positions are out of range', async () => {
     musicCacheStore.setState({ cachedItems: { a: makeItem('a', ['s1', 's2']) } });
-    musicCacheStore.getState().reorderCachedItemSongs('a', 0, 1);
-    musicCacheStore.getState().reorderCachedItemSongs('a', 1, 99);
+    await expect(musicCacheStore.getState().reorderCachedItemSongs('a', 0, 1)).resolves.toBe(false);
+    await expect(musicCacheStore.getState().reorderCachedItemSongs('a', 1, 99)).resolves.toBe(false);
     expect(mockReorderCachedItemSongs).not.toHaveBeenCalled();
+  });
+
+  it('keeps the mirror unchanged when the reorder batch fails', async () => {
+    musicCacheStore.setState({
+      cachedItems: { a: makeItem('a', ['s1', 's2', 's3']) },
+    });
+    mockReorderCachedItemSongs.mockResolvedValueOnce(false);
+
+    await expect(musicCacheStore.getState().reorderCachedItemSongs('a', 1, 3)).resolves.toBe(false);
+
+    expect(musicCacheStore.getState().cachedItems['a'].songIds).toEqual(['s1', 's2', 's3']);
   });
 });
 
@@ -1515,10 +1540,10 @@ describe('revision', () => {
     expect(revision()).toBeGreaterThan(before);
   });
 
-  it('bumps on reorderCachedItemSongs', () => {
+  it('bumps on reorderCachedItemSongs', async () => {
     musicCacheStore.getState().upsertCachedItem(makeItem('a', ['s1', 's2']), ['s1', 's2']);
     const before = revision();
-    musicCacheStore.getState().reorderCachedItemSongs('a', 1, 2);
+    await musicCacheStore.getState().reorderCachedItemSongs('a', 1, 2);
     expect(revision()).toBeGreaterThan(before);
   });
 
