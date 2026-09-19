@@ -22,7 +22,7 @@ type BackgroundMetadata = {
 
 type ManagedDownload = {
   task: BackgroundTask;
-  queueId: string;
+  queueIds: Set<string>;
   downloadId: string;
   stagingUri: string;
   completion: Promise<{ bytes: number }>;
@@ -98,7 +98,9 @@ function attachTask(
   };
   const managed: ManagedDownload = {
     task,
-    queueId,
+    // Direct fallback tasks do not count as a queue owner. If proactive
+    // priming catches up later, the real queue item becomes the owner.
+    queueIds: queueId.startsWith('direct-') ? new Set() : new Set([queueId]),
     downloadId,
     stagingUri,
     completion,
@@ -199,9 +201,10 @@ export async function primeBackgroundDownloads(
   for (const request of requests) {
     const existing = downloadsById.get(request.downloadId);
     if (existing) {
-      // The worker may have created a direct fallback before proactive priming
-      // won the race. Adopt it into the real queue so a later park/cancel stops it.
-      existing.queueId = queueId;
+      // One native transfer can satisfy more than one queued item. Keep every
+      // queue owner so cancelling a playlist cannot stop a shared track that an
+      // album still needs.
+      existing.queueIds.add(queueId);
       continue;
     }
     createManagedDownload(queueId, request);
@@ -274,12 +277,15 @@ export async function stopBackgroundDownloadsForQueue(
   await loadExistingTasks().catch(() => undefined);
   const matching = Array.from(downloadsById.values()).filter(
     (download) =>
-      download.queueId === queueId &&
+      download.queueIds.has(queueId) &&
       !(preserveCompleted && download.task.state === 'DONE'),
   );
 
   await Promise.all(
     matching.map(async (download) => {
+      download.queueIds.delete(queueId);
+      if (download.queueIds.size > 0) return;
+
       try { await download.task.stop(); } catch { /* best-effort */ }
 
       // A retry/re-prime may have replaced this task while stop() was in flight.
