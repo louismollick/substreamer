@@ -15,6 +15,16 @@ import { readDownloadQueueSongsAsync } from '../store/persistence/musicCacheTabl
 import { ensureCoverArtAuth, getDownloadStreamUrl } from './subsonicService';
 
 const queueOperations = new Map<string, Promise<void>>();
+let primeOperation: Promise<void> = Promise.resolve();
+let primingPaused = false;
+
+function serializePrime(operation: () => Promise<void>): Promise<void> {
+  const next = primeOperation
+    .catch(() => undefined)
+    .then(operation);
+  primeOperation = next;
+  return next;
+}
 
 function isPrimeable(item: DownloadQueueItem | undefined): boolean {
   return item?.status === 'queued' || item?.status === 'downloading';
@@ -43,7 +53,7 @@ async function primeQueueItem(item: DownloadQueueItem): Promise<void> {
     let current = musicCacheStore.getState().downloadQueue.find(
       (queued) => queued.queueId === item.queueId,
     );
-    if (!isPrimeable(current)) return;
+    if (primingPaused || !isPrimeable(current)) return;
 
     const songs = await readDownloadQueueSongsAsync(item.queueId);
     if (songs.length === 0) return;
@@ -53,7 +63,7 @@ async function primeQueueItem(item: DownloadQueueItem): Promise<void> {
     current = musicCacheStore.getState().downloadQueue.find(
       (queued) => queued.queueId === item.queueId,
     );
-    if (!isPrimeable(current)) return;
+    if (primingPaused || !isPrimeable(current)) return;
 
     const cachedSongs = musicCacheStore.getState().cachedSongs;
     const seen = new Set<string>();
@@ -112,6 +122,7 @@ function onQueueChanged(
   );
 
   if (queueParked) {
+    primingPaused = true;
     for (const item of state.downloadQueue) {
       if (!isPrimeable(item)) continue;
       scheduleQueueOperation(item.queueId, () =>
@@ -126,12 +137,15 @@ function onQueueChanged(
         item.status === 'downloading' &&
         previousById.get(item.queueId)?.status !== 'downloading',
     );
+    if (queueStarted) primingPaused = false;
 
     for (const item of state.downloadQueue) {
       if (!isPrimeable(item)) continue;
       const before = previousById.get(item.queueId);
       if (queueStarted || !isPrimeable(before)) {
-        scheduleQueueOperation(item.queueId, () => primeQueueItem(item));
+        scheduleQueueOperation(item.queueId, () =>
+          serializePrime(() => primeQueueItem(item)),
+        );
       }
     }
   }
