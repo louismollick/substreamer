@@ -1845,7 +1845,11 @@ export async function removeDownloadQueueItem(queueId: string): Promise<void> {
   const db = getDb();
   if (db === null) return;
   try {
-    await db.runAsync('DELETE FROM download_queue WHERE queue_id = ?;', [queueId]);
+    // Use the atomic-batch queue so this delete stays ordered behind any
+    // preceding edge-reorder batches from a replacement repair.
+    await db.runAtomicBatchAsync([
+      ['DELETE FROM download_queue WHERE queue_id = ?;', [queueId]],
+    ]);
   } catch {
     /* dropped */
   }
@@ -1938,26 +1942,27 @@ const APPEND_CACHED_ITEM_SONG_SQL = `INSERT OR IGNORE INTO cached_item_songs (it
    VALUES (?, (SELECT COALESCE(MAX(position), 0) + 1 FROM cached_item_songs WHERE item_id = ?), ?);`;
 
 /**
- * Atomically finalise a download: delete the queue row, upsert the item, upsert
- * all songs, and append every edge — ONE `runAtomicBatchAsync`, so consumers
- * never observe a half-committed state and nothing can interleave mid-write.
+ * Atomically write a completed download: upsert the item, all songs, and every
+ * edge in ONE `runAtomicBatchAsync`, so consumers never observe a half-committed
+ * item and nothing can interleave mid-write.
+ *
+ * The normal path deletes the queue row in this same batch. A re-key repair sets
+ * `keepQueue` so crash recovery retains the full fresh payload until stale-edge
+ * cleanup and reordering finish; its caller removes the queue row afterward.
  *
  * The queue DELETE cascades `download_queue_songs` and its five array tables, so the
  * payload goes with the item it belonged to. A row left in `error` status is NOT
  * deleted (the user may still retry it), and keeps its songs for the same reason.
  *
- * The vacated `queue_position` stays vacant, deliberately — see
- * `removeDownloadQueueItem`. This is the path that makes renumbering untenable:
- * the queue drains from the front, so a shift here would rewrite every remaining
- * row once per completed album.
+ * The vacated `queue_position` stays vacant, deliberately. See
+ * `removeDownloadQueueItem`. The queue drains from the front, so shifting every
+ * survivor here would turn a full-library download into O(N²) queue rewrites.
  *
  * Statement order is load-bearing: `cached_items` and `cached_songs` are the FK
  * parents of `cached_item_songs`, so both must land before any edge.
  *
- * `songs` is a MIX of `Child`-derived rows and rows rebuilt from memory, and
- * nothing on the row distinguishes them — so `childBySongId` is the explicit
- * channel for the real `Child`s, and only ids present in it get their
- * `cached_song_*` mirrors rewritten.
+ * `songs` is a mix of `Child`-derived rows and rows rebuilt from memory. Only ids
+ * present in `childBySongId` get their `cached_song_*` mirrors rewritten.
  */
 export async function markDownloadComplete(
   queueId: string,
@@ -1965,30 +1970,32 @@ export async function markDownloadComplete(
   songs: CachedSongRow[],
   edges: Array<{ songId: string; position: number }>,
   childBySongId?: Map<string, Child>,
-): Promise<void> {
+  options?: { keepQueue?: boolean },
+): Promise<boolean> {
   const db = getDb();
-  if (db === null) return;
+  if (db === null) return false;
   try {
-    const commands: BatchCommand[] = [
-      ['DELETE FROM download_queue WHERE queue_id = ?;', [queueId]],
-      ...cachedItemCommands(item),
-    ];
+    const commands: BatchCommand[] = [];
+    if (!options?.keepQueue) {
+      commands.push(['DELETE FROM download_queue WHERE queue_id = ?;', [queueId]]);
+    }
+    commands.push(...cachedItemCommands(item));
     for (const song of songs) {
       if (!song.id || !song.albumId) continue;
       commands.push(...cachedSongCommands(song, childBySongId?.get(song.id)));
     }
     // Edges append after whatever the item already holds, so a top-up merging
-    // into an existing row doesn't collide with its 1..K edges (the caller's
-    // positions are 1-based within the queue item's payload, not the cached
-    // row). Sorting fixes the statement order, which fixes the resulting order.
+    // into an existing row doesn't collide with its 1..K edges. Sorting fixes
+    // statement order, which fixes the resulting edge order.
     const sortedEdges = [...edges].sort((a, b) => a.position - b.position);
     for (const edge of sortedEdges) {
       if (!edge.songId) continue;
       commands.push([APPEND_CACHED_ITEM_SONG_SQL, [item.itemId, item.itemId, edge.songId]]);
     }
     await db.runAtomicBatchAsync(commands);
+    return true;
   } catch {
-    /* dropped */
+    return false;
   }
 }
 
