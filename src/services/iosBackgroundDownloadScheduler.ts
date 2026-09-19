@@ -16,6 +16,10 @@ import { ensureCoverArtAuth, getDownloadStreamUrl } from './subsonicService';
 
 const queueOperations = new Map<string, Promise<void>>();
 
+function isPrimeable(item: DownloadQueueItem | undefined): boolean {
+  return item?.status === 'queued' || item?.status === 'downloading';
+}
+
 function scheduleQueueOperation(queueId: string, operation: () => Promise<void>): void {
   const previous = queueOperations.get(queueId) ?? Promise.resolve();
   const next = previous
@@ -39,7 +43,7 @@ async function primeQueueItem(item: DownloadQueueItem): Promise<void> {
     let current = musicCacheStore.getState().downloadQueue.find(
       (queued) => queued.queueId === item.queueId,
     );
-    if (current?.status !== 'downloading') return;
+    if (!isPrimeable(current)) return;
 
     const songs = await readDownloadQueueSongsAsync(item.queueId);
     if (songs.length === 0) return;
@@ -49,7 +53,7 @@ async function primeQueueItem(item: DownloadQueueItem): Promise<void> {
     current = musicCacheStore.getState().downloadQueue.find(
       (queued) => queued.queueId === item.queueId,
     );
-    if (current?.status !== 'downloading') return;
+    if (!isPrimeable(current)) return;
 
     const cachedSongs = musicCacheStore.getState().cachedSongs;
     const seen = new Set<string>();
@@ -73,13 +77,14 @@ async function primeQueueItem(item: DownloadQueueItem): Promise<void> {
 
     await primeBackgroundDownloads(item.queueId, requests);
 
-    // A cancel/offline/storage transition may have raced the async payload/auth
-    // work above. Never leave newly-created native tasks running for a parked item.
+    // A cancellation/error transition may have raced the async payload/auth
+    // work above. Queued items stay primed so iOS can cross item boundaries
+    // without waking JavaScript.
     current = musicCacheStore.getState().downloadQueue.find(
       (queued) => queued.queueId === item.queueId,
     );
-    if (current?.status !== 'downloading') {
-      await stopBackgroundDownloadsForQueue(item.queueId, current?.status === 'queued');
+    if (!isPrimeable(current)) {
+      await stopBackgroundDownloadsForQueue(item.queueId);
     }
   } catch (error) {
     // The normal worker remains a fallback: its first download call can still
@@ -96,20 +101,48 @@ function onQueueChanged(
   const previousById = new Map(previous.downloadQueue.map((item) => [item.queueId, item]));
   const currentById = new Map(state.downloadQueue.map((item) => [item.queueId, item]));
 
-  for (const item of state.downloadQueue) {
-    const before = previousById.get(item.queueId);
-    if (item.status === 'downloading' && before?.status !== 'downloading') {
-      scheduleQueueOperation(item.queueId, () => primeQueueItem(item));
+  // A downloading -> queued transition is the worker parking the queue for
+  // offline/storage/recovery. Future queued items are already native tasks now,
+  // so stop all of them too. Completed staging files survive and can be consumed
+  // after the queue resumes.
+  const queueParked = state.downloadQueue.some(
+    (item) =>
+      item.status === 'queued' &&
+      previousById.get(item.queueId)?.status === 'downloading',
+  );
+
+  if (queueParked) {
+    for (const item of state.downloadQueue) {
+      if (!isPrimeable(item)) continue;
+      scheduleQueueOperation(item.queueId, () =>
+        stopBackgroundDownloadsForQueue(item.queueId, true),
+      );
+    }
+  } else {
+    // Starting/resuming one item re-primes the whole queue. This matters after a
+    // park, where queued siblings were stopped without changing their status.
+    const queueStarted = state.downloadQueue.some(
+      (item) =>
+        item.status === 'downloading' &&
+        previousById.get(item.queueId)?.status !== 'downloading',
+    );
+
+    for (const item of state.downloadQueue) {
+      if (!isPrimeable(item)) continue;
+      const before = previousById.get(item.queueId);
+      if (queueStarted || !isPrimeable(before)) {
+        scheduleQueueOperation(item.queueId, () => primeQueueItem(item));
+      }
     }
   }
 
+  // Removed/error items no longer own native work. A parked item is handled by
+  // the queue-wide stop above because its queued siblings must stop as well.
   for (const item of previous.downloadQueue) {
     const current = currentById.get(item.queueId);
-    if (item.status !== 'downloading' && current) continue;
-    if (!current || current.status !== 'downloading') {
-      // Parked items can consume completed staging files when they resume.
+    if (!current || !isPrimeable(current)) {
       scheduleQueueOperation(item.queueId, () =>
-        stopBackgroundDownloadsForQueue(item.queueId, current?.status === 'queued'),
+        stopBackgroundDownloadsForQueue(item.queueId),
       );
     }
   }
