@@ -1730,6 +1730,7 @@ describe('reorderCachedPlaylistTracks', () => {
     seedSong(makeCachedSong('s3'));
     seedItem('pl-1', { type: 'playlist', songIds: ['s1', 's2', 's3'] });
     reorderCachedPlaylistTracks('pl-1', 0, 2);
+    await new Promise((resolve) => setImmediate(resolve));
     const item = musicCacheStore.getState().cachedItems['pl-1'];
     expect(item.songIds).toEqual(['s2', 's3', 's1']);
   });
