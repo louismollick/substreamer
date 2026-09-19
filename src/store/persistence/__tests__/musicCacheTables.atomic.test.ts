@@ -333,11 +333,11 @@ describe('markDownloadComplete (real SQL)', () => {
     expect(count('cached_item_songs')).toBe(0);
   });
 
-  it('is a silent no-op without a db handle', async () => {
+  it('reports failure without a db handle', async () => {
     __setDbForTests(null);
     await expect(
       markDownloadComplete('q-1', makeItem(), [makeSong()], [{ songId: 's1', position: 1 }]),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
     __setDbForTests(realDb);
     expect(count('cached_items')).toBe(0);
   });
