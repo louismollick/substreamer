@@ -1448,13 +1448,27 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
       songId: e.songId,
       position: e.position,
     }));
-    musicCacheStore.getState().markItemComplete(
+    const completion = musicCacheStore.getState().markItemComplete(
       queueItem.queueId,
       cachedItem,
       songsToCommit,
       edgesForCommit,
       childBySongId,
+      replacementIds ? { keepQueue: true } : undefined,
     );
+
+    if (replacementIds) {
+      // Do not remove stale membership until the fresh item and edge batch is on
+      // disk. The queue row stays as the recovery record until repair finishes.
+      const persisted = await completion;
+      if (!persisted) {
+        musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
+          status: 'error',
+          error: 'Failed to finalize download',
+        });
+        return;
+      }
+    }
 
     for (const e of edgesForCommit) {
       registerTrackToItem(e.songId, queueItem.itemId);
@@ -1476,6 +1490,10 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
           targetIndex + 1,
         );
       }
+
+      // Queue deletion is submitted after the reorder batches, so a vanished
+      // recovery row means the repaired edge set and order were already queued.
+      musicCacheStore.getState().removeFromQueue(queueItem.queueId);
     }
   } else {
     musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
