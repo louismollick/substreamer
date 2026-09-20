@@ -189,6 +189,32 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
   // `download_queue_songs`. Written by the append, dropped with the queue row.
   const queueSongs = new Map<string, Array<Record<string, unknown>>>();
   const isDerived = (itemId: string) => derivedItems.has(itemId);
+  const orphanSongInMock = (songId: string) => {
+    const realRefs = edges.filter((e) => e.songId === songId && !isDerived(e.itemId)).length;
+    if (realRefs !== 0) return { orphaned: false, affectedItems: [], prunedItems: [] };
+    const affected = new Set<string>();
+    const removed = edges.filter((e) => e.songId === songId);
+    for (const e of removed) affected.add(e.itemId);
+    const sorted = [...removed].sort((a, b) => b.position - a.position);
+    for (const e of sorted) {
+      const i = edges.findIndex(
+        (x) => x.itemId === e.itemId && x.position === e.position && x.songId === songId,
+      );
+      if (i >= 0) edges.splice(i, 1);
+      for (const x of edges) {
+        if (x.itemId === e.itemId && x.position > e.position) x.position -= 1;
+      }
+    }
+    const prunedItems: string[] = [];
+    for (const itemId of affected) {
+      const remaining = edges.filter((e) => e.itemId === itemId).length;
+      if (remaining === 0 && isDerived(itemId)) {
+        derivedItems.delete(itemId);
+        prunedItems.push(itemId);
+      }
+    }
+    return { orphaned: true, affectedItems: [...affected], prunedItems };
+  };
   return {
     // Hydrate helpers — return empty; tests seed in-memory state directly.
     hydrateCachedSongs: jest.fn(() => ({})),
@@ -218,32 +244,7 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
     // DERIVED holder left empty, and returns orphaned:true with the touched +
     // pruned holders so the store can mirror the change. Mirrors the production
     // transaction.
-    orphanSongIfUnreferencedAsync: jest.fn(async (songId: string) => {
-      const realRefs = edges.filter((e) => e.songId === songId && !isDerived(e.itemId)).length;
-      if (realRefs !== 0) return { orphaned: false, affectedItems: [], prunedItems: [] };
-      const affected = new Set<string>();
-      const removed = edges.filter((e) => e.songId === songId);
-      for (const e of removed) affected.add(e.itemId);
-      const sorted = [...removed].sort((a, b) => b.position - a.position);
-      for (const e of sorted) {
-        const i = edges.findIndex(
-          (x) => x.itemId === e.itemId && x.position === e.position && x.songId === songId,
-        );
-        if (i >= 0) edges.splice(i, 1);
-        for (const x of edges) {
-          if (x.itemId === e.itemId && x.position > e.position) x.position -= 1;
-        }
-      }
-      const prunedItems: string[] = [];
-      for (const itemId of affected) {
-        const remaining = edges.filter((e) => e.itemId === itemId).length;
-        if (remaining === 0 && isDerived(itemId)) {
-          derivedItems.delete(itemId);
-          prunedItems.push(itemId);
-        }
-      }
-      return { orphaned: true, affectedItems: [...affected], prunedItems };
-    }),
+    orphanSongIfUnreferencedAsync: jest.fn(async (songId: string) => orphanSongInMock(songId)),
     // cached_songs writes
     upsertCachedSong: jest.fn(),
     deleteCachedSong: jest.fn(),
@@ -273,6 +274,31 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
         if (e.itemId === itemId && e.position > position) e.position -= 1;
       }
     }),
+    removeCachedItemSongAndOrphanAsync: jest.fn(
+      async (itemId: string, position: number, songId: string) => {
+        const i = edges.findIndex(
+          (e) => e.itemId === itemId && e.position === position && e.songId === songId,
+        );
+        if (i >= 0) {
+          edges.splice(i, 1);
+          for (const e of edges) {
+            if (e.itemId === itemId && e.position > position) e.position -= 1;
+          }
+        }
+        const orphan = orphanSongInMock(songId);
+        return { persisted: true, orphaned: orphan.orphaned };
+      },
+    ),
+    demoteCachedAlbumToPartialAsync: jest.fn(
+      async (itemId: string, candidateOrphanSongIds: string[]) => {
+        derivedItems.add(itemId);
+        const orphanedSongIds: string[] = [];
+        for (const songId of candidateOrphanSongIds) {
+          if (orphanSongInMock(songId).orphaned) orphanedSongIds.push(songId);
+        }
+        return { persisted: true, orphanedSongIds };
+      },
+    ),
     reorderCachedItemSongs: jest.fn(),
     // download_queue writes. The append echoes the store's optimistic slot back —
     // SQL assigns it for real, and here memory and disk agree.
@@ -293,8 +319,9 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
         return row.queuePosition;
       },
     ),
-    removeDownloadQueueItem: jest.fn((queueId: string) => {
+    removeDownloadQueueItem: jest.fn(async (queueId: string) => {
       queueSongs.delete(queueId);
+      return true;
     }),
     updateDownloadQueueItem: jest.fn(),
     reorderDownloadQueue: jest.fn(),
@@ -2446,7 +2473,10 @@ describe('download pipeline', () => {
         makeChild('keep-id', { albumId: 'album-rekey' }),
       ],
     });
-    persistenceMock.removeCachedItemSong.mockReturnValueOnce(false);
+    persistenceMock.removeCachedItemSongAndOrphanAsync.mockResolvedValueOnce({
+      persisted: false,
+      orphaned: false,
+    });
 
     await enqueueAlbumDownload('album-rekey');
     await waitForQueueIdle();
