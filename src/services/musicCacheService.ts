@@ -1915,10 +1915,18 @@ export async function demoteAlbumToPartial(
   // The persistence layer flips the album to derived and orphans every candidate
   // in one batch. There is no partially-demoted state to clean up after a later
   // write failure.
-  const demotion = await musicCacheStore.getState().demoteCachedAlbum(
+  let demotion = await musicCacheStore.getState().demoteCachedAlbum(
     itemId,
     orphanSongIds,
   );
+  if (!demotion.persisted) {
+    // The atomic batch may have committed even if its confirmation read failed.
+    // Replaying the same demotion is idempotent and recovers the actual orphan list.
+    demotion = await musicCacheStore.getState().demoteCachedAlbum(
+      itemId,
+      orphanSongIds,
+    );
+  }
   if (!demotion.persisted) return { demoted: false, removed: false };
 
   const deletions: Promise<unknown>[] = [];
