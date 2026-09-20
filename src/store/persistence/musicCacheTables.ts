@@ -1392,6 +1392,61 @@ export async function removeCachedItemSong(itemId: string, position: number): Pr
 }
 
 /**
+ * Remove one exact edge and orphan its song if that removal leaves no REAL
+ * holder. The edge delete, position repack, derived-holder cleanup, and song-row
+ * delete are one atomic batch, so callers never need to recover a half-finished
+ * orphan cleanup.
+ */
+export async function removeCachedItemSongAndOrphanAsync(
+  itemId: string,
+  position: number,
+  songId: string,
+): Promise<{ persisted: boolean; orphaned: boolean }> {
+  const db = getDb();
+  if (db === null) return { persisted: false, orphaned: false };
+
+  // Guard the tail shift with the exact edge the caller observed. If memory and
+  // disk ever disagree, the delete/repack becomes a no-op instead of shifting the
+  // wrong row. The orphan commands then also no-op while a REAL holder remains.
+  const tailShift = positionShiftCommands({
+    table: 'cached_item_songs',
+    column: 'position',
+    newPosition: 'position - 1',
+    where: `item_id = ? AND position > ?
+            AND EXISTS (
+              SELECT 1 FROM cached_item_songs d
+               WHERE d.item_id = ? AND d.position = ? AND d.song_id = ?
+            )`,
+    params: [itemId, position, itemId, position, songId],
+    restoreWhere: 'item_id = ?',
+    restoreParams: [itemId],
+  });
+
+  try {
+    await db.runAtomicBatchAsync([
+      tailShift.shift,
+      [
+        'DELETE FROM cached_item_songs WHERE item_id = ? AND position = ? AND song_id = ?;',
+        [itemId, position, songId],
+      ],
+      tailShift.restore,
+      ...orphanSongCommands(songId),
+    ]);
+
+    const remaining = await db.getFirstAsync<{ c: number }>(
+      'SELECT COUNT(*) AS c FROM cached_songs WHERE song_id = ?;',
+      [songId],
+    );
+    return { persisted: true, orphaned: (remaining?.c ?? 1) === 0 };
+  } catch {
+    // A failed post-read is also reported as not persisted. Retrying is safe:
+    // every command above is idempotent and the exact-edge guard prevents a
+    // shifted successor from being removed on replay.
+    return { persisted: false, orphaned: false };
+  }
+}
+
+/**
  * Reorder one edge within an item from `fromPosition` to `toPosition`.
  *
  * The moving row and the run it displaces are ONE repack: everything in
@@ -1843,17 +1898,18 @@ export async function insertDownloadQueueItem(
  * and because the queue drains from the front, that is O(N²) writes across a
  * full-library download, at a library ceiling of ~200k albums.
  */
-export async function removeDownloadQueueItem(queueId: string): Promise<void> {
+export async function removeDownloadQueueItem(queueId: string): Promise<boolean> {
   const db = getDb();
-  if (db === null) return;
+  if (db === null) return false;
   try {
     // Use the atomic-batch queue so this delete stays ordered behind any
     // preceding edge-reorder batches from a replacement repair.
     await db.runAtomicBatchAsync([
       ['DELETE FROM download_queue WHERE queue_id = ?;', [queueId]],
     ]);
+    return true;
   } catch {
-    /* dropped */
+    return false;
   }
 }
 
