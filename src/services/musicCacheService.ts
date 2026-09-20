@@ -1921,7 +1921,7 @@ export async function demoteAlbumToPartial(
   );
   if (!demotion.persisted) return { demoted: false, removed: false };
 
-  const deletions: Promise<void>[] = [];
+  const deletions: Promise<unknown>[] = [];
   for (const songId of demotion.orphanedSongIds) {
     trackToItems.delete(songId);
     trackUriMap.delete(songId);
