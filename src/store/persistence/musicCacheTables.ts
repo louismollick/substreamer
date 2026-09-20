@@ -1447,6 +1447,46 @@ export async function removeCachedItemSongAndOrphanAsync(
 }
 
 /**
+ * Atomically turn a downloaded album into a derived partial grouping and orphan
+ * the songs that were held only by that album. Surviving songs are untouched.
+ *
+ * Replaying after an uncertain post-read is safe: setting `derived = 1` and the
+ * orphan command set are idempotent.
+ */
+export async function demoteCachedAlbumToPartialAsync(
+  itemId: string,
+  candidateOrphanSongIds: readonly string[],
+): Promise<{ persisted: boolean; orphanedSongIds: string[] }> {
+  const db = getDb();
+  if (db === null) return { persisted: false, orphanedSongIds: [] };
+
+  try {
+    const commands: BatchCommand[] = [
+      ['UPDATE cached_items SET derived = 1 WHERE item_id = ?;', [itemId]],
+    ];
+    for (const songId of candidateOrphanSongIds) {
+      commands.push(...orphanSongCommands(songId));
+    }
+    await db.runAtomicBatchAsync(commands);
+
+    if (candidateOrphanSongIds.length === 0) {
+      return { persisted: true, orphanedSongIds: [] };
+    }
+    const remaining = await db.getAllAsync<{ song_id: string }>(
+      'SELECT song_id FROM cached_songs WHERE song_id IN (SELECT value FROM json_each(?));',
+      [JSON.stringify(candidateOrphanSongIds)],
+    );
+    const alive = new Set(remaining.map((row) => row.song_id));
+    return {
+      persisted: true,
+      orphanedSongIds: candidateOrphanSongIds.filter((songId) => !alive.has(songId)),
+    };
+  } catch {
+    return { persisted: false, orphanedSongIds: [] };
+  }
+}
+
+/**
  * Reorder one edge within an item from `fromPosition` to `toPosition`.
  *
  * The moving row and the run it displaces are ONE repack: everything in
