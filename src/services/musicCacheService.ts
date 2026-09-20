@@ -1333,8 +1333,8 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
       if (preScannedSongs.has(`${idx}`)) continue;
 
       try {
-        let result = await downloadSong(song);
-        if (!result) result = await downloadSong(song);
+        let result = await downloadSong(song, queueItem.queueId);
+        if (!result) result = await downloadSong(song, queueItem.queueId);
         if (result) {
           itemSongsForCommit.set(song.id, result);
           // Membership comes from the loop's source `song`, not from `result` —
@@ -1425,7 +1425,10 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
  * Retry-once (for the transient "null from getDownloadStreamUrl") happens
  * in the caller.
  */
-async function downloadSong(track: Child): Promise<CachedSongMeta | null> {
+async function downloadSong(
+  track: Child,
+  queueId: string,
+): Promise<CachedSongMeta | null> {
   const existing = musicCacheStore.getState().cachedSongs[track.id];
   if (existing) return existing;
 
@@ -1446,7 +1449,7 @@ async function downloadSong(track: Child): Promise<CachedSongMeta | null> {
   try {
     beginDownload(track.id);
     const tmpDest = new File(albumDir, tmpName);
-    await downloadFileAsyncWithProgress(url, tmpDest.uri, track.id);
+    await downloadFileAsyncWithProgress(url, tmpDest.uri, track.id, queueId);
 
     const dest = new File(albumDir, fileName);
     if (dest.exists) {
