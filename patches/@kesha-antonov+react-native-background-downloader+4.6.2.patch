@@ -67,7 +67,7 @@ index 9f693bf..ada96df 100644
 +// taskToConfigMap is only restart metadata. URLSession already owns the live tasks.
 +- (void)substreamerPersistTaskConfigMapIfNeededLocked {
 +    if (!taskConfigMapDirty) return;
-+    [self substreamerMarkTaskConfigMapDirtyLocked];
++    [mmkv setData:[self serialize:taskToConfigMap] forKey:ID_TO_CONFIG_MAP_KEY];
 +    taskConfigMapDirty = NO;
 +}
 +
