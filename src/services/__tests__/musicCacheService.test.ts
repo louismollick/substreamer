@@ -1584,6 +1584,33 @@ describe('demoteAlbumToPartial', () => {
     expect(fileDeletesAsync.some((u) => u.includes('s2'))).toBe(false);
   });
 
+  it('leaves the album and files untouched when the atomic demotion fails', async () => {
+    mockFileExists = true;
+    seedSong(makeCachedSong('s1'));
+    seedSong(makeCachedSong('s2'));
+    seedItem('album-1', {
+      type: 'album',
+      songIds: ['s1', 's2'],
+      expectedSongCount: 2,
+    });
+    seedItem('pl-1', { type: 'playlist', songIds: ['s1'] });
+    persistenceMock.demoteCachedAlbumToPartialAsync.mockResolvedValueOnce({
+      persisted: false,
+      orphanedSongIds: [],
+    });
+
+    const result = await demoteAlbumToPartial('album-1');
+
+    expect(result).toEqual({ demoted: false, removed: false });
+    expect(musicCacheStore.getState().cachedItems['album-1']).toMatchObject({
+      derived: undefined,
+      songIds: ['s1', 's2'],
+    });
+    expect(musicCacheStore.getState().cachedSongs['s2']).toBeDefined();
+    expect(fileDeletesAsync.some((u) => u.includes('s2'))).toBe(false);
+    expect(persistenceMock.__derivedItems.has('album-1')).toBe(false);
+  });
+
   it('no-op guard when album item has no orphans (defensive: survivors fully cover it)', async () => {
     seedSong(makeCachedSong('s1'));
     seedItem('album-1', { type: 'album', songIds: ['s1'], expectedSongCount: 1 });
@@ -1952,6 +1979,27 @@ describe('cancelDownload', () => {
 
     await cancelDownload('q1');
     expect(musicCacheStore.getState().downloadQueue).toHaveLength(0);
+  });
+
+  it('keeps the queue row when its durable delete fails', async () => {
+    musicCacheStore.setState({
+      downloadQueue: [
+        {
+          queueId: 'q1', itemId: 'album-1', type: 'album', name: 'X', status: 'queued',
+          totalSongs: 1, completedSongs: 0, addedAt: 0, queuePosition: 1,
+          songsJson: JSON.stringify([makeChild('t1')]),
+        },
+      ],
+    } as any);
+    persistenceMock.removeDownloadQueueItem.mockResolvedValueOnce(false);
+
+    await cancelDownload('q1');
+
+    expect(musicCacheStore.getState().downloadQueue).toHaveLength(1);
+    expect(musicCacheStore.getState().downloadQueue[0]).toMatchObject({
+      status: 'error',
+      error: 'Failed to cancel download',
+    });
   });
 
   it('schedules recalculate to fix phantom bytes', async () => {
@@ -2528,6 +2576,42 @@ describe('download pipeline', () => {
     );
     expect(queued?.status).toBe('error');
     expect(queued?.error).toBe('Failed to persist repaired album order');
+  });
+
+  it('keeps the repaired recovery row when its final delete fails', async () => {
+    mockFileExists = true;
+    mockFileSize = 5000;
+    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    seedSong(makeCachedSong('old-id', { albumId: 'album-rekey', bytes: 253 }));
+    seedSong(makeCachedSong('keep-id', { albumId: 'album-rekey' }));
+    seedItem('album-rekey', {
+      type: 'album',
+      songIds: ['old-id', 'keep-id'],
+      expectedSongCount: 2,
+    });
+    mockFetchAlbum.mockResolvedValue({
+      id: 'album-rekey',
+      name: 'Rekeyed',
+      songCount: 2,
+      song: [
+        makeChild('new-id', { albumId: 'album-rekey' }),
+        makeChild('keep-id', { albumId: 'album-rekey' }),
+      ],
+    });
+    persistenceMock.removeDownloadQueueItem.mockResolvedValueOnce(false);
+
+    await enqueueAlbumDownload('album-rekey');
+    await waitForQueueIdle();
+
+    expect(musicCacheStore.getState().cachedItems['album-rekey'].songIds).toEqual([
+      'new-id',
+      'keep-id',
+    ]);
+    const queued = musicCacheStore.getState().downloadQueue.find(
+      (q: any) => q.itemId === 'album-rekey',
+    );
+    expect(queued?.status).toBe('error');
+    expect(queued?.error).toBe('Failed to remove completed recovery row');
   });
 
   it('drops a stale album edge but preserves its file when another item references it', async () => {
