@@ -338,6 +338,13 @@ index 9f693bf..ada96df 100644
  - (void)sendDownloadCompletionEvent:(RNBGDTaskConfig *)taskConfig task:(NSURLSessionDownloadTask *)task error:(NSError *)error {
      if (error) {
  #ifdef RCT_NEW_ARCH_ENABLED
+@@ -2225,5 +2377,5 @@
+     [fileManager createDirectoryAtURL:[destinationURL URLByDeletingLastPathComponent]
+           withIntermediateDirectories:YES
+-                           attributes:@{NSFileProtectionKey: NSFileProtectionCompleteUntilFirstUserAuthentication}
++                           attributes:@{NSFileProtectionKey: [self nsFileProtectionFromKey:taskConfig.dataProtection]}
+                                 error:nil];
+     [fileManager removeItemAtURL:destinationURL error:nil];
 @@ -2347,6 +2495,10 @@ RCT_EXPORT_METHOD(getExistingUploadTasks:(RCTPromiseResolveBlock)resolve rejecte
                  NSString *protection = [self nsFileProtectionFromKey:(info[@"dataProtection"] != nil && [info[@"dataProtection"] length] > 0 ? info[@"dataProtection"] : nil)];
                  [fileManager setAttributes:@{NSFileProtectionKey: protection} ofItemAtPath:destinationURL.path error:nil];
@@ -350,10 +357,3 @@ index 9f693bf..ada96df 100644
                  changed = YES;
  
 
-@@ -2225,5 +2377,5 @@
-     [fileManager createDirectoryAtURL:[destinationURL URLByDeletingLastPathComponent]
-           withIntermediateDirectories:YES
--                           attributes:@{NSFileProtectionKey: NSFileProtectionCompleteUntilFirstUserAuthentication}
-+                           attributes:@{NSFileProtectionKey: [self nsFileProtectionFromKey:taskConfig.dataProtection]}
-                                 error:nil];
-     [fileManager removeItemAtURL:destinationURL error:nil];
