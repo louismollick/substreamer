@@ -184,7 +184,7 @@ index 9f693bf..ada96df 100644
                  // Phase 2: Add paused tasks with resume data (not in active session)
                  [self addPausedTasksToResults:foundTasks processedIds:processedIds];
  
-@@ -1140,10 +1165,11 @@
+@@ -1140,11 +1165,12 @@
  - (NSDictionary *)createTaskInfoFromConfig:(RNBGDTaskConfig *)taskConfig {
      return @{
          @"id": taskConfig.id,
