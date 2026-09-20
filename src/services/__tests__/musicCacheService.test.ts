@@ -1604,10 +1604,9 @@ describe('demoteAlbumToPartial', () => {
     const result = await demoteAlbumToPartial('album-1');
 
     expect(result).toEqual({ demoted: false, removed: false });
-    expect(musicCacheStore.getState().cachedItems['album-1']).toMatchObject({
-      derived: undefined,
-      songIds: ['s1', 's2'],
-    });
+    const unchangedAlbum = musicCacheStore.getState().cachedItems['album-1'];
+    expect(unchangedAlbum?.derived).toBeUndefined();
+    expect(unchangedAlbum?.songIds).toEqual(['s1', 's2']);
     expect(musicCacheStore.getState().cachedSongs['s2']).toBeDefined();
     expect(fileDeletesAsync.some((u) => u.includes('s2'))).toBe(false);
     expect(persistenceMock.__derivedItems.has('album-1')).toBe(false);
