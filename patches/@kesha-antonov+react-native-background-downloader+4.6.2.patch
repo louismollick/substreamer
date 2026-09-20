@@ -184,20 +184,6 @@ index 9f693bf..ada96df 100644
                  // Phase 2: Add paused tasks with resume data (not in active session)
                  [self addPausedTasksToResults:foundTasks processedIds:processedIds];
  
-@@ -1140,11 +1165,12 @@
- - (NSDictionary *)createTaskInfoFromConfig:(RNBGDTaskConfig *)taskConfig {
-     return @{
-         @"id": taskConfig.id,
-         @"metadata": taskConfig.metadata,
-         @"state": @(taskConfig.state),
-         @"bytesDownloaded": @(taskConfig.bytesDownloaded),
-         @"bytesTotal": @(taskConfig.bytesTotal),
--        @"errorCode": taskConfig.errorCode ? @(taskConfig.errorCode) : [NSNull null]
-+        @"errorCode": taskConfig.errorCode ? @(taskConfig.errorCode) : [NSNull null],
-+        @"pendingMove": @(pendingMoves[taskConfig.id] != nil)
-     };
- }
- 
 @@ -1339,6 +1364,111 @@ RCT_EXPORT_METHOD(getExistingDownloadTasks: (RCTPromiseResolveBlock)resolve reje
  }
  #endif
@@ -310,14 +296,12 @@ index 9f693bf..ada96df 100644
  #pragma mark - NSURLSessionDownloadDelegate methods
  - (void)URLSession:(nonnull NSURLSession *)session downloadTask:(nonnull NSURLSessionDownloadTask *)downloadTask didFinishDownloadingToURL:(nonnull NSURL *)location {
      @synchronized (sharedLock) {
-@@ -1365,7 +1496,11 @@ RCT_EXPORT_METHOD(getExistingDownloadTasks: (RCTPromiseResolveBlock)resolve reje
+@@ -1365,7 +1495,9 @@ RCT_EXPORT_METHOD(getExistingDownloadTasks: (RCTPromiseResolveBlock)resolve reje
              // The bytes are staged and the move (and the downloadComplete event) will happen
              // once protected data becomes available. Do not emit complete/failed now. See #101.
              [self sendDebugLog:@"didFinishDownloadingToURL: move deferred until device unlock" taskId:taskConfig.id];
 -            [self removeTaskFromMap:downloadTask];
 +            taskConfig.state = NSURLSessionTaskStateRunning;
-+            taskConfig.bytesDownloaded = downloadTask.countOfBytesReceived;
-+            taskConfig.bytesTotal = downloadTask.countOfBytesExpectedToReceive;
 +            [mmkv setData:[self serialize:taskToConfigMap] forKey:ID_TO_CONFIG_MAP_KEY];
 +            [idToTaskMap removeObjectForKey:taskConfig.id];
              return;
@@ -366,48 +350,10 @@ index 9f693bf..ada96df 100644
                  changed = YES;
  
 
-diff --git a/node_modules/@kesha-antonov/react-native-background-downloader/src/types.ts b/node_modules/@kesha-antonov/react-native-background-downloader/src/types.ts
---- a/node_modules/@kesha-antonov/react-native-background-downloader/src/types.ts
-+++ b/node_modules/@kesha-antonov/react-native-background-downloader/src/types.ts
-@@ -139,6 +139,7 @@ export interface TaskInfoNative {
-   bytesTotal: number
-   errorCode: number
-   state: number
-+  pendingMove?: boolean
-   destination?: string | null
- }
- 
-@@ -150,6 +151,7 @@ export type DownloadTaskState =
-   | 'PENDING'
-   | 'DOWNLOADING'
-   | 'PAUSED'
-+  | 'WAITING_TO_MOVE'
-   | 'DONE'
-   | 'FAILED'
-   | 'STOPPED'
-diff --git a/node_modules/@kesha-antonov/react-native-background-downloader/src/NativeRNBackgroundDownloader.ts b/node_modules/@kesha-antonov/react-native-background-downloader/src/NativeRNBackgroundDownloader.ts
---- a/node_modules/@kesha-antonov/react-native-background-downloader/src/NativeRNBackgroundDownloader.ts
-+++ b/node_modules/@kesha-antonov/react-native-background-downloader/src/NativeRNBackgroundDownloader.ts
-@@ -96,6 +96,7 @@ export interface Spec extends TurboModule {
-     bytesDownloaded: number
-     bytesTotal: number
-     errorCode?: number | null
-+    pendingMove?: boolean
-     destination?: string | null
-   }>>
- 
-diff --git a/node_modules/@kesha-antonov/react-native-background-downloader/src/index.ts b/node_modules/@kesha-antonov/react-native-background-downloader/src/index.ts
---- a/node_modules/@kesha-antonov/react-native-background-downloader/src/index.ts
-+++ b/node_modules/@kesha-antonov/react-native-background-downloader/src/index.ts
-@@ -485,6 +485,11 @@ export const getExistingDownloadTasks = async (): Promise<DownloadTask[]> => {
-     // second argument re-assigns event handlers
-     const task = new DownloadTask(taskInfo, tasksMap.get(taskInfo.id))
- 
-+    if (taskInfo.pendingMove) {
-+      task.state = 'WAITING_TO_MOVE'
-+      return task
-+    }
-+
-     switch (taskInfo.state) {
-       case nativeModule.TaskRunning: {
-         task.state = 'DOWNLOADING'
+@@ -2225,5 +2377,5 @@
+     [fileManager createDirectoryAtURL:[destinationURL URLByDeletingLastPathComponent]
+           withIntermediateDirectories:YES
+-                           attributes:@{NSFileProtectionKey: NSFileProtectionCompleteUntilFirstUserAuthentication}
++                           attributes:@{NSFileProtectionKey: [self nsFileProtectionFromKey:taskConfig.dataProtection]}
+                                 error:nil];
+     [fileManager removeItemAtURL:destinationURL error:nil];
