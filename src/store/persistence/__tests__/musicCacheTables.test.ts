@@ -41,6 +41,8 @@ import {
   readStoredQueueSongIdsAsync,
   replaceDownloadQueueSongs,
   removeCachedItemSong,
+  removeCachedItemSongAndOrphanAsync,
+  demoteCachedAlbumToPartialAsync,
   removeDownloadQueueItem,
   reorderCachedItemSongs,
   reorderDownloadQueue,
@@ -617,17 +619,23 @@ function describeDegraded(label: string, install: () => void): void {
       await expect(upsertCachedItem(makeItem())).resolves.toBeUndefined();
       await expect(deleteCachedItem('alb-1')).resolves.toBeUndefined();
       await expect(insertCachedItemSong('alb-1', 1, 's1')).resolves.toBeUndefined();
-      await expect(removeCachedItemSong('alb-1', 1)).resolves.toBeUndefined();
-      await expect(reorderCachedItemSongs('alb-1', 1, 2)).resolves.toBeUndefined();
+      await expect(removeCachedItemSong('alb-1', 1)).resolves.toBe(false);
+      await expect(
+        removeCachedItemSongAndOrphanAsync('alb-1', 1, 's1'),
+      ).resolves.toEqual({ persisted: false, orphaned: false });
+      await expect(
+        demoteCachedAlbumToPartialAsync('alb-1', ['s1']),
+      ).resolves.toEqual({ persisted: false, orphanedSongIds: [] });
+      await expect(reorderCachedItemSongs('alb-1', 1, 2)).resolves.toBe(false);
       await expect(insertDownloadQueueItem(makeQueueRow(), [])).resolves.toBeNull();
-      await expect(removeDownloadQueueItem('q-1')).resolves.toBeUndefined();
+      await expect(removeDownloadQueueItem('q-1')).resolves.toBe(false);
       await expect(
         updateDownloadQueueItem('q-1', { status: 'downloading' }),
       ).resolves.toBeUndefined();
       await expect(reorderDownloadQueue(1, 2)).resolves.toBeUndefined();
       await expect(
         markDownloadComplete('q-1', makeItem(), [makeSong()], [{ songId: 's1', position: 1 }]),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe(false);
       await expect(
         bulkReplace({ items: [], songs: [], edges: [], queue: [] }),
       ).resolves.toBeUndefined();

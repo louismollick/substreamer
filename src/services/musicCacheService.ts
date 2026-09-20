@@ -577,7 +577,8 @@ async function reconcileRowsToFiles(): Promise<number> {
         const idx = current.songIds.indexOf(song.id);
         if (idx < 0) break;
         // eslint-disable-next-line no-await-in-loop
-        await musicCacheStore.getState().removeCachedItemSong(itemId, idx + 1);
+        const { persisted } = await musicCacheStore.getState().removeCachedItemSong(itemId, idx + 1);
+        if (!persisted) break;
       }
     }
 
@@ -819,53 +820,57 @@ export async function enqueueAlbumDownload(
   if (musicCacheStore.getState().downloadQueue.some((q) => q.itemId === albumId)) return;
 
   if (isTopUp) {
-    // Top-up: download only the songs that aren't already edged to this
-    // album. If the server-side album grew, the new `expectedSongCount`
-    // captures that; if it shrank, we still download whatever the server
-    // currently reports and the stale `expectedSongCount` self-corrects
-    // on merge via `markItemComplete`.
+    // A fresh, complete album response is also authoritative for membership.
+    // Some servers re-key song IDs after a rescan or retag. A delta-only
+    // top-up would append the new IDs beside stale downloaded IDs, producing
+    // duplicate offline rows. In that case queue the full fresh payload so
+    // the worker can keep the old cache intact until every current song is
+    // covered, then reconcile stale album edges.
+    const serverSongCount = typeof album.songCount === 'number'
+      ? Math.max(album.songCount, album.song.length)
+      : undefined;
+    const expectedSongCount = serverSongCount
+      ?? Math.max(existing.expectedSongCount, album.song.length);
+    const freshIds = new Set(album.song.map((s) => s.id));
+    const hasCompleteTrackList = album.song.length >= expectedSongCount;
+    const hasStaleSongIds =
+      hasCompleteTrackList && existing.songIds.some((id) => !freshIds.has(id));
+
     const haveIds = new Set(existing.songIds);
     const missingSongs = album.song.filter((s) => s.id && !haveIds.has(s.id));
+    const songsToQueue = hasStaleSongIds ? album.song : missingSongs;
 
-    // We just fetched a fresh album — carry its metadata into the row, reduced
+    // We just fetched a fresh album. Carry its metadata into the row, reduced
     // to the same `cached_albums` scalars the primary download path stores so
-    // the two writers can't diverge (see the plan's §2.3 decision).
+    // the two writers cannot diverge.
     const albumMeta = albumMetaFromAlbumID3(album);
 
-    if (missingSongs.length === 0) {
-      // No missing songs — refresh `expectedSongCount` so the defensive
-      // partial classification self-corrects and return. `derived: false`
-      // upgrades a partial row that reached full count via favorites/playlist
-      // into a real, explicit album download (overrides the spread's stale flag).
+    if (songsToQueue.length === 0) {
+      // No missing or stale songs. Refresh the authoritative count and metadata.
+      // `derived: false` upgrades a partial row reached via another download
+      // into a real, explicit album download.
       musicCacheStore.getState().upsertCachedItem({
         ...existing,
-        expectedSongCount: album.song.length,
+        expectedSongCount,
         albumMeta,
         derived: false,
       });
       return;
     }
 
-    // Refresh `expectedSongCount` on the existing row with the fresh server
-    // total BEFORE enqueueing. The top-up queue row's payload is only the
-    // missing delta, so the worker's derived count would be
-    // wrong — `markItemComplete` preserves this existing value on merge.
-    // Written unconditionally: the fresh metadata and the derived→real upgrade
-    // both belong on the row, and this runs once per explicit album top-up.
+    // Persist the fresh total before enqueueing. A normal top-up payload is only
+    // the missing delta, while a stale-ID repair deliberately carries the full
+    // current album. `markItemComplete` preserves this value on merge.
     musicCacheStore.getState().upsertCachedItem({
       ...existing,
-      expectedSongCount: album.song.length,
+      expectedSongCount,
       albumMeta,
-      // Explicit album download — upgrade a possibly-derived partial to real.
       derived: false,
     });
 
-    // Cover art keys off the album's `coverArt` value, never the entity ID
-    // (see src/utils/coverArtId.ts) — so the warmed/stored key matches what
-    // the grid renders and resolves on OpenSubsonic servers.
     const topUpCover = coverArtForAlbum(album);
     await ensureCoverBeforeBinary(topUpCover, awaitCover);
-    cacheTrackCoverArt(missingSongs);
+    cacheTrackCoverArt(songsToQueue);
 
     musicCacheStore.getState().enqueueTopUp(
       {
@@ -874,9 +879,9 @@ export async function enqueueAlbumDownload(
         name: album.name,
         artist: album.artist ?? album.displayArtist,
         coverArtId: topUpCover,
-        totalSongs: missingSongs.length,
+        totalSongs: songsToQueue.length,
       },
-      missingSongs,
+      songsToQueue,
     );
 
     processQueue();
@@ -1084,6 +1089,44 @@ function registerTrackToItem(songId: string, itemId: string): void {
     trackToItems.set(songId, bucket);
   }
   bucket.add(itemId);
+}
+
+/**
+ * Remove album memberships that a completed fresh album replacement no
+ * longer contains. The caller invokes this only after every current song is
+ * covered, so a failed replacement never destroys the previous offline copy.
+ * Cross-item refcounting stays in `removeCachedItemSong`: a stale file is
+ * deleted only when no other real download still references it.
+ */
+async function removeStaleAlbumEdges(
+  albumId: string,
+  keepIds: ReadonlySet<string>,
+): Promise<boolean> {
+  const initial = musicCacheStore.getState().cachedItems[albumId];
+  if (!initial || initial.type !== 'album') return true;
+
+  const staleIds = initial.songIds.filter((id) => !keepIds.has(id));
+  for (const songId of staleIds) {
+    const current = musicCacheStore.getState().cachedItems[albumId];
+    if (!current) return false;
+    const index = current.songIds.indexOf(songId);
+    if (index < 0) continue;
+    const song = musicCacheStore.getState().cachedSongs[songId];
+    // eslint-disable-next-line no-await-in-loop
+    const { orphanedSongId, persisted } = await musicCacheStore
+      .getState()
+      .removeCachedItemSong(albumId, index + 1);
+    if (!persisted) return false;
+    trackToItems.get(songId)?.delete(albumId);
+    if (orphanedSongId) {
+      trackToItems.delete(orphanedSongId);
+      trackUriMap.delete(orphanedSongId);
+      if (song) {
+        void deleteFileAsync(resolveSongFile(song).uri).catch(() => { /* best-effort */ });
+      }
+    }
+  }
+  return true;
 }
 
 /**
@@ -1377,7 +1420,20 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
   const uniqueSongIds = new Set(itemEdges.map((e) => e.songId));
 
   if (uniqueSongIds.size === new Set(songs.map((s) => s.id)).size) {
-    // All unique songs covered — finalise the item.
+    // A stale-ID repair queues the full fresh album, while a normal top-up queues
+    // only its missing delta. Matching the persisted authoritative count is the
+    // durable signal that this successful payload may replace album membership.
+    const existingAlbum = musicCacheStore.getState().cachedItems[queueItem.itemId];
+    const replacesAlbumEdges =
+      queueItem.type === 'album'
+      && existingAlbum?.type === 'album'
+      && songs.length === existingAlbum.expectedSongCount;
+    const replacementIds = replacesAlbumEdges
+      ? new Set(songs.map((song) => song.id))
+      : null;
+
+    // All unique songs covered. Finalise the item first so current edges land
+    // before stale ones are removed.
     const cachedItem: Omit<CachedItemMeta, 'songIds'> = {
       itemId: queueItem.itemId,
       type: queueItem.type,
@@ -1395,16 +1451,76 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
       songId: e.songId,
       position: e.position,
     }));
-    musicCacheStore.getState().markItemComplete(
+    const completion = musicCacheStore.getState().markItemComplete(
       queueItem.queueId,
       cachedItem,
       songsToCommit,
       edgesForCommit,
       childBySongId,
+      replacementIds ? { keepQueue: true } : undefined,
     );
+
+    if (replacementIds) {
+      // Do not remove stale membership until the fresh item and edge batch is on
+      // disk. The queue row stays as the recovery record until repair finishes.
+      const persisted = await completion;
+      if (!persisted) {
+        musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
+          status: 'error',
+          error: 'Failed to finalize download',
+        });
+        return;
+      }
+    }
 
     for (const e of edgesForCommit) {
       registerTrackToItem(e.songId, queueItem.itemId);
+    }
+
+    if (replacementIds) {
+      const staleEdgesRemoved = await removeStaleAlbumEdges(queueItem.itemId, replacementIds);
+      if (!staleEdgesRemoved) {
+        musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
+          status: 'error',
+          error: 'Failed to reconcile stale album tracks',
+        });
+        return;
+      }
+
+      // Existing current songs kept their old edge positions while replacement
+      // IDs were appended. Reorder the repaired album to the fresh server order.
+      for (let targetIndex = 0; targetIndex < songs.length; targetIndex++) {
+        const latest = musicCacheStore.getState().cachedItems[queueItem.itemId];
+        if (!latest) break;
+        const currentIndex = latest.songIds.indexOf(songs[targetIndex].id);
+        if (currentIndex < 0 || currentIndex === targetIndex) continue;
+        // eslint-disable-next-line no-await-in-loop
+        const reordered = await musicCacheStore.getState().reorderCachedItemSongs(
+          queueItem.itemId,
+          currentIndex + 1,
+          targetIndex + 1,
+        );
+        if (!reordered) {
+          musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
+            status: 'error',
+            error: 'Failed to persist repaired album order',
+          });
+          return;
+        }
+      }
+
+      // The recovery row is removed only after every destructive edge mutation
+      // has landed, and only after its own SQL delete succeeds.
+      const recoveryRowRemoved = await musicCacheStore.getState().removeFromQueue(
+        queueItem.queueId,
+      );
+      if (!recoveryRowRemoved) {
+        musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
+          status: 'error',
+          error: 'Failed to remove completed recovery row',
+        });
+        return;
+      }
     }
   } else {
     musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
@@ -1789,46 +1905,41 @@ export async function demoteAlbumToPartial(
     return { demoted: false, removed: false };
   }
 
-  // Snapshot song metadata for file deletion BEFORE the store removes rows.
-  const orphanSnapshot: CachedSongMeta[] = [];
-  for (const sid of orphanSongIds) {
-    const s = musicCacheStore.getState().cachedSongs[sid];
-    if (s) orphanSnapshot.push(s);
+  // Snapshot candidate metadata before the atomic store action removes rows.
+  const orphanSnapshot = new Map<string, CachedSongMeta>();
+  for (const songId of orphanSongIds) {
+    const song = musicCacheStore.getState().cachedSongs[songId];
+    if (song) orphanSnapshot.set(songId, song);
   }
 
-  // Remove each orphan edge. Positions shift after each removal, so we
-  // re-read the current index every iteration.
-  for (const songId of orphanSongIds) {
-    const current = musicCacheStore.getState().cachedItems[itemId];
-    if (!current) break;
-    const idx = current.songIds.indexOf(songId);
-    if (idx < 0) continue;
-    // eslint-disable-next-line no-await-in-loop
-    await musicCacheStore.getState().removeCachedItemSong(itemId, idx + 1);
-    // `removeCachedItemSong` has already deleted the cached_songs row and
-    // decremented refcount-via-COUNT. Update the in-memory mirrors.
+  // The persistence layer flips the album to derived and orphans every candidate
+  // in one batch. There is no partially-demoted state to clean up after a later
+  // write failure.
+  let demotion = await musicCacheStore.getState().demoteCachedAlbum(
+    itemId,
+    orphanSongIds,
+  );
+  if (!demotion.persisted) {
+    // The atomic batch may have committed even if its confirmation read failed.
+    // Replaying the same demotion is idempotent and recovers the actual orphan list.
+    demotion = await musicCacheStore.getState().demoteCachedAlbum(
+      itemId,
+      orphanSongIds,
+    );
+  }
+  if (!demotion.persisted) return { demoted: false, removed: false };
+
+  const deletions: Promise<unknown>[] = [];
+  for (const songId of demotion.orphanedSongIds) {
     trackToItems.delete(songId);
     trackUriMap.delete(songId);
+    const song = orphanSnapshot.get(songId);
+    if (song) {
+      deletions.push(
+        deleteFileAsync(resolveSongFile(song).uri).catch(() => { /* best-effort */ }),
+      );
+    }
   }
-
-  // The album is now a PARTIAL grouping: every surviving song is — by the
-  // survivor definition (more than one REAL holder) — also held by another REAL
-  // holder (a playlist/favorites/song download). Flip the album to `derived` so
-  // it no longer independently keeps those songs alive: when their last real
-  // holder is removed they orphan and this row is pruned. Without this, removing
-  // that playlist/favorites later would leave the album's shared song downloaded
-  // and the album stuck in the partial state.
-  const demotedRow = musicCacheStore.getState().cachedItems[itemId];
-  if (demotedRow) {
-    musicCacheStore.getState().upsertCachedItem({ ...demotedRow, derived: true });
-  }
-
-  // Delete orphan files OFF-THREAD (best-effort), then re-check the storage
-  // limit once the unlinks have freed space — same ordering as the prior
-  // sync deletes → resume.
-  const deletions = orphanSnapshot.map((song) =>
-    deleteFileAsync(resolveSongFile(song).uri).catch(() => { /* best-effort */ }),
-  );
   void Promise.all(deletions).then(() => resumeIfSpaceAvailable());
   return { demoted: true, removed: false };
 }
@@ -1847,10 +1958,11 @@ export async function removeCachedPlaylistTrack(itemId: string, trackIndex: numb
   const songId = cached.songIds[trackIndex];
   const song = musicCacheStore.getState().cachedSongs[songId];
 
-  const { orphanedSongId } = await musicCacheStore.getState().removeCachedItemSong(
+  const { orphanedSongId, persisted } = await musicCacheStore.getState().removeCachedItemSong(
     itemId,
     trackIndex + 1, // SQL positions are 1-indexed
   );
+  if (!persisted) return;
 
   trackToItems.get(songId)?.delete(itemId);
 
@@ -1881,10 +1993,11 @@ export async function removeCachedAlbumSong(albumItemId: string, songId: string)
   }
 
   const song = musicCacheStore.getState().cachedSongs[songId];
-  const { orphanedSongId } = await musicCacheStore.getState().removeCachedItemSong(
+  const { orphanedSongId, persisted } = await musicCacheStore.getState().removeCachedItemSong(
     albumItemId,
     idx + 1, // SQL positions are 1-indexed
   );
+  if (!persisted) return false;
   trackToItems.get(songId)?.delete(albumItemId);
   if (orphanedSongId && song) {
     trackToItems.delete(orphanedSongId);
@@ -1902,7 +2015,7 @@ export function reorderCachedPlaylistTracks(
   fromIndex: number,
   toIndex: number,
 ): void {
-  musicCacheStore.getState().reorderCachedItemSongs(
+  void musicCacheStore.getState().reorderCachedItemSongs(
     itemId,
     fromIndex + 1,
     toIndex + 1,
@@ -1932,10 +2045,11 @@ export async function syncCachedPlaylistTracks(
     const sid = originalSongIds[idx];
     if (keepSet.has(sid)) continue;
     const song = musicCacheStore.getState().cachedSongs[sid];
-    const { orphanedSongId } = await musicCacheStore.getState().removeCachedItemSong(
+    const { orphanedSongId, persisted } = await musicCacheStore.getState().removeCachedItemSong(
       playlistId,
       idx + 1,
     );
+    if (!persisted) return;
     trackToItems.get(sid)?.delete(playlistId);
     if (orphanedSongId && song) {
       trackToItems.delete(orphanedSongId);
@@ -1959,11 +2073,13 @@ export async function syncCachedPlaylistTracks(
     if (!latest) break;
     const currentPos = latest.songIds.indexOf(targetIds[targetPos]);
     if (currentPos < 0 || currentPos === targetPos) continue;
-    musicCacheStore.getState().reorderCachedItemSongs(
+    // eslint-disable-next-line no-await-in-loop
+    const persisted = await musicCacheStore.getState().reorderCachedItemSongs(
       playlistId,
       currentPos + 1,
       targetPos + 1,
     );
+    if (!persisted) return;
   }
 }
 
@@ -2056,7 +2172,14 @@ export async function cancelDownload(queueId: string): Promise<void> {
   // so the delete takes the payload with it. Two columns, not a rebuilt `Child`.
   const songs = await readDownloadQueueSongRefsAsync(queueId);
 
-  musicCacheStore.getState().removeFromQueue(queueId);
+  const removed = await musicCacheStore.getState().removeFromQueue(queueId);
+  if (!removed) {
+    musicCacheStore.getState().updateQueueItem(queueId, {
+      status: 'error',
+      error: 'Failed to cancel download',
+    });
+    return;
+  }
 
   // Group cancelled song ids by album, then sweep each album's .tmp remnants
   // off the JS thread: one directory listing per album + async deletes, rather
