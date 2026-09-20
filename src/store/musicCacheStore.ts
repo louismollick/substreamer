@@ -31,7 +31,7 @@ import {
   hydrateDownloadQueueAsync,
   insertDownloadQueueItem,
   markDownloadComplete,
-  removeCachedItemSong as removeCachedItemSongRow,
+  removeCachedItemSongAndOrphanAsync as removeCachedItemSongAndOrphanRow,
   removeDownloadQueueItem,
   reorderCachedItemSongs as reorderCachedItemSongsRow,
   reorderDownloadQueue,
@@ -159,7 +159,8 @@ export interface MusicCacheState {
    * `enqueueAlbumDownload` writes the real total to `expectedSongCount` first.
    */
   enqueueTopUp: (draft: DownloadQueueDraft, songs: readonly Child[]) => void;
-  removeFromQueue: (queueId: string) => void;
+  /** Remove a queue row from disk first, then from the in-memory mirror. */
+  removeFromQueue: (queueId: string) => Promise<boolean>;
   reorderQueue: (fromIndex: number, toIndex: number) => void;
   updateQueueItem: (
     queueId: string,
@@ -436,9 +437,11 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
   // row is expected and must not block the enqueue.
   enqueueTopUp: (draft, songs) => appendToQueue(set, get, draft, songs, false),
 
-  removeFromQueue: (queueId) => {
-    removeDownloadQueueItem(queueId);
+  removeFromQueue: async (queueId) => {
+    const persisted = await removeDownloadQueueItem(queueId);
+    if (!persisted) return false;
     set((state) => ({ downloadQueue: dropFromQueueMirror(state.downloadQueue, queueId) }));
+    return true;
   },
 
   reorderQueue: (fromIndex, toIndex) => {
@@ -627,42 +630,43 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
     }
     const songId = item.songIds[index];
 
-    // Lightweight tests historically return undefined from the mock. In production
-    // the persistence function returns an explicit boolean; only false means failure.
-    const persisted = await Promise.resolve(removeCachedItemSongRow(itemId, position))
-      .then((ok) => ok !== false);
+    // Edge removal and orphan cleanup are one SQL batch. If anything fails,
+    // memory stays untouched and a recovery caller can safely replay the same
+    // exact edge.
+    const { persisted, orphaned } = await removeCachedItemSongAndOrphanRow(
+      itemId,
+      position,
+      songId,
+    );
     if (!persisted) return { orphanedSongId: null, persisted: false };
 
-    // Publish the edge removal only after SQL succeeds. Recovery callers can now
-    // retry from the queue row without memory getting ahead of disk.
-    set((prev) => {
-      const prevItem = prev.cachedItems[itemId];
-      if (!prevItem) return {}; // no-op — must not bump
-      const nextItems = { ...prev.cachedItems };
-      nextItems[itemId] = {
-        ...prevItem,
-        songIds: prevItem.songIds.filter((_, i) => i !== index),
-      };
-      return bumped(prev, { cachedItems: nextItems });
-    });
-
-    // The edge is gone, so a real-ref count of 0 means no OTHER real holder remains.
-    const { orphaned, affectedItems, prunedItems } =
-      await orphanSongIfUnreferencedAsync(songId);
-    if (!orphaned) return { orphanedSongId: null, persisted: true };
-    const orphanedSongId = songId;
+    const orphanedSongId = orphaned ? songId : null;
     set((prev) => {
       const nextItems = { ...prev.cachedItems };
-      const prunedSet = new Set(prunedItems);
-      for (const pid of prunedItems) delete nextItems[pid];
-      // Surviving derived holders of the orphaned song lost it too.
-      for (const hid of affectedItems) {
-        if (prunedSet.has(hid) || hid === itemId) continue;
-        const h = nextItems[hid];
-        if (h) nextItems[hid] = { ...h, songIds: h.songIds.filter((s) => s !== orphanedSongId) };
+      const prevItem = nextItems[itemId];
+      if (prevItem) {
+        nextItems[itemId] = {
+          ...prevItem,
+          songIds: prevItem.songIds.filter((_, i) => i !== index),
+        };
       }
-      // Decrement disk-usage aggregates for the single orphaned song (see
-      // removeCachedItem).
+
+      if (orphanedSongId) {
+        // The atomic orphan batch also removes the song from every DERIVED holder.
+        // Mirror that from local state rather than relying on advisory pre-reads,
+        // which keeps a replay correct even if a prior post-read failed.
+        for (const [holderId, holder] of Object.entries(nextItems)) {
+          if (holderId === itemId || !holder.songIds.includes(orphanedSongId)) continue;
+          const songIds = holder.songIds.filter((id) => id !== orphanedSongId);
+          if (holder.derived && songIds.length === 0) delete nextItems[holderId];
+          else nextItems[holderId] = { ...holder, songIds };
+        }
+      }
+
+      if (!orphanedSongId) {
+        return bumped(prev, { cachedItems: nextItems });
+      }
+
       const freedBytes = prev.cachedSongs[orphanedSongId]?.bytes ?? 0;
       const { [orphanedSongId]: _gone, ...restSongs } = prev.cachedSongs;
       return bumped(prev, {
