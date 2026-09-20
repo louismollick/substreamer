@@ -13,6 +13,133 @@ index 9f693bf..ada96df 100644
  
  #ifdef RCT_NEW_ARCH_ENABLED
  #import <RNBackgroundDownloaderSpec/RNBackgroundDownloaderSpec.h>
+@@ -84,4 +86,7 @@
+-    // Controls whether debug logs are sent to JS
+-    BOOL isLogsEnabled;
+-
+-    // Downloads that finished but whose file couldn't be moved to its destination because
++    // Controls whether debug logs are sent to JS
++    BOOL isLogsEnabled;
++    // Substreamer can submit thousands of tasks in a burst. Keep the in-memory map
++    // authoritative while active and persist it once before iOS suspends the app.
++    BOOL taskConfigMapDirty;
++
++    // Downloads that finished but whose file couldn't be moved to its destination because
+@@ -232,3 +237,4 @@
+-        NSMutableDictionary *taskToConfigMapDataDecoded = taskToConfigMapData != nil ? [self deserialize:taskToConfigMapData] : nil;
+-        taskToConfigMap = taskToConfigMapDataDecoded != nil ? taskToConfigMapDataDecoded : taskToConfigMapDataDefault;
+-        idToTaskMap = [[NSMutableDictionary alloc] init];
++        NSMutableDictionary *taskToConfigMapDataDecoded = taskToConfigMapData != nil ? [self deserialize:taskToConfigMapData] : nil;
++        taskToConfigMap = taskToConfigMapDataDecoded != nil ? taskToConfigMapDataDecoded : taskToConfigMapDataDefault;
++        taskConfigMapDirty = NO;
++        idToTaskMap = [[NSMutableDictionary alloc] init];
+@@ -359,30 +365,58 @@
+-- (void)registerBridgeListener {
+-    DLog(nil, @"[RNBackgroundDownloader] - [registerBridgeListener]");
+-    @synchronized (sharedLock) {
+-        if (isBridgeListenerInited != YES) {
+-            isBridgeListenerInited = YES;
+-            [[NSNotificationCenter defaultCenter] addObserver:self
+-                                                  selector:@selector(handleBridgeAppEnterForeground:)
+-                                                  name:UIApplicationWillEnterForegroundNotification
+-                                                  object:nil];
+-
+-            [[NSNotificationCenter defaultCenter] addObserver:self
+-                                                  selector:@selector(handleBridgeHotReload:)
+-                                                  name:RCTJavaScriptWillStartLoadingNotification
+-                                                  object:nil];
+-
+-            // Finish any moves deferred while the device was locked, as soon as
+-            // protected data becomes available again (device unlocked). See #101.
+-            // Note: the ObjC constant has no "Notification" suffix (unlike most UIApplication ones).
+-            [[NSNotificationCenter defaultCenter] addObserver:self
+-                                                  selector:@selector(handleProtectedDataAvailable:)
+-                                                  name:UIApplicationProtectedDataDidBecomeAvailable
+-                                                  object:nil];
+-        }
+-    }
+-}
+-
+-- (void)handleProtectedDataAvailable:(NSNotification *) note {
+-    DLog(nil, @"[RNBackgroundDownloader] - [handleProtectedDataAvailable]");
+-    [self processPendingMoves];
+-}
++// taskToConfigMap is only restart metadata. URLSession already owns the live tasks.
++- (void)substreamerPersistTaskConfigMapIfNeededLocked {
++    if (!taskConfigMapDirty) return;
++    [self substreamerMarkTaskConfigMapDirtyLocked];
++    taskConfigMapDirty = NO;
++}
++
++// Must be called while sharedLock is held.
++- (void)substreamerMarkTaskConfigMapDirtyLocked {
++    taskConfigMapDirty = YES;
++    // Background callbacks can arrive after JS is suspended. Persist those changes
++    // immediately; while the app is active we coalesce all mutations until resign.
++    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
++        [self substreamerPersistTaskConfigMapIfNeededLocked];
++    }
++}
++
++- (void)registerBridgeListener {
++    DLog(nil, @"[RNBackgroundDownloader] - [registerBridgeListener]");
++    @synchronized (sharedLock) {
++        if (isBridgeListenerInited != YES) {
++            isBridgeListenerInited = YES;
++            [[NSNotificationCenter defaultCenter] addObserver:self
++                                                  selector:@selector(handleBridgeAppEnterForeground:)
++                                                  name:UIApplicationWillEnterForegroundNotification
++                                                  object:nil];
++
++            [[NSNotificationCenter defaultCenter] addObserver:self
++                                                  selector:@selector(handleBridgeAppWillResignActive:)
++                                                  name:UIApplicationWillResignActiveNotification
++                                                  object:nil];
++
++            [[NSNotificationCenter defaultCenter] addObserver:self
++                                                  selector:@selector(handleBridgeHotReload:)
++                                                  name:RCTJavaScriptWillStartLoadingNotification
++                                                  object:nil];
++
++            // Finish any moves deferred while the device was locked, as soon as
++            // protected data becomes available again (device unlocked). See #101.
++            // Note: the ObjC constant has no "Notification" suffix (unlike most UIApplication ones).
++            [[NSNotificationCenter defaultCenter] addObserver:self
++                                                  selector:@selector(handleProtectedDataAvailable:)
++                                                  name:UIApplicationProtectedDataDidBecomeAvailable
++                                                  object:nil];
++        }
++    }
++}
++
++- (void)handleBridgeAppWillResignActive:(NSNotification *) note {
++    @synchronized (sharedLock) {
++        [self substreamerPersistTaskConfigMapIfNeededLocked];
++    }
++}
++
++- (void)handleProtectedDataAvailable:(NSNotification *) note {
++    DLog(nil, @"[RNBackgroundDownloader] - [handleProtectedDataAvailable]");
++    [self processPendingMoves];
++}
+@@ -428,4 +457,4 @@
+-        [taskToConfigMap removeObjectForKey:taskId];
+-        [mmkv setData:[self serialize: taskToConfigMap] forKey:ID_TO_CONFIG_MAP_KEY];
+-
+-        if (taskConfig) {
++        [taskToConfigMap removeObjectForKey:taskId];
++        [self substreamerMarkTaskConfigMapDirtyLocked];
++
++        if (taskConfig) {
+@@ -644,4 +673,4 @@
+-        taskToConfigMap[@(task.taskIdentifier)] = taskConfig;
+-        [mmkv setData:[self serialize: taskToConfigMap] forKey:ID_TO_CONFIG_MAP_KEY];
+-
+-        self->idToTaskMap[identifier] = task;
++        taskToConfigMap[@(task.taskIdentifier)] = taskConfig;
++        [self substreamerMarkTaskConfigMapDirtyLocked];
++
++        self->idToTaskMap[identifier] = task;
 @@ -984,6 +986,15 @@ RCT_EXPORT_METHOD(updateTaskHeaders:(NSString *)id headers:(NSDictionary *)heade
  - (void)completeHandler:(NSString *)jobId resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
      DLog(nil, @"[RNBackgroundDownloader] - [completeHandlerIOS]");
@@ -23,7 +150,7 @@ index 9f693bf..ada96df 100644
 +                NSNumber *key = [self findTaskKeyById:jobId];
 +                if (key != nil) [taskToConfigMap removeObjectForKey:key];
 +                [idToTaskMap removeObjectForKey:jobId];
-+                [mmkv setData:[self serialize:taskToConfigMap] forKey:ID_TO_CONFIG_MAP_KEY];
++                [self substreamerMarkTaskConfigMapDirtyLocked];
 +            }
 +        }
          [[NSOperationQueue mainQueue] addOperationWithBlock:^{
