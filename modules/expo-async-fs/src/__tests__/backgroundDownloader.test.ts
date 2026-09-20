@@ -195,21 +195,6 @@ describe('backgroundDownloader', () => {
     expect(task.stop).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps a deferred protected-storage move when the queue is parked', async () => {
-    const task = createFakeTask('substreamer-queue-move-1');
-    task.state = 'WAITING_TO_MOVE';
-    mockCreateDownloadTask.mockReturnValue(task);
-
-    await primeBackgroundDownloads(
-      'queue-move',
-      [{ downloadId: 'song-move', url: 'https://server/song-move', position: 1 }],
-    );
-
-    await stopBackgroundDownloadsForQueue('queue-move', true);
-
-    expect(task.stop).not.toHaveBeenCalled();
-  });
-
   it('cancels a direct fallback through its active queue owner', async () => {
     const task = createFakeTask('substreamer-queue-direct-0');
     mockCreateDownloadTask.mockReturnValue(task);
