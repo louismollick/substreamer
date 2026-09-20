@@ -454,7 +454,7 @@ describe('reorderQueue', () => {
     expect(mirrorOf().map(([, position]) => position)).toEqual([1, 2, 3, 4]);
   });
 
-  it('translates array indices to the slots left after a removal', () => {
+  it('translates array indices to the slots left after a removal', async () => {
     // The reported bug, at the store boundary: remove from the middle, then drag
     // the new first row to the back. `index + 1` would have sent slot 3 — q-3's.
     seedMirror([1, 2, 3, 4]);
