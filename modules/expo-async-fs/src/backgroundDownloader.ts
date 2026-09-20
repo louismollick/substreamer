@@ -161,10 +161,11 @@ async function loadExistingTasks(): Promise<void> {
 }
 
 function createManagedDownload(
-  queueId: string,
+  taskQueueId: string,
   request: BackgroundDownloadRequest,
+  ownerQueueId = taskQueueId,
 ): ManagedDownload {
-  const taskId = `substreamer-${queueId}-${request.position}`;
+  const taskId = `substreamer-${taskQueueId}-${request.position}`;
   const staging = new File(stagingDirectory(), `${taskId}.download`);
   if (staging.exists) {
     try { staging.delete(); } catch { /* best-effort stale staging cleanup */ }
@@ -176,12 +177,12 @@ function createManagedDownload(
     destination: staging.uri,
     metadata: {
       owner: OWNER,
-      queueId,
+      queueId: ownerQueueId,
       downloadId: request.downloadId,
       stagingUri: staging.uri,
     },
   });
-  const managed = attachTask(task, queueId, request.downloadId, staging.uri);
+  const managed = attachTask(task, ownerQueueId, request.downloadId, staging.uri);
   task.start();
   return managed;
 }
@@ -226,13 +227,15 @@ export async function consumeBackgroundDownload(
 
   let managed = downloadsById.get(downloadId);
   if (!managed) {
+    const directTaskQueueId = `direct-${Date.now()}-${++directSequence}`;
     managed = createManagedDownload(
-      queueId ?? `direct-${Date.now()}-${++directSequence}`,
+      directTaskQueueId,
       {
         downloadId,
         url,
         position: 0,
       },
+      queueId ?? directTaskQueueId,
     );
   }
 
