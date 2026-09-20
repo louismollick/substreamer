@@ -195,6 +195,40 @@ describe('backgroundDownloader', () => {
     expect(task.stop).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps a deferred protected-storage move when the queue is parked', async () => {
+    const task = createFakeTask('substreamer-queue-move-1');
+    task.state = 'WAITING_TO_MOVE';
+    mockCreateDownloadTask.mockReturnValue(task);
+
+    await primeBackgroundDownloads(
+      'queue-move',
+      [{ downloadId: 'song-move', url: 'https://server/song-move', position: 1 }],
+    );
+
+    await stopBackgroundDownloadsForQueue('queue-move', true);
+
+    expect(task.stop).not.toHaveBeenCalled();
+  });
+
+  it('cancels a direct fallback through its active queue owner', async () => {
+    const task = createFakeTask('substreamer-queue-direct-0');
+    mockCreateDownloadTask.mockReturnValue(task);
+
+    const pending = consumeBackgroundDownload(
+      'https://server/song-direct',
+      'file:///cache/song-direct.tmp',
+      'song-direct',
+      'queue-direct',
+    );
+    const assertion = expect(pending).rejects.toThrow('Background download stopped');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    await stopBackgroundDownloadsForQueue('queue-direct');
+
+    expect(task.stop).toHaveBeenCalledTimes(1);
+    await assertion;
+  });
+
   it('rejects a waiting consumer when stop emits no native error', async () => {
     const task = createFakeTask('substreamer-queue-3-1');
     mockCreateDownloadTask.mockReturnValue(task);
