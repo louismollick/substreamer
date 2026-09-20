@@ -220,16 +220,20 @@ export async function consumeBackgroundDownload(
   url: string,
   destinationUri: string,
   downloadId: string,
+  queueId?: string,
 ): Promise<{ uri: string; bytes: number }> {
   await loadExistingTasks();
 
   let managed = downloadsById.get(downloadId);
   if (!managed) {
-    managed = createManagedDownload(`direct-${Date.now()}-${++directSequence}`, {
-      downloadId,
-      url,
-      position: 0,
-    });
+    managed = createManagedDownload(
+      queueId ?? `direct-${Date.now()}-${++directSequence}`,
+      {
+        downloadId,
+        url,
+        position: 0,
+      },
+    );
   }
 
   activeProgressIds.add(downloadId);
@@ -278,7 +282,10 @@ export async function stopBackgroundDownloadsForQueue(
   const matching = Array.from(downloadsById.values()).filter(
     (download) =>
       download.queueIds.has(queueId) &&
-      !(preserveCompleted && download.task.state === 'DONE'),
+      !(
+        preserveCompleted &&
+        (download.task.state === 'DONE' || download.task.state === 'WAITING_TO_MOVE')
+      ),
   );
 
   await Promise.all(
