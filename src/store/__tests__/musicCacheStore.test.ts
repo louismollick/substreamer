@@ -1037,17 +1037,15 @@ describe('removeCachedItemSong — derived-holder orphan matrix', () => {
       },
       cachedSongs: { S: makeSong('S') },
     });
-    mockOrphanSongIfUnreferencedAsync.mockResolvedValue({
+    mockRemoveCachedItemSongAndOrphan.mockResolvedValueOnce({
+      persisted: true,
       orphaned: true,
-      affectedItems: ['album:A'],
-      prunedItems: ['album:A'],
     });
 
     const result = await musicCacheStore.getState().removeCachedItemSong('__starred__', 1);
 
     expect(result).toEqual({ orphanedSongId: 'S', persisted: true });
-    expect(mockRemoveCachedItemSong).toHaveBeenCalledWith('__starred__', 1);
-    expect(mockOrphanSongIfUnreferencedAsync).toHaveBeenCalledWith('S');
+    expect(mockRemoveCachedItemSongAndOrphan).toHaveBeenCalledWith('__starred__', 1, 'S');
     const state = musicCacheStore.getState();
     // The favorites row survives (empty) — removeCachedItemSong only removes the
     // one edge; the holder itself is not pruned by this path.
@@ -1067,10 +1065,9 @@ describe('removeCachedItemSong — derived-holder orphan matrix', () => {
       },
       cachedSongs: { S: makeSong('S'), S2: makeSong('S2') },
     });
-    mockOrphanSongIfUnreferencedAsync.mockResolvedValue({
+    mockRemoveCachedItemSongAndOrphan.mockResolvedValueOnce({
+      persisted: true,
       orphaned: true,
-      affectedItems: ['album:A'],
-      prunedItems: [],
     });
 
     const result = await musicCacheStore.getState().removeCachedItemSong('__starred__', 1);
@@ -1094,10 +1091,9 @@ describe('removeCachedItemSong — derived-holder orphan matrix', () => {
       },
       cachedSongs: { S1: makeSong('S1'), S2: makeSong('S2') },
     });
-    mockOrphanSongIfUnreferencedAsync.mockResolvedValue({
+    mockRemoveCachedItemSongAndOrphan.mockResolvedValueOnce({
+      persisted: true,
       orphaned: false, // pl-2 still holds S1
-      affectedItems: [],
-      prunedItems: [],
     });
 
     const result = await musicCacheStore.getState().removeCachedItemSong('pl-1', 1);
