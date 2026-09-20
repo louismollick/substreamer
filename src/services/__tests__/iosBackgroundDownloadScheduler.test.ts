@@ -47,8 +47,6 @@ jest.mock('../subsonicService', () => ({
   getDownloadStreamUrl: (...args: unknown[]) => mockGetDownloadStreamUrl(...args),
 }));
 
-import '../iosBackgroundDownloadScheduler';
-
 function state(status: string): QueueState {
   return {
     downloadQueue: [{ queueId: 'queue-1', status }],
@@ -58,8 +56,36 @@ function state(status: string): QueueState {
 }
 
 async function flushPromises(): Promise<void> {
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  for (let i = 0; i < 4; i++) {
+    // Drain both promise chains and their setImmediate continuations.
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
 }
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  mockGetState.mockReset();
+  mockWhenQueuePayloadWritten.mockReset().mockResolvedValue(undefined);
+  mockReadDownloadQueueSongsAsync.mockReset().mockResolvedValue([]);
+  mockEnsureCoverArtAuth.mockReset().mockResolvedValue(undefined);
+  mockGetDownloadStreamUrl.mockReset();
+  mockPrimeBackgroundDownloads.mockReset().mockResolvedValue(undefined);
+  mockStopBackgroundDownloadsForQueue.mockReset().mockResolvedValue(undefined);
+  subscribedListener = undefined;
+
+  // The scheduler intentionally owns module-scope queues. Reload it for each
+  // case so pending work and the parked flag cannot leak across tests.
+  jest.resetModules();
+  jest.isolateModules(() => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('../iosBackgroundDownloadScheduler');
+  });
+});
+
+afterEach(async () => {
+  await flushPromises();
+});
 
 describe('iosBackgroundDownloadScheduler', () => {
   it('finishes a queued stop before re-priming the same queue item', async () => {
