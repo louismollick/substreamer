@@ -99,9 +99,10 @@ export function downloadFileAsyncWithProgress(
   url: string,
   destinationUri: string,
   downloadId: string,
+  queueId?: string,
 ): Promise<{ uri: string; bytes: number }> {
   if (Platform.OS === 'ios') {
-    return consumeBackgroundDownload(url, destinationUri, downloadId);
+    return consumeBackgroundDownload(url, destinationUri, downloadId, queueId);
   }
   return ExpoAsyncFsModule.downloadFileAsyncWithProgress(url, destinationUri, downloadId);
 }
