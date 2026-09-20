@@ -30,6 +30,20 @@ function isPrimeable(item: DownloadQueueItem | undefined): boolean {
   return item?.status === 'queued' || item?.status === 'downloading';
 }
 
+/**
+ * Wait for priming already scheduled from earlier queue states before releasing
+ * ownership. On restart this lets shared songs rebuild all live queue owners
+ * before cancellation can stop their one native transfer.
+ */
+async function stopQueueAfterPendingPrimes(
+  queueId: string,
+  preserveCompleted = false,
+): Promise<void> {
+  const pendingPrimes = primeOperation;
+  await pendingPrimes.catch(() => undefined);
+  await stopBackgroundDownloadsForQueue(queueId, preserveCompleted);
+}
+
 function scheduleQueueOperation(queueId: string, operation: () => Promise<void>): void {
   const previous = queueOperations.get(queueId) ?? Promise.resolve();
   const next = previous
@@ -126,7 +140,7 @@ function onQueueChanged(
     for (const item of state.downloadQueue) {
       if (!isPrimeable(item)) continue;
       scheduleQueueOperation(item.queueId, () =>
-        stopBackgroundDownloadsForQueue(item.queueId, true),
+        stopQueueAfterPendingPrimes(item.queueId, true),
       );
     }
   } else {
@@ -156,7 +170,7 @@ function onQueueChanged(
     const current = currentById.get(item.queueId);
     if (!current || !isPrimeable(current)) {
       scheduleQueueOperation(item.queueId, () =>
-        stopBackgroundDownloadsForQueue(item.queueId),
+        stopQueueAfterPendingPrimes(item.queueId),
       );
     }
   }
