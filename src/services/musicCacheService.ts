@@ -1510,8 +1510,17 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
       }
 
       // The recovery row is removed only after every destructive edge mutation
-      // has landed. A retry can therefore continue any interrupted repair.
-      musicCacheStore.getState().removeFromQueue(queueItem.queueId);
+      // has landed, and only after its own SQL delete succeeds.
+      const recoveryRowRemoved = await musicCacheStore.getState().removeFromQueue(
+        queueItem.queueId,
+      );
+      if (!recoveryRowRemoved) {
+        musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
+          status: 'error',
+          error: 'Failed to remove completed recovery row',
+        });
+        return;
+      }
     }
   } else {
     musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
@@ -1896,47 +1905,33 @@ export async function demoteAlbumToPartial(
     return { demoted: false, removed: false };
   }
 
-  // Snapshot song metadata for file deletion BEFORE the store removes rows.
-  const orphanSnapshot: CachedSongMeta[] = [];
-  for (const sid of orphanSongIds) {
-    const s = musicCacheStore.getState().cachedSongs[sid];
-    if (s) orphanSnapshot.push(s);
+  // Snapshot candidate metadata before the atomic store action removes rows.
+  const orphanSnapshot = new Map<string, CachedSongMeta>();
+  for (const songId of orphanSongIds) {
+    const song = musicCacheStore.getState().cachedSongs[songId];
+    if (song) orphanSnapshot.set(songId, song);
   }
 
-  // Remove each orphan edge. Positions shift after each removal, so we
-  // re-read the current index every iteration.
-  for (const songId of orphanSongIds) {
-    const current = musicCacheStore.getState().cachedItems[itemId];
-    if (!current) break;
-    const idx = current.songIds.indexOf(songId);
-    if (idx < 0) continue;
-    // eslint-disable-next-line no-await-in-loop
-    const { persisted } = await musicCacheStore.getState().removeCachedItemSong(itemId, idx + 1);
-    if (!persisted) return { demoted: false, removed: false };
-    // `removeCachedItemSong` has already deleted the cached_songs row and
-    // decremented refcount-via-COUNT. Update the in-memory mirrors.
+  // The persistence layer flips the album to derived and orphans every candidate
+  // in one batch. There is no partially-demoted state to clean up after a later
+  // write failure.
+  const demotion = await musicCacheStore.getState().demoteCachedAlbum(
+    itemId,
+    orphanSongIds,
+  );
+  if (!demotion.persisted) return { demoted: false, removed: false };
+
+  const deletions: Promise<void>[] = [];
+  for (const songId of demotion.orphanedSongIds) {
     trackToItems.delete(songId);
     trackUriMap.delete(songId);
+    const song = orphanSnapshot.get(songId);
+    if (song) {
+      deletions.push(
+        deleteFileAsync(resolveSongFile(song).uri).catch(() => { /* best-effort */ }),
+      );
+    }
   }
-
-  // The album is now a PARTIAL grouping: every surviving song is — by the
-  // survivor definition (more than one REAL holder) — also held by another REAL
-  // holder (a playlist/favorites/song download). Flip the album to `derived` so
-  // it no longer independently keeps those songs alive: when their last real
-  // holder is removed they orphan and this row is pruned. Without this, removing
-  // that playlist/favorites later would leave the album's shared song downloaded
-  // and the album stuck in the partial state.
-  const demotedRow = musicCacheStore.getState().cachedItems[itemId];
-  if (demotedRow) {
-    musicCacheStore.getState().upsertCachedItem({ ...demotedRow, derived: true });
-  }
-
-  // Delete orphan files OFF-THREAD (best-effort), then re-check the storage
-  // limit once the unlinks have freed space — same ordering as the prior
-  // sync deletes → resume.
-  const deletions = orphanSnapshot.map((song) =>
-    deleteFileAsync(resolveSongFile(song).uri).catch(() => { /* best-effort */ }),
-  );
   void Promise.all(deletions).then(() => resumeIfSpaceAvailable());
   return { demoted: true, removed: false };
 }
@@ -2169,7 +2164,14 @@ export async function cancelDownload(queueId: string): Promise<void> {
   // so the delete takes the payload with it. Two columns, not a rebuilt `Child`.
   const songs = await readDownloadQueueSongRefsAsync(queueId);
 
-  musicCacheStore.getState().removeFromQueue(queueId);
+  const removed = await musicCacheStore.getState().removeFromQueue(queueId);
+  if (!removed) {
+    musicCacheStore.getState().updateQueueItem(queueId, {
+      status: 'error',
+      error: 'Failed to cancel download',
+    });
+    return;
+  }
 
   // Group cancelled song ids by album, then sweep each album's .tmp remnants
   // off the JS thread: one directory listing per album + async deletes, rather
