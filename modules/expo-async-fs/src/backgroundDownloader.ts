@@ -181,6 +181,10 @@ function createManagedDownload(
       downloadId: request.downloadId,
       stagingUri: staging.uri,
     },
+    // This is only Substreamer's temporary staging file. The cache worker moves
+    // it into the final protected location later, so keep native staging writable
+    // while the device is locked.
+    iosDataProtection: 'none',
   });
   const managed = attachTask(task, ownerQueueId, request.downloadId, staging.uri);
   task.start();
@@ -285,10 +289,7 @@ export async function stopBackgroundDownloadsForQueue(
   const matching = Array.from(downloadsById.values()).filter(
     (download) =>
       download.queueIds.has(queueId) &&
-      !(
-        preserveCompleted &&
-        (download.task.state === 'DONE' || download.task.state === 'WAITING_TO_MOVE')
-      ),
+      !(preserveCompleted && download.task.state === 'DONE'),
   );
 
   await Promise.all(
