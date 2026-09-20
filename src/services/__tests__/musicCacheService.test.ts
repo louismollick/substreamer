@@ -325,15 +325,17 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
     }),
     updateDownloadQueueItem: jest.fn(),
     reorderDownloadQueue: jest.fn(),
-    markDownloadComplete: jest.fn((queueId, item, songs, incomingEdges) => {
-      queueSongs.delete(queueId);
-      // An explicit finished download is a REAL holder.
-      if (item?.derived) derivedItems.add(item.itemId);
-      else derivedItems.delete(item.itemId);
-      for (const e of incomingEdges) {
-        edges.push({ itemId: item.itemId, position: e.position, songId: e.songId });
-      }
-    }),
+    markDownloadComplete: jest.fn(
+      (queueId, item, songs, incomingEdges, _childBySongId, options) => {
+        if (!options?.keepQueue) queueSongs.delete(queueId);
+        // An explicit finished download is a REAL holder.
+        if (item?.derived) derivedItems.add(item.itemId);
+        else derivedItems.delete(item.itemId);
+        for (const e of incomingEdges) {
+          edges.push({ itemId: item.itemId, position: e.position, songId: e.songId });
+        }
+      },
+    ),
     // The four gated readers. The fake has one source, so there is no gate: a
     // queueId with no payload answers empty, exactly as an unreadable row would.
     readDownloadQueueSongsAsync: jest.fn(async (queueId: string) => [
