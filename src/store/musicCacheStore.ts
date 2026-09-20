@@ -23,6 +23,7 @@ import {
   childGenreNames,
   clearAllMusicCacheRows,
   convertLegacyMetadataAsync,
+  demoteCachedAlbumToPartialAsync as demoteCachedAlbumToPartialRow,
   orphanSongIfUnreferencedAsync,
   deleteCachedItem as deleteCachedItemRow,
   deleteCachedSong as deleteCachedSongRow,
@@ -203,6 +204,14 @@ export interface MusicCacheState {
     itemId: string,
     position: number,
   ) => Promise<{ orphanedSongId: string | null; persisted: boolean }>;
+  /**
+   * Atomically turn an album into a derived partial grouping and orphan the
+   * supplied songs when they have no other REAL holder.
+   */
+  demoteCachedAlbum: (
+    itemId: string,
+    candidateOrphanSongIds: readonly string[],
+  ) => Promise<{ persisted: boolean; orphanedSongIds: string[] }>;
   /**
    * Reorder one cached item edge. Memory changes only after the SQL batch lands,
    * so callers doing recovery work can safely keep their queue row on failure.
@@ -677,6 +686,45 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
       });
     });
     return { orphanedSongId, persisted: true };
+  },
+
+  demoteCachedAlbum: async (itemId, candidateOrphanSongIds) => {
+    const result = await demoteCachedAlbumToPartialRow(itemId, candidateOrphanSongIds);
+    if (!result.persisted) return result;
+
+    const orphanSet = new Set(result.orphanedSongIds);
+    set((prev) => {
+      const nextItems = { ...prev.cachedItems };
+      const target = nextItems[itemId];
+      if (target) nextItems[itemId] = { ...target, derived: true };
+
+      if (orphanSet.size > 0) {
+        for (const [holderId, holder] of Object.entries(nextItems)) {
+          const songIds = holder.songIds.filter((songId) => !orphanSet.has(songId));
+          if (songIds.length === holder.songIds.length) continue;
+          if (holder.derived && holderId !== itemId && songIds.length === 0) {
+            delete nextItems[holderId];
+          } else {
+            nextItems[holderId] = { ...holder, songIds };
+          }
+        }
+      }
+
+      const nextSongs = { ...prev.cachedSongs };
+      let freedBytes = 0;
+      for (const songId of orphanSet) {
+        freedBytes += prev.cachedSongs[songId]?.bytes ?? 0;
+        delete nextSongs[songId];
+      }
+      return bumped(prev, {
+        cachedItems: nextItems,
+        cachedSongs: nextSongs,
+        totalBytes: Math.max(0, prev.totalBytes - freedBytes),
+        totalFiles: Math.max(0, prev.totalFiles - orphanSet.size),
+      });
+    });
+
+    return result;
   },
 
   reorderCachedItemSongs: async (itemId, fromPosition, toPosition) => {
