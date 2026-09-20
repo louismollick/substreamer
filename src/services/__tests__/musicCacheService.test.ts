@@ -1596,10 +1596,15 @@ describe('demoteAlbumToPartial', () => {
       expectedSongCount: 2,
     });
     seedItem('pl-1', { type: 'playlist', songIds: ['s1'] });
-    persistenceMock.demoteCachedAlbumToPartialAsync.mockResolvedValueOnce({
-      persisted: false,
-      orphanedSongIds: [],
-    });
+    persistenceMock.demoteCachedAlbumToPartialAsync
+      .mockResolvedValueOnce({
+        persisted: false,
+        orphanedSongIds: [],
+      })
+      .mockResolvedValueOnce({
+        persisted: false,
+        orphanedSongIds: [],
+      });
 
     const result = await demoteAlbumToPartial('album-1');
 
@@ -1610,6 +1615,33 @@ describe('demoteAlbumToPartial', () => {
     expect(musicCacheStore.getState().cachedSongs['s2']).toBeDefined();
     expect(fileDeletesAsync.some((u) => u.includes('s2'))).toBe(false);
     expect(persistenceMock.__derivedItems.has('album-1')).toBe(false);
+  });
+
+  it('replays an uncertain demotion and finishes cleanup from the replay result', async () => {
+    mockFileExists = true;
+    seedSong(makeCachedSong('s1'));
+    seedSong(makeCachedSong('s2'));
+    seedItem('album-1', {
+      type: 'album',
+      songIds: ['s1', 's2'],
+      expectedSongCount: 2,
+    });
+    seedItem('pl-1', { type: 'playlist', songIds: ['s1'] });
+    persistenceMock.demoteCachedAlbumToPartialAsync.mockResolvedValueOnce({
+      persisted: false,
+      orphanedSongIds: [],
+    });
+
+    const result = await demoteAlbumToPartial('album-1');
+
+    expect(result).toEqual({ demoted: true, removed: false });
+    expect(persistenceMock.demoteCachedAlbumToPartialAsync).toHaveBeenCalledTimes(2);
+    expect(musicCacheStore.getState().cachedItems['album-1']).toMatchObject({
+      derived: true,
+      songIds: ['s1'],
+    });
+    expect(musicCacheStore.getState().cachedSongs['s2']).toBeUndefined();
+    expect(fileDeletesAsync.some((u) => u.includes('s2'))).toBe(true);
   });
 
   it('no-op guard when album item has no orphans (defensive: survivors fully cover it)', async () => {
