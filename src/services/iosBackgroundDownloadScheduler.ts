@@ -108,7 +108,12 @@ async function primeQueueItem(item: DownloadQueueItem): Promise<void> {
       (queued) => queued.queueId === item.queueId,
     );
     if (!isPrimeable(current)) {
-      await stopBackgroundDownloadsForQueue(item.queueId);
+      // The state transition may have scheduled its stop before this async
+      // prime actually created native work. Queue a second cleanup behind this
+      // operation; it will also wait for sibling priming to rebuild shared owners.
+      scheduleQueueOperation(item.queueId, () =>
+        stopQueueAfterPendingPrimes(item.queueId),
+      );
     }
   } catch (error) {
     // The normal worker remains a fallback: its first download call can still
