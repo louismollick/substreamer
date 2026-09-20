@@ -20,6 +20,8 @@ import {
   markDownloadComplete,
   orphanSongIfUnreferencedAsync,
   removeCachedItemSong,
+  removeCachedItemSongAndOrphanAsync,
+  demoteCachedAlbumToPartialAsync,
   reorderCachedItemSongs,
   upsertCachedItem,
   upsertCachedSong,
@@ -604,6 +606,125 @@ describe('orphanSongIfUnreferencedAsync (real SQL)', () => {
       { position: 1, song_id: 's1' },
       { position: 2, song_id: 's2' },
     ]);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  fused edge/orphan cleanup + atomic album demotion                   */
+/* ------------------------------------------------------------------ */
+
+describe('removeCachedItemSongAndOrphanAsync (real SQL)', () => {
+  it('removes the exact edge and orphans the song in one commit', async () => {
+    await seedHolder('alb-1', ['s1', 's2']);
+
+    const result = await removeCachedItemSongAndOrphanAsync('alb-1', 1, 's1');
+
+    expect(result).toEqual({ persisted: true, orphaned: true });
+    expect(songExists('s1')).toBe(false);
+    expect(songOrderOf('alb-1')).toEqual(['s2']);
+    expect(positionsOf('alb-1')).toEqual([1]);
+  });
+
+  it('keeps the song when another REAL holder remains', async () => {
+    await seedHolder('alb-1', ['s1', 's2']);
+    await seedHolder('pl-1', ['s1']);
+
+    const result = await removeCachedItemSongAndOrphanAsync('alb-1', 1, 's1');
+
+    expect(result).toEqual({ persisted: true, orphaned: false });
+    expect(songExists('s1')).toBe(true);
+    expect(songOrderOf('alb-1')).toEqual(['s2']);
+    expect(songOrderOf('pl-1')).toEqual(['s1']);
+  });
+
+  it('rolls the edge removal back when orphan cleanup fails', async () => {
+    await seedHolder('alb-1', ['s1', 's2']);
+    const poisoned: InternalDb = {
+      ...realDb,
+      runAtomicBatchAsync: (commands) =>
+        realDb.runAtomicBatchAsync([
+          ...commands,
+          ['SELECT no_such_column FROM cached_songs;', []],
+        ]),
+    };
+    __setDbForTests(poisoned);
+
+    const result = await removeCachedItemSongAndOrphanAsync('alb-1', 1, 's1');
+
+    __setDbForTests(realDb);
+    expect(result).toEqual({ persisted: false, orphaned: false });
+    expect(songExists('s1')).toBe(true);
+    expect(songOrderOf('alb-1')).toEqual(['s1', 's2']);
+  });
+
+  it('is safe to replay when the batch committed but its post-read failed', async () => {
+    await seedHolder('alb-1', ['s1', 's2']);
+    const postReadFails = {
+      ...realDb,
+      getFirstAsync: async () => {
+        throw new Error('post-read failed');
+      },
+    } as unknown as InternalDb;
+    __setDbForTests(postReadFails);
+
+    expect(
+      await removeCachedItemSongAndOrphanAsync('alb-1', 1, 's1'),
+    ).toEqual({ persisted: false, orphaned: false });
+
+    // The batch did land. Replay the same stale edge against the real handle:
+    // the exact-edge guard must not delete the successor now occupying slot 1.
+    __setDbForTests(realDb);
+    expect(
+      await removeCachedItemSongAndOrphanAsync('alb-1', 1, 's1'),
+    ).toEqual({ persisted: true, orphaned: true });
+    expect(songOrderOf('alb-1')).toEqual(['s2']);
+    expect(songExists('s1')).toBe(false);
+  });
+});
+
+describe('demoteCachedAlbumToPartialAsync (real SQL)', () => {
+  it('marks the album derived and orphans only the supplied candidates atomically', async () => {
+    await seedHolder('album:a', ['s1', 's2', 's3']);
+    await seedHolder('pl-1', ['s1', 's2']);
+
+    const result = await demoteCachedAlbumToPartialAsync('album:a', ['s3']);
+
+    expect(result).toEqual({ persisted: true, orphanedSongIds: ['s3'] });
+    expect(songOrderOf('album:a')).toEqual(['s1', 's2']);
+    expect(songExists('s3')).toBe(false);
+    expect(
+      realDb.getFirstSync<{ derived: number }>(
+        'SELECT derived FROM cached_items WHERE item_id = ?;',
+        ['album:a'],
+      )?.derived,
+    ).toBe(1);
+  });
+
+  it('rolls back both the derived flag and song cleanup on any batch failure', async () => {
+    await seedHolder('album:a', ['s1', 's2', 's3']);
+    await seedHolder('pl-1', ['s1', 's2']);
+    const poisoned: InternalDb = {
+      ...realDb,
+      runAtomicBatchAsync: (commands) =>
+        realDb.runAtomicBatchAsync([
+          ...commands,
+          ['SELECT no_such_column FROM cached_songs;', []],
+        ]),
+    };
+    __setDbForTests(poisoned);
+
+    const result = await demoteCachedAlbumToPartialAsync('album:a', ['s3']);
+
+    __setDbForTests(realDb);
+    expect(result).toEqual({ persisted: false, orphanedSongIds: [] });
+    expect(songOrderOf('album:a')).toEqual(['s1', 's2', 's3']);
+    expect(songExists('s3')).toBe(true);
+    expect(
+      realDb.getFirstSync<{ derived: number }>(
+        'SELECT derived FROM cached_items WHERE item_id = ?;',
+        ['album:a'],
+      )?.derived,
+    ).toBe(0);
   });
 });
 
