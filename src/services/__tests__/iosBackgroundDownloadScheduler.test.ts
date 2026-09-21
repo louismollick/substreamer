@@ -191,7 +191,7 @@ describe('iosBackgroundDownloadScheduler', () => {
     );
   });
 
-  it('serializes native priming across queued items', async () => {
+  it('primes queued items without waiting for an earlier native batch', async () => {
     mockWhenQueuePayloadWritten.mockResolvedValue(undefined);
     mockReadDownloadQueueSongsAsync.mockImplementation(async (queueId: string) => [
       { id: `song-${queueId}` },
@@ -229,20 +229,18 @@ describe('iosBackgroundDownloadScheduler', () => {
     subscribedListener!(after, before);
     await flushPromises();
 
-    expect(mockPrimeBackgroundDownloads).toHaveBeenCalledTimes(1);
-    expect(mockPrimeBackgroundDownloads).toHaveBeenLastCalledWith(
+    expect(mockPrimeBackgroundDownloads).toHaveBeenCalledTimes(2);
+    expect(mockPrimeBackgroundDownloads).toHaveBeenCalledWith(
       'queue-2',
+      expect.any(Array),
+    );
+    expect(mockPrimeBackgroundDownloads).toHaveBeenCalledWith(
+      'queue-3',
       expect.any(Array),
     );
 
     resolveFirst();
     await flushPromises();
-
-    expect(mockPrimeBackgroundDownloads).toHaveBeenCalledTimes(2);
-    expect(mockPrimeBackgroundDownloads).toHaveBeenLastCalledWith(
-      'queue-3',
-      expect.any(Array),
-    );
   });
 
   it('stops primed queued siblings when the active item is parked', async () => {
