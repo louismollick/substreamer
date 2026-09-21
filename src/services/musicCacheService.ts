@@ -793,9 +793,10 @@ async function ensureCoverBeforeBinary(
 
 export async function enqueueAlbumDownload(
   albumId: string,
-  opts?: { awaitCover?: boolean },
+  opts?: { awaitCover?: boolean; forceRefresh?: boolean },
 ): Promise<void> {
   const awaitCover = opts?.awaitCover !== false;
+  const forceRefresh = opts?.forceRefresh !== false;
   const state = musicCacheStore.getState();
   const existing = state.cachedItems[albumId];
   if (state.downloadQueue.some((q) => q.itemId === albumId)) return;
@@ -806,7 +807,7 @@ export async function enqueueAlbumDownload(
   }
 
   await ensureCoverArtAuth();
-  const album = await fetchAlbumDetail(albumId, { force: true });
+  const album = await fetchAlbumDetail(albumId, { force: forceRefresh });
   if (!album?.song?.length) {
     if (isTopUp) {
       processingOverlayStore.getState().showError(i18n.t('failedToLoadAlbum'));
@@ -905,15 +906,16 @@ export async function enqueueAlbumDownload(
 /** Enqueue a playlist download. */
 export async function enqueuePlaylistDownload(
   playlistId: string,
-  opts?: { awaitCover?: boolean },
+  opts?: { awaitCover?: boolean; forceRefresh?: boolean },
 ): Promise<void> {
   const awaitCover = opts?.awaitCover !== false;
+  const forceRefresh = opts?.forceRefresh !== false;
   const state = musicCacheStore.getState();
   if (playlistId in state.cachedItems) return;
   if (state.downloadQueue.some((q) => q.itemId === playlistId)) return;
 
   await ensureCoverArtAuth();
-  const playlist = await fetchPlaylistDetail(playlistId, { force: true });
+  const playlist = await fetchPlaylistDetail(playlistId, { force: forceRefresh });
   if (!playlist?.entry?.length) return;
 
   // Re-check after the awaits (see enqueueAlbumDownload) — avoid a duplicate row.
