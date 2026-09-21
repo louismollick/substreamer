@@ -30,8 +30,8 @@ jest.mock('../../db/repository/playlists', () => ({
 const mockEnqueueAlbum = jest.fn();
 const mockEnqueuePlaylist = jest.fn();
 jest.mock('../musicCacheService', () => ({
-  enqueueAlbumDownload: (id: string) => mockEnqueueAlbum(id),
-  enqueuePlaylistDownload: (id: string) => mockEnqueuePlaylist(id),
+  enqueueAlbumDownload: (...args: unknown[]) => mockEnqueueAlbum(...args),
+  enqueuePlaylistDownload: (...args: unknown[]) => mockEnqueuePlaylist(...args),
 }));
 
 import { enqueueFullLibraryDownload } from '../fullLibraryDownloadService';
@@ -64,6 +64,14 @@ describe('enqueueFullLibraryDownload', () => {
     await enqueueFullLibraryDownload();
     expect(mockFetchAllPlaylists).toHaveBeenCalledTimes(1);
     expect(calls).toEqual(['a:a1', 'a:a2', 'p:p1']);
+    expect(mockEnqueueAlbum).toHaveBeenCalledWith('a1', {
+      awaitCover: false,
+      forceRefresh: false,
+    });
+    expect(mockEnqueuePlaylist).toHaveBeenCalledWith('p1', {
+      awaitCover: false,
+      forceRefresh: false,
+    });
     expect(fullLibraryDownloadStore.getState().active).toBe(false);
   });
 
