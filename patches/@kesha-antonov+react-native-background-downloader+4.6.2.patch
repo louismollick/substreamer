@@ -13,6 +13,17 @@ index 9f693bf..ada96df 100644
  
  #ifdef RCT_NEW_ARCH_ENABLED
  #import <RNBackgroundDownloaderSpec/RNBackgroundDownloaderSpec.h>
+@@ -19,7 +21,9 @@
+ #define PENDING_MOVES_MAP_KEY @"com.eko.bgdpendingmoves"
+ 
+ // Session configuration constants
+-static const NSInteger kMaxConnectionsPerHost = 4;
++// Full-library downloads pre-submit every track to this background session.
++// Keep only one transfer active per host so Navidrome is not saturated.
++static const NSInteger kMaxConnectionsPerHost = 1;
+ static const NSTimeInterval kRequestTimeoutSeconds = 60 * 60;        // 1 hour - max time to get new data
+ static const NSTimeInterval kResourceTimeoutSeconds = 60 * 60 * 24;  // 1 day - max time to download resource
+ 
 @@ -84,4 +86,7 @@
 -    // Controls whether debug logs are sent to JS
 -    BOOL isLogsEnabled;
