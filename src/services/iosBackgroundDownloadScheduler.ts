@@ -15,16 +15,8 @@ import { readDownloadQueueSongsAsync } from '../store/persistence/musicCacheTabl
 import { ensureCoverArtAuth, getDownloadStreamUrl } from './subsonicService';
 
 const queueOperations = new Map<string, Promise<void>>();
-let primeOperation: Promise<void> = Promise.resolve();
+const pendingPrimeOperations = new Set<Promise<void>>();
 let primingPaused = false;
-
-function serializePrime(operation: () => Promise<void>): Promise<void> {
-  const next = primeOperation
-    .catch(() => undefined)
-    .then(operation);
-  primeOperation = next;
-  return next;
-}
 
 function isPrimeable(item: DownloadQueueItem | undefined): boolean {
   return item?.status === 'queued' || item?.status === 'downloading';
@@ -39,12 +31,12 @@ async function stopQueueAfterPendingPrimes(
   queueId: string,
   preserveCompleted = false,
 ): Promise<void> {
-  const pendingPrimes = primeOperation;
-  await pendingPrimes.catch(() => undefined);
+  const pendingPrimes = Array.from(pendingPrimeOperations);
+  await Promise.allSettled(pendingPrimes);
   await stopBackgroundDownloadsForQueue(queueId, preserveCompleted);
 }
 
-function scheduleQueueOperation(queueId: string, operation: () => Promise<void>): void {
+function scheduleQueueOperation(queueId: string, operation: () => Promise<void>): Promise<void> {
   const previous = queueOperations.get(queueId) ?? Promise.resolve();
   const next = previous
     // A failed operation must not block the next queue transition.
@@ -58,6 +50,15 @@ function scheduleQueueOperation(queueId: string, operation: () => Promise<void>)
   queueOperations.set(queueId, next);
   // Observe failures immediately, even when no later transition is scheduled.
   void next.catch(() => undefined);
+  return next;
+}
+
+function schedulePrime(item: DownloadQueueItem): void {
+  const operation = scheduleQueueOperation(item.queueId, () => primeQueueItem(item));
+  pendingPrimeOperations.add(operation);
+  void operation.finally(() => {
+    pendingPrimeOperations.delete(operation);
+  });
 }
 
 async function primeQueueItem(item: DownloadQueueItem): Promise<void> {
@@ -162,9 +163,7 @@ function onQueueChanged(
       if (!isPrimeable(item)) continue;
       const before = previousById.get(item.queueId);
       if (queueStarted || !isPrimeable(before)) {
-        scheduleQueueOperation(item.queueId, () =>
-          serializePrime(() => primeQueueItem(item)),
-        );
+        schedulePrime(item);
       }
     }
   }
