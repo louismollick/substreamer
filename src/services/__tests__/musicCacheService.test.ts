@@ -911,6 +911,20 @@ describe('forceRecoverDownloadsAsync', () => {
 /* ------------------------------------------------------------------ */
 
 describe('enqueueAlbumDownload', () => {
+  it('can prefer synced local album detail for bulk queueing', async () => {
+    mockCheckStorageLimit.mockReturnValue(true);
+    mockFetchAlbum.mockResolvedValue({
+      id: 'album-1',
+      name: 'Local Album',
+      song: [makeChild('t1')],
+    });
+
+    await enqueueAlbumDownload('album-1', { forceRefresh: false });
+
+    expect(mockFetchAlbum).toHaveBeenCalledWith('album-1', { force: false });
+    expect(musicCacheStore.getState().downloadQueue).toHaveLength(1);
+  });
+
   it('skips if already fully downloaded (no missing songs)', async () => {
     // A cached_items row that matches the server album exactly → top-up
     // fetches fresh album data, sees no missing songs, and returns without
@@ -1098,6 +1112,20 @@ describe('enqueueAlbumDownload', () => {
 /* ------------------------------------------------------------------ */
 
 describe('enqueuePlaylistDownload', () => {
+  it('can prefer synced local playlist detail for bulk queueing', async () => {
+    mockCheckStorageLimit.mockReturnValue(true);
+    mockFetchPlaylist.mockResolvedValue({
+      id: 'pl-1',
+      name: 'Local Playlist',
+      entry: [makeChild('t1')],
+    });
+
+    await enqueuePlaylistDownload('pl-1', { forceRefresh: false });
+
+    expect(mockFetchPlaylist).toHaveBeenCalledWith('pl-1', { force: false });
+    expect(musicCacheStore.getState().downloadQueue).toHaveLength(1);
+  });
+
   it('skips if cached or queued', async () => {
     seedItem('pl-1', { type: 'playlist' });
     await enqueuePlaylistDownload('pl-1');

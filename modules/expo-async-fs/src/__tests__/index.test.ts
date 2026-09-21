@@ -1,4 +1,10 @@
+import { Platform } from 'react-native';
+
 import ExpoAsyncFsModule from '../ExpoAsyncFsModule';
+import {
+  consumeBackgroundDownload,
+  addBackgroundDownloadProgressListener,
+} from '../backgroundDownloader';
 import {
   listDirectoryAsync,
   getDirectorySizeAsync,
@@ -9,11 +15,26 @@ import {
 } from '../index';
 
 jest.mock('../ExpoAsyncFsModule');
+jest.mock('../backgroundDownloader', () => ({
+  consumeBackgroundDownload: jest.fn(),
+  addBackgroundDownloadProgressListener: jest.fn(),
+  primeBackgroundDownloads: jest.fn(),
+  stopBackgroundDownloadsForQueue: jest.fn(),
+}));
 
 const mockModule = jest.mocked(ExpoAsyncFsModule);
+const mockConsumeBackgroundDownload = jest.mocked(consumeBackgroundDownload);
+const mockAddBackgroundDownloadProgressListener = jest.mocked(
+  addBackgroundDownloadProgressListener,
+);
+
+function setPlatform(os: 'ios' | 'android'): void {
+  Object.defineProperty(Platform, 'OS', { value: os, configurable: true });
+}
 
 beforeEach(() => {
   jest.clearAllMocks();
+  setPlatform('android');
 });
 
 describe('listDirectoryAsync', () => {
@@ -52,7 +73,7 @@ describe('getDirectorySizeAsync', () => {
     mockModule.getDirectorySizeAsync.mockResolvedValue(0);
     const result = await getDirectorySizeAsync('file:///empty');
 
-    expect(result).toBe(0);
+    expect(result).toEqual(0);
   });
 
   it('propagates native errors', async () => {
@@ -92,7 +113,7 @@ describe('existsAsync', () => {
 });
 
 describe('downloadFileAsyncWithProgress', () => {
-  it('passes url, destinationUri, and downloadId to native', async () => {
+  it('uses the existing native module on Android', async () => {
     const expected = { uri: 'file:///dest/song.mp3', bytes: 5000 };
     mockModule.downloadFileAsyncWithProgress.mockResolvedValue(expected);
 
@@ -107,10 +128,31 @@ describe('downloadFileAsyncWithProgress', () => {
       'file:///dest/song.mp3',
       'dl-001',
     );
+    expect(mockConsumeBackgroundDownload).not.toHaveBeenCalled();
     expect(result).toEqual(expected);
   });
 
-  it('propagates native errors', async () => {
+  it('uses the persistent background downloader on iOS', async () => {
+    setPlatform('ios');
+    const expected = { uri: 'file:///dest/song.mp3', bytes: 5000 };
+    mockConsumeBackgroundDownload.mockResolvedValue(expected);
+
+    const result = await downloadFileAsyncWithProgress(
+      'https://server.com/song.mp3',
+      'file:///dest/song.mp3',
+      'dl-ios',
+    );
+
+    expect(mockConsumeBackgroundDownload).toHaveBeenCalledWith(
+      'https://server.com/song.mp3',
+      'file:///dest/song.mp3',
+      'dl-ios',
+    );
+    expect(mockModule.downloadFileAsyncWithProgress).not.toHaveBeenCalled();
+    expect(result).toEqual(expected);
+  });
+
+  it('propagates native errors on Android', async () => {
     mockModule.downloadFileAsyncWithProgress.mockRejectedValue(new Error('Network error'));
 
     await expect(
@@ -120,7 +162,7 @@ describe('downloadFileAsyncWithProgress', () => {
 });
 
 describe('addDownloadProgressListener', () => {
-  it('subscribes to onDownloadProgress events', () => {
+  it('subscribes to native onDownloadProgress events on Android', () => {
     const listener = jest.fn();
     const mockSubscription = { remove: jest.fn() };
     mockModule.addListener.mockReturnValue(mockSubscription);
@@ -128,16 +170,20 @@ describe('addDownloadProgressListener', () => {
     const subscription = addDownloadProgressListener(listener);
 
     expect(mockModule.addListener).toHaveBeenCalledWith('onDownloadProgress', listener);
+    expect(mockAddBackgroundDownloadProgressListener).not.toHaveBeenCalled();
     expect(subscription).toBe(mockSubscription);
   });
 
-  it('returns a subscription with remove()', () => {
-    const mockRemove = jest.fn();
-    mockModule.addListener.mockReturnValue({ remove: mockRemove });
+  it('subscribes only to the background source on iOS', () => {
+    setPlatform('ios');
+    const listener = jest.fn();
+    const backgroundSubscription = { remove: jest.fn() };
+    mockAddBackgroundDownloadProgressListener.mockReturnValue(backgroundSubscription as never);
 
-    const subscription = addDownloadProgressListener(jest.fn());
-    subscription.remove();
+    const subscription = addDownloadProgressListener(listener);
 
-    expect(mockRemove).toHaveBeenCalled();
+    expect(mockAddBackgroundDownloadProgressListener).toHaveBeenCalledWith(listener);
+    expect(mockModule.addListener).not.toHaveBeenCalled();
+    expect(subscription).toBe(backgroundSubscription);
   });
 });

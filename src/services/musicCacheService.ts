@@ -793,9 +793,10 @@ async function ensureCoverBeforeBinary(
 
 export async function enqueueAlbumDownload(
   albumId: string,
-  opts?: { awaitCover?: boolean },
+  opts?: { awaitCover?: boolean; forceRefresh?: boolean },
 ): Promise<void> {
   const awaitCover = opts?.awaitCover !== false;
+  const forceRefresh = opts?.forceRefresh !== false;
   const state = musicCacheStore.getState();
   const existing = state.cachedItems[albumId];
   if (state.downloadQueue.some((q) => q.itemId === albumId)) return;
@@ -806,7 +807,7 @@ export async function enqueueAlbumDownload(
   }
 
   await ensureCoverArtAuth();
-  const album = await fetchAlbumDetail(albumId, { force: true });
+  const album = await fetchAlbumDetail(albumId, { force: forceRefresh });
   if (!album?.song?.length) {
     if (isTopUp) {
       processingOverlayStore.getState().showError(i18n.t('failedToLoadAlbum'));
@@ -905,15 +906,16 @@ export async function enqueueAlbumDownload(
 /** Enqueue a playlist download. */
 export async function enqueuePlaylistDownload(
   playlistId: string,
-  opts?: { awaitCover?: boolean },
+  opts?: { awaitCover?: boolean; forceRefresh?: boolean },
 ): Promise<void> {
   const awaitCover = opts?.awaitCover !== false;
+  const forceRefresh = opts?.forceRefresh !== false;
   const state = musicCacheStore.getState();
   if (playlistId in state.cachedItems) return;
   if (state.downloadQueue.some((q) => q.itemId === playlistId)) return;
 
   await ensureCoverArtAuth();
-  const playlist = await fetchPlaylistDetail(playlistId, { force: true });
+  const playlist = await fetchPlaylistDetail(playlistId, { force: forceRefresh });
   if (!playlist?.entry?.length) return;
 
   // Re-check after the awaits (see enqueueAlbumDownload) — avoid a duplicate row.
@@ -1333,8 +1335,8 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
       if (preScannedSongs.has(`${idx}`)) continue;
 
       try {
-        let result = await downloadSong(song);
-        if (!result) result = await downloadSong(song);
+        let result = await downloadSong(song, queueItem.queueId);
+        if (!result) result = await downloadSong(song, queueItem.queueId);
         if (result) {
           itemSongsForCommit.set(song.id, result);
           // Membership comes from the loop's source `song`, not from `result` —
@@ -1425,7 +1427,10 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
  * Retry-once (for the transient "null from getDownloadStreamUrl") happens
  * in the caller.
  */
-async function downloadSong(track: Child): Promise<CachedSongMeta | null> {
+async function downloadSong(
+  track: Child,
+  queueId: string,
+): Promise<CachedSongMeta | null> {
   const existing = musicCacheStore.getState().cachedSongs[track.id];
   if (existing) return existing;
 
@@ -1446,7 +1451,7 @@ async function downloadSong(track: Child): Promise<CachedSongMeta | null> {
   try {
     beginDownload(track.id);
     const tmpDest = new File(albumDir, tmpName);
-    await downloadFileAsyncWithProgress(url, tmpDest.uri, track.id);
+    await downloadFileAsyncWithProgress(url, tmpDest.uri, track.id, queueId);
 
     const dest = new File(albumDir, fileName);
     if (dest.exists) {

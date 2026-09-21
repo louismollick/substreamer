@@ -13,5 +13,14 @@ try {
   console.error('[index] playerBootstrap failed:', e);
 }
 
+// Register the iOS queue observer before the UI mounts. It only initializes the
+// native downloader lazily when a queue item actually starts downloading.
+try {
+  require('./src/services/iosBackgroundDownloadScheduler');
+} catch (e) {
+  // eslint-disable-next-line no-console
+  console.error('[index] iosBackgroundDownloadScheduler failed:', e);
+}
+
 // Register the expo-router root component. MUST run even if bootstrap threw.
 require('expo-router/entry');
