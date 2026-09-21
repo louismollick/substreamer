@@ -3,10 +3,10 @@
  * playlist for offline download, reusing the standard download queue (which
  * already handles concurrency, dedup, status, storage limits, retries, resume).
  *
- * Light by design: refresh the album/playlist lists, then loop-enqueue. Each
- * `enqueueAlbumDownload` fetches the album's song list and dedups, so per-album
- * metadata freshens inline and already-cached albums are skipped with no
- * transfer. Playlists go last — their songs are usually already on disk from the
+ * Light by design: refresh the album/playlist lists, then loop-enqueue. Bulk
+ * queueing uses the normalized library details already on disk so the whole
+ * queue can be handed to iOS quickly; a missing local detail still falls back
+ * to the server. Playlists go last — their songs are usually already on disk from the
  * albums, so they complete quickly. Re-running is safe (idempotent).
  */
 
@@ -56,9 +56,10 @@ export async function enqueueFullLibraryDownload(): Promise<void> {
     total = albumIds.length + playlistIds.length;
     fullLibraryDownloadStore.getState().setTotals(albumIds.length, playlistIds.length);
 
-    // Phase 2 — enqueue. Sequential awaits keep a single album-detail fetch in
-    // flight at a time (avoids hundreds of concurrent getAlbum calls) and yield
-    // to keep the UI responsive. The queue starts draining after the first item.
+    // Phase 2 — enqueue. Prefer the normalized details already synced to disk so
+    // queueing can outrun iOS suspension and hand the native background session
+    // as much of the library as possible. Missing local details still fall back
+    // to one server request at a time. The queue starts draining after the first item.
     // A single failed item is tolerated and counted; we report the tally at the
     // end so a partial outage doesn't silently drop part of the library. A CANCEL
     // returns past that report deliberately: the user asked it to stop, and the
@@ -70,14 +71,20 @@ export async function enqueueFullLibraryDownload(): Promise<void> {
     // purge-protected, so the offline copy still completes.
     for (const albumId of albumIds) {
       if (!fullLibraryDownloadStore.getState().active) return; // cancelled
-      await enqueueAlbumDownload(albumId, { awaitCover: false }).catch(() => { failed += 1; });
+      await enqueueAlbumDownload(albumId, {
+        awaitCover: false,
+        forceRefresh: false,
+      }).catch(() => { failed += 1; });
       fullLibraryDownloadStore.getState().incAlbum();
     }
 
     // Playlists last — their songs are mostly already cached from the albums.
     for (const playlistId of playlistIds) {
       if (!fullLibraryDownloadStore.getState().active) return; // cancelled
-      await enqueuePlaylistDownload(playlistId, { awaitCover: false }).catch(() => { failed += 1; });
+      await enqueuePlaylistDownload(playlistId, {
+        awaitCover: false,
+        forceRefresh: false,
+      }).catch(() => { failed += 1; });
       fullLibraryDownloadStore.getState().incPlaylist();
     }
 
