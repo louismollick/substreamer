@@ -15,7 +15,7 @@ import { readDownloadQueueSongsAsync } from '../store/persistence/musicCacheTabl
 import { ensureCoverArtAuth, getDownloadStreamUrl } from './subsonicService';
 
 const queueOperations = new Map<string, Promise<void>>();
-const pendingPrimeOperations = new Set<Promise<void>>();
+const activePrimeOperations = new Set<Promise<void>>();
 let primingPaused = false;
 
 function isPrimeable(item: DownloadQueueItem | undefined): boolean {
@@ -31,8 +31,8 @@ async function stopQueueAfterPendingPrimes(
   queueId: string,
   preserveCompleted = false,
 ): Promise<void> {
-  const pendingPrimes = Array.from(pendingPrimeOperations);
-  await Promise.allSettled(pendingPrimes);
+  const activePrimes = Array.from(activePrimeOperations);
+  await Promise.allSettled(activePrimes);
   await stopBackgroundDownloadsForQueue(queueId, preserveCompleted);
 }
 
@@ -54,10 +54,14 @@ function scheduleQueueOperation(queueId: string, operation: () => Promise<void>)
 }
 
 function schedulePrime(item: DownloadQueueItem): void {
-  const operation = scheduleQueueOperation(item.queueId, () => primeQueueItem(item));
-  pendingPrimeOperations.add(operation);
-  void operation.finally(() => {
-    pendingPrimeOperations.delete(operation);
+  scheduleQueueOperation(item.queueId, async () => {
+    const operation = primeQueueItem(item);
+    activePrimeOperations.add(operation);
+    try {
+      await operation;
+    } finally {
+      activePrimeOperations.delete(operation);
+    }
   });
 }
 
