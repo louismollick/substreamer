@@ -3684,6 +3684,25 @@ describe('global transfer pool', () => {
     await waitForQueueIdle();
   });
 
+  it('leaves an item queued, not failed, when the storage limit pauses it mid-run', async () => {
+    musicCacheStore.setState({ maxConcurrentDownloads: 1 } as any);
+    const gate = gatedDownloads();
+    mockFetchAlbum.mockResolvedValue({
+      id: 'full-a',
+      name: 'A',
+      song: [1, 2].map((n) => makeChild(`full-${n}`, { albumId: 'full-a' })),
+    });
+    await enqueueAlbumDownload('full-a');
+    await settle();
+    mockCheckStorageLimit.mockReturnValue(true);
+    gate.pending.shift()!.release();
+    await settle();
+    await waitForQueueIdle();
+    const item = musicCacheStore.getState().downloadQueue.find((q: any) => q.itemId === 'full-a');
+    expect(item?.status).toBe('queued');
+    expect(item?.error).toBeUndefined();
+  });
+
   it('keeps finished songs as a partial album when the album download is cancelled', async () => {
     musicCacheStore.setState({ maxConcurrentDownloads: 1 } as any);
     const gate = gatedDownloads();

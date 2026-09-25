@@ -1489,6 +1489,9 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
   if (!finalState) {
     return; // queue item was cancelled or finalised elsewhere
   }
+  // Handed back to the queue mid-run (storage limit, offline): the next claim
+  // resumes it, and pre-scans what already landed.
+  if (finalState.status !== 'downloading') return;
 
   const uniqueSongIds = new Set(itemEdges.map((e) => e.songId));
 
