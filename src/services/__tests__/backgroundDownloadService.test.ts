@@ -103,6 +103,12 @@ describe('beginBackgroundDownloads', () => {
     downloadResumePromptStore.setState({ dismissed: true });
     await beginBackgroundDownloads();
     expect(downloadResumePromptStore.getState().dismissed).toBe(true);
+    // A refusal (e.g. Background App Refresh off) stops the offer until one is accepted.
+    expect(canResumeInBackground()).toBe(false);
+    mockNative.beginResult = true;
+    await beginBackgroundDownloads();
+    endBackgroundDownloads(false);
+    expect(canResumeInBackground()).toBe(true);
   });
 
   it('reports progress as songs finish and ends when the queue drains', async () => {

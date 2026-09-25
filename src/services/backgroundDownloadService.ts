@@ -39,6 +39,9 @@ export function remainingQueuedSongs(
 
 let unsubscribeProgress: (() => void) | null = null;
 let heartbeat: ReturnType<typeof setInterval> | null = null;
+/** The system refused the last request; cleared by the next accepted one. */
+let beginRefused = false;
+
 /** Songs transferred since the running task began. */
 let songsDone = 0;
 
@@ -110,7 +113,13 @@ export async function beginBackgroundDownloads(): Promise<void> {
     total,
   );
   logDownloadEvent('task.begin', { ok, wasActive, total });
-  if (!ok) return;
+  if (!ok) {
+    // Refusals such as Background App Refresh being off persist; stop offering
+    // a Resume that cannot work until the next launch.
+    beginRefused = true;
+    return;
+  }
+  beginRefused = false;
   downloadResumePromptStore.getState().clearDismissed();
   startTracking();
 }
@@ -143,6 +152,7 @@ export function onBackgroundDownloadsExpired(fn: () => void): { remove: () => vo
 export function canResumeInBackground(): boolean {
   if (!isContinuedProcessingSupported()) return false;
   if (isContinuedProcessingActive()) return false;
+  if (beginRefused) return false;
   if (offlineModeStore.getState().offlineMode) return false;
   if (storageLimitStore.getState().isStorageFull) return false;
   return remainingQueuedSongs() > 0;

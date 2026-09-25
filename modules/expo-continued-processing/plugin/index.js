@@ -1,6 +1,7 @@
 const { withInfoPlist } = require('expo/config-plugins');
 
-const IDENTIFIER = '$(PRODUCT_BUNDLE_IDENTIFIER).downloads';
+// Wildcard: each task submits `<bundle id>.downloads.<uuid>`.
+const IDENTIFIER = '$(PRODUCT_BUNDLE_IDENTIFIER).downloads.*';
 
 /**
  * Permits the continued-processing identifier and, when

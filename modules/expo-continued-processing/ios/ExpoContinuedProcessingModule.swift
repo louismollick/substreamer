@@ -54,15 +54,21 @@ private final class TaskHolder {
   static let shared = TaskHolder()
 
   private let lock = NSLock()
-  private var registered = false
   private var task: BGContinuedProcessingTask?
+  /// The identifier of the request submitted last; its launch handler is the
+  /// only one allowed to attach.
+  private var submittedIdentifier: String?
   private var pendingSubmit = false
   private var onExpired: ((String) -> Void)?
   private var title = ""
   private var total: Int64 = 0
 
-  private var identifier: String {
-    return (Bundle.main.bundleIdentifier ?? "substreamer") + ".downloads"
+  /// Each task gets its own identifier under the `<bundle id>.downloads.*`
+  /// wildcard in BGTaskSchedulerPermittedIdentifiers, as Apple asks for a name
+  /// unique to the job. Every identifier is registered exactly once: the system
+  /// kills the app on a second registration of the same identifier.
+  private func newIdentifier() -> String {
+    return (Bundle.main.bundleIdentifier ?? "substreamer") + ".downloads." + UUID().uuidString
   }
 
   var isActive: Bool {
@@ -87,24 +93,26 @@ private final class TaskHolder {
     }
     self.title = title
     self.total = total
-    let needsRegister = !registered
-    registered = true
+    let identifier = newIdentifier()
+    submittedIdentifier = identifier
     pendingSubmit = true
     lock.unlock()
 
-    if needsRegister {
-      let ok = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil) { [weak self] task in
-        guard let task = task as? BGContinuedProcessingTask else {
-          task.setTaskCompleted(success: false)
-          return
-        }
-        self?.started(task)
+    let ok = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil) { [weak self] task in
+      guard let task = task as? BGContinuedProcessingTask else {
+        task.setTaskCompleted(success: false)
+        return
       }
-      if !ok {
-        DiagnosticsLog.append(["src": "native", "event": "task.registerFailed"])
-        lock.lock(); pendingSubmit = false; lock.unlock()
-        return false
+      guard let self = self else {
+        task.setTaskCompleted(success: false)
+        return
       }
+      self.started(task)
+    }
+    if !ok {
+      DiagnosticsLog.append(["src": "native", "event": "task.registerFailed"])
+      lock.lock(); pendingSubmit = false; lock.unlock()
+      return false
     }
 
     let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: title, subtitle: subtitle)
@@ -114,7 +122,10 @@ private final class TaskHolder {
       DiagnosticsLog.append(["src": "native", "event": "task.submitted", "total": total])
       return true
     } catch {
-      DiagnosticsLog.append(["src": "native", "event": "task.submitFailed", "error": "\(error)"])
+      // BGTaskScheduler.Error: .unavailable (Background App Refresh off),
+      // .immediateRunIneligible (.fail strategy, no room now), .notPermitted.
+      let code = (error as NSError).code
+      DiagnosticsLog.append(["src": "native", "event": "task.submitFailed", "code": code, "error": "\(error)"])
       lock.lock(); pendingSubmit = false; lock.unlock()
       return false
     }
@@ -122,8 +133,9 @@ private final class TaskHolder {
 
   private func started(_ task: BGContinuedProcessingTask) {
     lock.lock()
-    // end() ran between submit and launch: nothing wants this task any more.
-    guard pendingSubmit else {
+    // end() ran between submit and launch, or a newer request superseded this
+    // one: nothing wants this task any more.
+    guard pendingSubmit, task.identifier == submittedIdentifier else {
       lock.unlock()
       task.setTaskCompleted(success: true)
       return

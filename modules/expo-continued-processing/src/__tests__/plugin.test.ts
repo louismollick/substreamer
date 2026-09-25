@@ -19,7 +19,7 @@ describe('expo-continued-processing plugin', () => {
     withContinuedProcessing(cfg);
     expect(cfg.modResults.BGTaskSchedulerPermittedIdentifiers).toEqual([
       'other',
-      '$(PRODUCT_BUNDLE_IDENTIFIER).downloads',
+      '$(PRODUCT_BUNDLE_IDENTIFIER).downloads.*',
     ]);
     expect(cfg.modResults.SubstreamerDownloadDiagnostics).toBeUndefined();
   });
