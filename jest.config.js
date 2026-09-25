@@ -71,6 +71,7 @@ module.exports = {
   collectCoverageFrom: [
     'modules/expo-async-fs/src/index.ts',
     'modules/expo-backup-exclusions/src/index.ts',
+    'modules/expo-continued-processing/src/index.ts',
     'modules/expo-gzip/src/index.ts',
     'modules/expo-move-to-back/src/index.ts',
     'modules/expo-ssl-trust/src/ExpoSslTrust.ts',
