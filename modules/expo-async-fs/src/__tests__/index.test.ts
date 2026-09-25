@@ -6,6 +6,9 @@ import {
   existsAsync,
   downloadFileAsyncWithProgress,
   downloadAudioFileAsync,
+  listDirectoryWithSizesAsync,
+  deleteFileAsync,
+  deleteDirectoryAsync,
   cancelDownloadAsync,
   addDownloadProgressListener,
 } from '../index';
@@ -90,6 +93,20 @@ describe('existsAsync', () => {
   it('resolves false when the path is missing', async () => {
     mockModule.statAsync.mockResolvedValue({ exists: false, size: 0, isDirectory: false });
     await expect(existsAsync('file:///gone')).resolves.toBe(false);
+  });
+});
+
+describe('listDirectoryWithSizesAsync / deleteFileAsync / deleteDirectoryAsync', () => {
+  it('forward to native', async () => {
+    const entries = [{ name: 'a', size: 1, isDirectory: false }];
+    mockModule.listDirectoryWithSizesAsync.mockResolvedValue(entries);
+    mockModule.deleteFileAsync.mockResolvedValue(true);
+    mockModule.deleteDirectoryAsync.mockResolvedValue(true);
+    await expect(listDirectoryWithSizesAsync('file:///d')).resolves.toEqual(entries);
+    await expect(deleteFileAsync('file:///d/a')).resolves.toBe(true);
+    await expect(deleteDirectoryAsync('file:///d')).resolves.toBe(true);
+    expect(mockModule.deleteFileAsync).toHaveBeenCalledWith('file:///d/a');
+    expect(mockModule.deleteDirectoryAsync).toHaveBeenCalledWith('file:///d');
   });
 });
 
