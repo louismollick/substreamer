@@ -29,6 +29,7 @@ import { closeOpenRow, SwipeableRow, type SwipeAction } from '../components/Swip
 import { useAppActive } from '../hooks/useAppActive';
 import { useTheme } from '../hooks/useTheme';
 import { useThemedAlert } from '../hooks/useThemedAlert';
+import { beginBackgroundDownloads, canResumeInBackground } from '../services/backgroundDownloadService';
 import { getDownloadSpeed, getActiveDownloadCount } from '../services/downloadSpeedTracker';
 import { cancelDownload, clearDownloadQueue, forceRecoverDownloadsAsync, retryDownload } from '../services/musicCacheService';
 import {
@@ -457,6 +458,12 @@ export function DownloadQueueScreen() {
           ? 'unreachable'
           : null;
 
+  // Re-evaluated on every queue change; the task's own state is not observable.
+  const showResume = downloadQueue.length > 0 && canResumeInBackground();
+  const handleResumeInBackground = useCallback(() => {
+    void beginBackgroundDownloads();
+  }, []);
+
   const listHeader = useMemo(
     () =>
       downloadQueue.length > 0 ? (
@@ -475,10 +482,25 @@ export function DownloadQueueScreen() {
               </Text>
             </View>
           )}
+          {showResume && (
+            <Pressable
+              accessibilityRole="button"
+              onPress={handleResumeInBackground}
+              style={({ pressed }) => [
+                styles.pausedNotice,
+                { backgroundColor: colors.card, opacity: pressed ? 0.7 : 1 },
+              ]}
+            >
+              <Ionicons name="play-circle-outline" size={18} color={colors.primary} />
+              <Text style={[styles.pausedText, { color: colors.primary }]}>
+                {t('resumeDownloadsInBackground')}
+              </Text>
+            </Pressable>
+          )}
           <DownloadStatsCard colors={colors} queuedCount={queuedCount} />
         </>
       ) : null,
-    [downloadQueue.length, colors, queuedCount, pausedReason, t],
+    [downloadQueue.length, colors, queuedCount, pausedReason, showResume, handleResumeInBackground, t],
   );
 
   const contentStyle = useMemo(

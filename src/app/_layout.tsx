@@ -43,11 +43,13 @@ import { MoreOptionsSheet } from '../components/MoreOptionsSheet';
 import { RoutePickerSheet } from '../components/RoutePicker';
 import { OnboardingGuide } from '../components/OnboardingGuide';
 import { BackgroundPlaybackPromptModal } from '../components/BackgroundPlaybackPromptModal';
+import { DownloadResumePromptModal } from '../components/DownloadResumePromptModal';
 import { SetRatingSheet } from '../components/SetRatingSheet';
 import { SleepTimerSheet } from '../components/SleepTimerSheet';
 import { PlaybackToast } from '../components/PlaybackToast';
 import { ProcessingOverlay } from '../components/ProcessingOverlay';
 import { useDownloadBackgroundNotification } from '../hooks/useDownloadBackgroundNotification';
+import { useDownloadResumePrompt } from '../hooks/useDownloadResumePrompt';
 import { useDownloadKeepAwake } from '../hooks/useDownloadKeepAwake';
 import { useLayoutMode } from '../hooks/useLayoutMode';
 import { useTheme } from '../hooks/useTheme';
@@ -377,6 +379,7 @@ export default function RootLayout() {
 
   useDownloadKeepAwake();
   useDownloadBackgroundNotification();
+  useDownloadResumePrompt();
   useLibrarySyncKeepAwake();
   useLibrarySyncBackgroundNotification();
 
@@ -890,6 +893,10 @@ export default function RootLayout() {
       {/* One-time Fire-OS background-playback guidance, shown over the first
           playback (driven by backgroundPlaybackPromptStore). */}
       <BackgroundPlaybackPromptModal />
+
+      {/* "Resume downloads?" when downloads are pending and no background task
+          runs them (driven by downloadResumePromptStore). */}
+      <DownloadResumePromptModal />
 
       {/* Animated splash renders as an overlay on top of the Stack so the
           navigator is always mounted and ready for auth-based navigation. */}
