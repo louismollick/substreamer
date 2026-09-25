@@ -202,7 +202,7 @@ class ExpoAsyncFsModule : Module() {
         val request = Request.Builder().url(url).build()
         val call = client.newCall(request)
         activeCalls[downloadId] = call
-        val response = try { call.execute() } finally { activeCalls.remove(downloadId) }
+        val response = call.execute()
 
         if (!response.isSuccessful) {
           val code = response.code
@@ -242,6 +242,8 @@ class ExpoAsyncFsModule : Module() {
         ))
       } catch (e: Exception) {
         promise.reject("ERR_DOWNLOAD", e.message ?: "Download failed", e)
+      } finally {
+        activeCalls.remove(downloadId)
       }
     }
   }
