@@ -6,5 +6,7 @@ export default {
   deleteFileAsync: jest.fn().mockResolvedValue(false),
   deleteDirectoryAsync: jest.fn().mockResolvedValue(false),
   downloadFileAsyncWithProgress: jest.fn().mockResolvedValue({ uri: '', bytes: 0 }),
+  downloadAudioFileAsync: jest.fn().mockResolvedValue({ uri: '', bytes: 0, status: 200 }),
+  cancelDownloadAsync: jest.fn().mockResolvedValue(false),
   addListener: jest.fn().mockReturnValue({ remove: jest.fn() }),
 };

@@ -5,6 +5,8 @@ import {
   statAsync,
   existsAsync,
   downloadFileAsyncWithProgress,
+  downloadAudioFileAsync,
+  cancelDownloadAsync,
   addDownloadProgressListener,
 } from '../index';
 
@@ -88,6 +90,23 @@ describe('existsAsync', () => {
   it('resolves false when the path is missing', async () => {
     mockModule.statAsync.mockResolvedValue({ exists: false, size: 0, isDirectory: false });
     await expect(existsAsync('file:///gone')).resolves.toBe(false);
+  });
+});
+
+describe('downloadAudioFileAsync', () => {
+  it('passes arguments through and returns the rejection verbatim', async () => {
+    const rejected = { uri: 'file:///d.mp3', bytes: 0, status: 429, rejected: 'http' as const, retryAfterSeconds: 5 };
+    mockModule.downloadAudioFileAsync.mockResolvedValue(rejected);
+    await expect(downloadAudioFileAsync('https://s/x', 'file:///d.mp3', 'dl-1')).resolves.toEqual(rejected);
+    expect(mockModule.downloadAudioFileAsync).toHaveBeenCalledWith('https://s/x', 'file:///d.mp3', 'dl-1');
+  });
+});
+
+describe('cancelDownloadAsync', () => {
+  it('forwards the download id', async () => {
+    mockModule.cancelDownloadAsync.mockResolvedValue(true);
+    await expect(cancelDownloadAsync('dl-1')).resolves.toBe(true);
+    expect(mockModule.cancelDownloadAsync).toHaveBeenCalledWith('dl-1');
   });
 });
 

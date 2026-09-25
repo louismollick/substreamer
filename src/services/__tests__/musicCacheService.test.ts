@@ -5,7 +5,7 @@
 
 const mockListDirectoryAsync = jest.fn();
 const mockGetDirectorySizeAsync = jest.fn();
-const mockDownloadFileAsyncWithProgress = jest.fn();
+const mockDownloadAudioFileAsync = jest.fn();
 
 // Filesystem mock state
 let mockFileExists = false;
@@ -76,7 +76,7 @@ jest.mock('expo-file-system', () => {
 jest.mock('expo-async-fs', () => ({
   listDirectoryAsync: (...args: any[]) => mockListDirectoryAsync(...args),
   getDirectorySizeAsync: (...args: any[]) => mockGetDirectorySizeAsync(...args),
-  downloadFileAsyncWithProgress: (...args: any[]) => mockDownloadFileAsyncWithProgress(...args),
+  downloadAudioFileAsync: (...args: any[]) => mockDownloadAudioFileAsync(...args),
   deleteFileAsync: jest.fn(async (uri: string) => { fileDeletesAsync.push(uri); return true; }),
   deleteDirectoryAsync: jest.fn(async (uri: string) => { dirDeletesAsync.push(uri); return true; }),
 }));
@@ -486,7 +486,7 @@ function seedSong(song: any) {
 beforeEach(() => {
   mockListDirectoryAsync.mockReset();
   mockGetDirectorySizeAsync.mockReset();
-  mockDownloadFileAsyncWithProgress.mockReset();
+  mockDownloadAudioFileAsync.mockReset();
   mockFetchAlbum.mockReset();
   mockFetchPlaylist.mockReset();
   mockAlbumDetailAlbums.value = {};
@@ -2086,7 +2086,7 @@ describe('offline mode pauses the download queue', () => {
     offlineModeStore.setState({ offlineMode: true } as any);
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockFetchAlbum.mockResolvedValue({
       id: 'album-off1',
       name: 'Offline',
@@ -2099,7 +2099,7 @@ describe('offline mode pauses the download queue', () => {
     // Queued, not downloading, and no bytes moved — the user told us not to talk to
     // the server, so the queue waits rather than burning retries.
     expect(musicCacheStore.getState().downloadQueue[0].status).toBe('queued');
-    expect(mockDownloadFileAsyncWithProgress).not.toHaveBeenCalled();
+    expect(mockDownloadAudioFileAsync).not.toHaveBeenCalled();
     expect(musicCacheStore.getState().cachedItems['album-off1']).toBeUndefined();
   });
 
@@ -2108,7 +2108,7 @@ describe('offline mode pauses the download queue', () => {
     offlineModeStore.setState({ offlineMode: true } as any);
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockFetchAlbum.mockResolvedValue({
       id: 'album-off2',
       name: 'Resumes',
@@ -2153,7 +2153,7 @@ describe('download pipeline', () => {
   it('downloads and marks item complete', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockFetchAlbum.mockResolvedValue({
       id: 'album-dl1',
       name: 'Test',
@@ -2174,7 +2174,7 @@ describe('download pipeline', () => {
   it('resolves file extensions from suffix, contentType, fallback', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockFetchAlbum.mockResolvedValue({
       id: 'album-ext',
       name: 'X',
@@ -2200,7 +2200,7 @@ describe('download pipeline', () => {
   it('uses downloadFormat extension when not raw', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     playbackSettingsStore.setState({ downloadFormat: 'mp3', downloadMaxBitRate: 192 } as any);
 
     mockFetchAlbum.mockResolvedValue({
@@ -2215,7 +2215,7 @@ describe('download pipeline', () => {
   });
 
   it('errors when getDownloadStreamUrl returns null', async () => {
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     (getDownloadStreamUrl as jest.Mock).mockReturnValue(null);
     mockFetchAlbum.mockResolvedValue({
       id: 'album-nu',
@@ -2230,7 +2230,7 @@ describe('download pipeline', () => {
   });
 
   it('handles download failure', async () => {
-    mockDownloadFileAsyncWithProgress.mockRejectedValue(new Error('net'));
+    mockDownloadAudioFileAsync.mockRejectedValue(new Error('net'));
     mockFetchAlbum.mockResolvedValue({
       id: 'album-fail',
       name: 'X',
@@ -2242,10 +2242,66 @@ describe('download pipeline', () => {
     if (item) expect(item.status).toBe('error');
   });
 
+  it('does not register a song when the server returns a non-audio body', async () => {
+    mockFileExists = true;
+    mockFileSize = 70;
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200, rejected: 'notAudio' });
+    mockFetchAlbum.mockResolvedValue({
+      id: 'album-xml',
+      name: 'X',
+      song: [makeChild('xml-t1', { albumId: 'album-xml' })],
+    });
+    await enqueueAlbumDownload('album-xml');
+    await waitForQueueIdle();
+    expect(musicCacheStore.getState().cachedSongs['xml-t1']).toBeUndefined();
+    expect(musicCacheStore.getState().cachedItems['album-xml']).toBeUndefined();
+  });
+
+  it('waits out Retry-After on 429 and then registers the song', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    try {
+      mockFileExists = true;
+      mockFileSize = 5000;
+      mockDownloadAudioFileAsync
+        .mockResolvedValueOnce({ status: 429, rejected: 'http', retryAfterSeconds: 5 })
+        .mockResolvedValue({ status: 200 });
+      mockFetchAlbum.mockResolvedValue({
+        id: 'album-429',
+        name: 'X',
+        song: [makeChild('r-t1', { albumId: 'album-429' })],
+      });
+      await enqueueAlbumDownload('album-429');
+      for (let i = 0; i < 20 && mockDownloadAudioFileAsync.mock.calls.length < 2; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await jest.advanceTimersByTimeAsync(1000);
+      }
+      jest.useRealTimers();
+      await waitForQueueIdle();
+      expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(2);
+      expect(musicCacheStore.getState().cachedSongs['r-t1']).toBeDefined();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not retry a rejection without Retry-After', async () => {
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 500, rejected: 'http' });
+    mockFetchAlbum.mockResolvedValue({
+      id: 'album-500',
+      name: 'X',
+      song: [makeChild('e-t1', { albumId: 'album-500' })],
+    });
+    await enqueueAlbumDownload('album-500');
+    await waitForQueueIdle();
+    // One call per downloadSong attempt; the caller retries downloadSong once.
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(2);
+    expect(musicCacheStore.getState().cachedSongs['e-t1']).toBeUndefined();
+  });
+
   it('deduplicates song within a playlist item', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     musicCacheStore.setState({ maxConcurrentDownloads: 1 } as any);
 
     const t = makeChild('dup-t1', { albumId: 'album-dup' });
@@ -2261,13 +2317,13 @@ describe('download pipeline', () => {
     expect(cached).toBeDefined();
     expect(cached.songIds.length).toBe(3); // 3 edges even though dup-t1 is the same song
     // Only 2 unique transfers
-    expect(mockDownloadFileAsyncWithProgress).toHaveBeenCalledTimes(2);
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(2);
   });
 
   it('cross-item dedup: playlist song already in downloaded album skips transfer', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
 
     // Seed album A as already-downloaded with song s1.
     seedSong(makeCachedSong('s1', { albumId: 'album-A' }));
@@ -2282,7 +2338,7 @@ describe('download pipeline', () => {
     await waitForQueueIdle();
 
     // Only s2 should have been transferred (s1 was deduped).
-    expect(mockDownloadFileAsyncWithProgress).toHaveBeenCalledTimes(1);
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(1);
     const pl = musicCacheStore.getState().cachedItems['pl-x'];
     expect(pl).toBeDefined();
     expect(pl.songIds.sort()).toEqual(['s1', 's2']);
@@ -2291,7 +2347,7 @@ describe('download pipeline', () => {
   it('partial-album bookkeeping: playlist download creates partial album row for new song', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     // Preload albumDetailStore entry so expectedSongCount is 10.
     mockAlbumDetailAlbums.value = {
       'album-NEW': { album: { song: new Array(10).fill(null).map((_, i) => ({ id: `nn-${i}` })) } },
@@ -2316,7 +2372,7 @@ describe('download pipeline', () => {
   it('partial-album: subsequent song appended to existing partial row', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
 
     // Seed partial album with one song.
     seedSong(makeCachedSong('p1', { albumId: 'album-Z' }));
@@ -2337,7 +2393,7 @@ describe('download pipeline', () => {
   it('partial-album: cached_songs row captures the full Child in promoted columns', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
 
     const richChild = makeChild('rich-1', {
       albumId: 'album-rich',
@@ -2380,7 +2436,7 @@ describe('download pipeline', () => {
   it('partial-album: row carries AlbumID3 metadata when album detail is cached', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockAlbumDetailAlbums.value = {
       'album-env': {
         album: {
@@ -2417,7 +2473,7 @@ describe('download pipeline', () => {
   it('partial-album: row upgraded with metadata when an earlier partial existed without any', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
 
     // Seed an envelope-less partial row — simulates pre-Migration-19 state.
     seedSong(makeCachedSong('up-a', { albumId: 'album-up' }));
@@ -2456,7 +2512,7 @@ describe('download pipeline', () => {
   it('partial-album: no-op when triggering item IS the album', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
 
     mockFetchAlbum.mockResolvedValue({
       id: 'album-self',
@@ -2473,7 +2529,7 @@ describe('download pipeline', () => {
   it('stops processing at storage limit', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockCheckStorageLimit.mockReturnValue(true);
 
     mockFetchAlbum.mockResolvedValue({
@@ -2484,14 +2540,14 @@ describe('download pipeline', () => {
     await enqueueAlbumDownload('album-sl');
     await waitForQueueIdle();
 
-    expect(mockDownloadFileAsyncWithProgress).not.toHaveBeenCalled();
+    expect(mockDownloadAudioFileAsync).not.toHaveBeenCalled();
   });
 
   it('skips already-pool-cached songs during resume', async () => {
     seedSong(makeCachedSong('res-t1', { albumId: 'album-res' }));
     mockFileExists = true;
     mockFileSize = 3000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
 
     mockFetchAlbum.mockResolvedValue({
       id: 'album-res',
@@ -2502,7 +2558,7 @@ describe('download pipeline', () => {
     await waitForQueueIdle();
 
     // t1 was in pool, only t2 downloads.
-    expect(mockDownloadFileAsyncWithProgress).toHaveBeenCalledTimes(1);
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(1);
     const item = musicCacheStore.getState().cachedItems['album-res'];
     expect(item.songIds.sort()).toEqual(['res-t1', 'res-t2']);
   });
@@ -2510,7 +2566,7 @@ describe('download pipeline', () => {
   it('processes multiple queued items sequentially', async () => {
     mockFileExists = true;
     mockFileSize = 2000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockFetchAlbum.mockImplementation(async (id: string) => ({
       id, name: id, song: [makeChild(`${id}-t`, { albumId: id })],
     }));
@@ -2552,7 +2608,7 @@ describe('download pipeline', () => {
       calls++;
       return calls === 1 ? null : 'https://example.com/stream';
     });
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
 
     mockFetchAlbum.mockResolvedValue({
       id: 'album-retry', name: 'X',
@@ -2569,7 +2625,7 @@ describe('download pipeline', () => {
     mockFileSize = 5000;
     // First download succeeds, storage trips before the second.
     let downloadCalls = 0;
-    mockDownloadFileAsyncWithProgress.mockImplementation(async () => {
+    mockDownloadAudioFileAsync.mockImplementation(async () => {
       downloadCalls++;
       if (downloadCalls >= 1) mockCheckStorageLimit.mockReturnValue(true);
     });
@@ -2622,7 +2678,7 @@ describe('download queue payload durability', () => {
   beforeEach(() => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
   });
 
   afterEach(async () => {
@@ -2767,7 +2823,7 @@ describe('download error branches', () => {
   });
 
   it('cleans up .tmp on download failure', async () => {
-    mockDownloadFileAsyncWithProgress.mockRejectedValue(new Error('transport'));
+    mockDownloadAudioFileAsync.mockRejectedValue(new Error('transport'));
     mockFileExists = true; // tmp is present, enter delete branch
 
     mockFetchAlbum.mockResolvedValue({
@@ -2892,7 +2948,7 @@ describe('storageLimitStore subscription', () => {
   it('resumes queue when storage settings change', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockCheckStorageLimit.mockReturnValue(true);
 
     mockFetchAlbum.mockResolvedValue({
@@ -2912,7 +2968,7 @@ describe('storageLimitStore subscription', () => {
   it('resumes when isStorageFull flips false', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockCheckStorageLimit.mockReturnValue(true);
 
     mockFetchAlbum.mockResolvedValue({

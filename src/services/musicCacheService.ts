@@ -28,7 +28,7 @@ import i18n from '../i18n/i18n';
 import {
   listDirectoryAsync,
   getDirectorySizeAsync,
-  downloadFileAsyncWithProgress,
+  downloadAudioFileAsync,
   deleteDirectoryAsync,
   deleteFileAsync,
 } from 'expo-async-fs';
@@ -1446,7 +1446,10 @@ async function downloadSong(track: Child): Promise<CachedSongMeta | null> {
   try {
     beginDownload(track.id);
     const tmpDest = new File(albumDir, tmpName);
-    await downloadFileAsyncWithProgress(url, tmpDest.uri, track.id);
+    if (!(await transferAudio(url, tmpDest.uri, track.id))) {
+      clearDownload(track.id);
+      return null;
+    }
 
     const dest = new File(albumDir, fileName);
     if (dest.exists) {
@@ -1506,6 +1509,30 @@ async function downloadSong(track: Child): Promise<CachedSongMeta | null> {
       try { tmpFile.delete(); } catch { /* best-effort */ }
     }
     return null;
+  }
+}
+
+const MAX_RETRY_AFTER_ATTEMPTS = 3;
+const MAX_RETRY_AFTER_SECONDS = 30;
+
+/**
+ * Transfer one audio file to `dest`. A server asking us to back off (429/503
+ * with `Retry-After`, e.g. Navidrome's transcode limit) is retried after the
+ * requested delay; any other rejection — non-2xx or a Subsonic error body
+ * served as HTTP 200 — fails without leaving a file behind.
+ */
+async function transferAudio(url: string, dest: string, downloadId: string): Promise<boolean> {
+  for (let attempt = 1; ; attempt++) {
+    // eslint-disable-next-line no-await-in-loop
+    const result = await downloadAudioFileAsync(url, dest, downloadId);
+    if (!result.rejected) return true;
+    const retryable = result.rejected === 'http'
+      && (result.status === 429 || result.status === 503)
+      && result.retryAfterSeconds !== undefined;
+    if (!retryable || attempt >= MAX_RETRY_AFTER_ATTEMPTS) return false;
+    const delaySeconds = Math.min(result.retryAfterSeconds!, MAX_RETRY_AFTER_SECONDS);
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise<void>((resolve) => setTimeout(resolve, delaySeconds * 1000));
   }
 }
 
