@@ -29,6 +29,7 @@ import {
   listDirectoryAsync,
   getDirectorySizeAsync,
   downloadAudioFileAsync,
+  cancelDownloadAsync,
   deleteDirectoryAsync,
   deleteFileAsync,
 } from 'expo-async-fs';
@@ -56,6 +57,7 @@ import {
   readDownloadQueueSongRefsAsync,
   readDownloadQueueSongsAsync,
   readQueuedSongStatus,
+  removeDownloadQueueItemsThroughPosition,
 } from '../store/persistence/musicCacheTables';
 import { logImageCache } from './imageCacheLogger';
 import { processingOverlayStore } from '../store/processingOverlayStore';
@@ -1042,40 +1044,89 @@ function isPausedForOffline(): boolean {
   return offlineModeStore.getState().offlineMode;
 }
 
+/**
+ * Queue items downloading right now. Up to `maxConcurrentDownloads` run at
+ * once, and every transfer across all of them shares one pool of the same
+ * size — so a queue of one-song albums keeps every slot busy instead of
+ * downloading one album at a time.
+ */
+const activeQueueIds = new Set<string>();
+let claiming = false;
+
+let claimAgain = false;
+
 async function processQueue(): Promise<void> {
   if (isPausedForOffline()) return;
-  if (isProcessing) return;
+  if (claiming) {
+    claimAgain = true;
+    return;
+  }
+  claiming = true;
+  claimAgain = false;
   isProcessing = true;
-  const myId = ++processingId;
+  // Bumped only by forceRecoverDownloadsAsync: workers of an older generation
+  // stop at their next song boundary.
+  const myId = processingId;
 
   try {
-    while (true) {
-      if (myId !== processingId) return;
-      if (checkStorageLimit()) break;
+    while (myId === processingId && !checkStorageLimit()) {
+      if (activeQueueIds.size >= maxTransfers()) break;
 
       const { downloadQueue } = musicCacheStore.getState();
-      const next = downloadQueue.find((q) => q.status === 'queued');
+      const next = downloadQueue.find(
+        (q) => q.status === 'queued' && !activeQueueIds.has(q.queueId),
+      );
       if (!next) break;
 
       // An enqueue publishes the item to the mirror before its songs reach SQL, and
       // `downloadItem` reads the payload from there — so claim the item only once the
       // write it started has landed, or the read finds nothing to download.
       await whenQueuePayloadWritten(next.queueId);
-      if (myId !== processingId) return;
+      if (myId !== processingId) break;
       const claimed = musicCacheStore.getState().downloadQueue.find(
         (q) => q.queueId === next.queueId,
       );
-      if (claimed?.status !== 'queued') continue;
+      if (claimed?.status !== 'queued' || activeQueueIds.has(next.queueId)) continue;
 
       musicCacheStore.getState().updateQueueItem(next.queueId, { status: 'downloading' });
-      await downloadItem(next, myId);
+      activeQueueIds.add(next.queueId);
+      void downloadItem(next, myId)
+        .catch(() => { /* per-song failures are recorded on the queue item */ })
+        .finally(() => {
+          activeQueueIds.delete(next.queueId);
+          if (activeQueueIds.size === 0 && myId === processingId) isProcessing = false;
+          void processQueue();
+        });
     }
   } finally {
-    if (myId === processingId) {
-      isProcessing = false;
-    }
+    claiming = false;
+    if (activeQueueIds.size === 0 && myId === processingId) isProcessing = false;
   }
+  if (claimAgain) void processQueue();
 }
+
+function maxTransfers(): number {
+  return Math.max(1, musicCacheStore.getState().maxConcurrentDownloads);
+}
+
+let activeTransfers = 0;
+const transferWaiters: Array<() => void> = [];
+
+async function acquireTransferSlot(): Promise<void> {
+  while (activeTransfers >= maxTransfers()) {
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise<void>((resolve) => transferWaiters.push(resolve));
+  }
+  activeTransfers++;
+}
+
+function releaseTransferSlot(): void {
+  activeTransfers--;
+  transferWaiters.shift()?.();
+}
+
+/** Resolves when the in-flight transfer of the same song finishes. */
+const inFlightSongs = new Map<string, Promise<CachedSongMeta | null>>();
 
 function registerTrackToItem(songId: string, itemId: string): void {
   let bucket = trackToItems.get(songId);
@@ -1119,22 +1170,18 @@ async function buildCachedItemMetadata(
 }
 
 /**
- * Ensure a partial-album `cached_items` row + edge exist for songs
- * downloaded from a non-album item. No-op when the triggering item IS the
- * album itself.
+ * Ensure a partial-album `cached_items` row + edge exist for every downloaded
+ * song, including when the triggering item IS the album: the derived row keeps
+ * finished songs visible and held if the download is cancelled, and
+ * `markItemComplete` promotes it to the real album row when the album finishes.
  *
  * The authoritative track count is the album's song rows in the normalized model,
  * fetched if absent (we are online — we are downloading). A failed fetch leaves the
  * count unknown rather than blocking: the edge is still stitched in, and the next
  * refresh corrects the count.
  */
-async function ensurePartialAlbumEdge(
-  triggerItemId: string,
-  triggerItemType: DownloadQueueItem['type'],
-  song: Child,
-): Promise<void> {
+async function ensurePartialAlbumEdge(song: Child): Promise<void> {
   if (!song.albumId) return;
-  if (triggerItemType === 'album' && triggerItemId === song.albumId) return;
 
   const albumId = song.albumId;
   const db = getDb();
@@ -1345,7 +1392,7 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
           trackUriMap.set(song.id, resolveSongFile(result).uri);
 
           // Also ensure the partial-album edge (for non-album items).
-          await ensurePartialAlbumEdge(queueItem.itemId, queueItem.type, song);
+          await ensurePartialAlbumEdge(song);
 
           musicCacheStore.getState().addBytes(result.bytes);
           musicCacheStore.getState().addFiles(1);
@@ -1428,6 +1475,26 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
 async function downloadSong(track: Child): Promise<CachedSongMeta | null> {
   const existing = musicCacheStore.getState().cachedSongs[track.id];
   if (existing) return existing;
+  // The same song queued by two items (an album and a playlist) transfers once.
+  const pending = inFlightSongs.get(track.id);
+  if (pending) return pending;
+  const transfer = (async () => {
+    await acquireTransferSlot();
+    try {
+      return await transferSong(track);
+    } finally {
+      releaseTransferSlot();
+    }
+  })();
+  inFlightSongs.set(track.id, transfer);
+  try {
+    return await transfer;
+  } finally {
+    inFlightSongs.delete(track.id);
+  }
+}
+
+async function transferSong(track: Child): Promise<CachedSongMeta | null> {
 
   await ensureCoverArtAuth();
 
@@ -2085,6 +2152,14 @@ export async function cancelDownload(queueId: string): Promise<void> {
 
   musicCacheStore.getState().removeFromQueue(queueId);
 
+  // Stop this item's in-flight transfers. A song another queued item shares is
+  // retried by that item's worker.
+  for (const s of songs) {
+    if (inFlightSongs.has(s.id)) {
+      void cancelDownloadAsync(s.id).catch(() => { /* already finished */ });
+    }
+  }
+
   // Group cancelled song ids by album, then sweep each album's .tmp remnants
   // off the JS thread: one directory listing per album + async deletes, rather
   // than a sync exists/delete per song×extension (which was O(songs²) on the
@@ -2137,11 +2212,42 @@ export async function cancelDownload(queueId: string): Promise<void> {
  */
 export async function clearDownloadQueue(): Promise<void> {
   const queue = [...musicCacheStore.getState().downloadQueue];
+  if (queue.length === 0) {
+    resumeIfSpaceAvailable();
+    return;
+  }
+
+  // Only items being downloaded have transfers to stop and .tmp files to sweep;
+  // cancel those one by one. Everything else goes in one SQL delete.
   for (const item of queue) {
-    // Serial: each cancel reads its payload before dropping the row, and the resume
-    // below must not restart an item that is still being cancelled.
+    if (!activeQueueIds.has(item.queueId)) continue;
     // eslint-disable-next-line no-await-in-loop
     await cancelDownload(item.queueId);
+  }
+
+  // An enqueue publishes to the mirror before its SQL batch lands; wait so the
+  // bulk DELETE cannot run ahead of a parked insert that would then reappear.
+  await Promise.all(queue.map((item) => whenQueuePayloadWritten(item.queueId)));
+
+  // queue_position is sparse by design. Deleting through the snapshot maximum is
+  // one SQLite write; mirror the same boundary in memory so an item enqueued
+  // meanwhile can never be deleted from SQL while surviving only in the store.
+  const maxQueuePosition = queue.reduce(
+    (max, item) => Math.max(max, item.queuePosition),
+    queue[0].queuePosition,
+  );
+  if (await removeDownloadQueueItemsThroughPosition(maxQueuePosition)) {
+    musicCacheStore.setState((state) => ({
+      downloadQueue: state.downloadQueue.filter(
+        (item) => item.queuePosition > maxQueuePosition,
+      ),
+    }));
+    scheduleRecalculate();
+  } else {
+    for (const item of queue) {
+      // eslint-disable-next-line no-await-in-loop
+      await cancelDownload(item.queueId);
+    }
   }
   resumeIfSpaceAvailable();
 }
