@@ -20,9 +20,15 @@
  *   - Real-time download speed tracking via `downloadSpeedTracker`
  */
 
+import { AppState } from 'react-native';
 import { Directory, File, Paths } from 'expo-file-system';
 import { errMessage } from '../utils/errorMessage';
 import { onAppForeground } from '../utils/onAppForeground';
+import {
+  beginBackgroundDownloads,
+  endBackgroundDownloads,
+  onBackgroundDownloadsExpired,
+} from './backgroundDownloadService';
 
 import i18n from '../i18n/i18n';
 import {
@@ -143,6 +149,7 @@ let isProcessing = false;
 let processingId = 0;
 let offlineSubscription: (() => void) | null = null;
 let appStateSubscription: { remove: () => void } | null = null;
+let expirySubscription: { remove: () => void } | null = null;
 
 /**
  * Set to true after `populateTrackMapsAsync()` finishes. Module-scope
@@ -210,8 +217,15 @@ export function initMusicCache(): void {
 
     if (!appStateSubscription) {
       appStateSubscription = onAppForeground(() => {
+        if (pausedUntilForeground) {
+          pausedUntilForeground = false;
+          void processQueue();
+        }
         if (!isProcessing) recoverStalledDownloadsAsync();
       });
+    }
+    if (!expirySubscription) {
+      expirySubscription = onBackgroundDownloadsExpired(pauseUntilForeground);
     }
     if (!offlineSubscription) {
       // Same machinery as kill-mid-download recovery: bump the generation so live
@@ -245,6 +259,9 @@ export function initMusicCache(): void {
 export function teardownMusicCache(): void {
   appStateSubscription?.remove();
   appStateSubscription = null;
+  expirySubscription?.remove();
+  expirySubscription = null;
+  endBackgroundDownloads(false);
   offlineSubscription?.();
   offlineSubscription = null;
   cacheDir = null;
@@ -881,7 +898,7 @@ export async function enqueueAlbumDownload(
       missingSongs,
     );
 
-    processQueue();
+    startQueueFromUserAction();
     return;
   }
 
@@ -901,7 +918,7 @@ export async function enqueueAlbumDownload(
     album.song,
   );
 
-  processQueue();
+  startQueueFromUserAction();
 }
 
 /** Enqueue a playlist download. */
@@ -937,7 +954,7 @@ export async function enqueuePlaylistDownload(
     playlist.entry,
   );
 
-  processQueue();
+  startQueueFromUserAction();
 }
 
 /**
@@ -1031,7 +1048,7 @@ export async function enqueueSongDownload(song: Child): Promise<void> {
     [song],
   );
 
-  processQueue();
+  startQueueFromUserAction();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1054,9 +1071,36 @@ const activeQueueIds = new Set<string>();
 let claiming = false;
 
 let claimAgain = false;
+/** Set when the background task expired; the queue waits for the app to return. */
+let pausedUntilForeground = false;
+
+/** Start the queue for a download the user just asked for, and keep it
+ *  running in the background where the platform allows. */
+function startQueueFromUserAction(): void {
+  void processQueue();
+  void beginBackgroundDownloads();
+}
+
+/**
+ * The background task ended while downloads remain. Native has already
+ * cancelled the transfers; stop the workers without counting that as a
+ * failure, hand in-progress items back to 'queued', and wait for foreground.
+ */
+function pauseUntilForeground(): void {
+  const inForeground = AppState.currentState === 'active';
+  pausedUntilForeground = !inForeground;
+  processingId++;
+  isProcessing = false;
+  for (const item of musicCacheStore.getState().downloadQueue) {
+    if (item.status === 'downloading') {
+      musicCacheStore.getState().updateQueueItem(item.queueId, { status: 'queued' });
+    }
+  }
+  if (inForeground) void processQueue();
+}
 
 async function processQueue(): Promise<void> {
-  if (isPausedForOffline()) return;
+  if (isPausedForOffline() || pausedUntilForeground) return;
   if (claiming) {
     claimAgain = true;
     return;
@@ -1381,7 +1425,7 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
 
       try {
         let result = await downloadSong(song);
-        if (!result) result = await downloadSong(song);
+        if (!result && myId === processingId) result = await downloadSong(song);
         if (result) {
           itemSongsForCommit.set(song.id, result);
           // Membership comes from the loop's source `song`, not from `result` —
@@ -1413,6 +1457,8 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
     () => downloadNext(),
   );
   await Promise.all(workers);
+  // A newer generation (recovery, expiry) has handed this item back to the queue.
+  if (myId !== processingId) return;
 
   const finalState = musicCacheStore.getState().downloadQueue.find(
     (q) => q.queueId === queueItem.queueId,
@@ -1631,7 +1677,7 @@ export async function retryDownload(queueId: string): Promise<void> {
     musicCacheStore.getState().reorderQueue(fromIdx, lastNonErrorIdx);
   }
 
-  processQueue();
+  startQueueFromUserAction();
 }
 
 /** Re-download an entire cached item with current settings. */
@@ -2407,7 +2453,7 @@ export async function enqueueStarredSongsDownload(): Promise<void> {
     songs,
   );
 
-  processQueue();
+  startQueueFromUserAction();
 }
 
 /** Remove the starred-songs download and delete its cached files. */

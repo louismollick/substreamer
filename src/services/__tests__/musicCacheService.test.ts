@@ -83,9 +83,26 @@ jest.mock('expo-async-fs', () => ({
   deleteDirectoryAsync: jest.fn(async (uri: string) => { dirDeletesAsync.push(uri); return true; }),
 }));
 
+const mockAppStateListeners: Array<(state: string) => void> = [];
+const mockAppState = { currentState: 'background' };
 jest.mock('react-native', () => ({
   AppState: {
-    addEventListener: jest.fn(() => ({ remove: jest.fn() })),
+    get currentState() { return mockAppState.currentState; },
+    addEventListener: jest.fn((_e: string, fn: (state: string) => void) => {
+      mockAppStateListeners.push(fn);
+      return { remove: jest.fn() };
+    }),
+  },
+}));
+
+const mockBeginBackgroundDownloads = jest.fn(() => Promise.resolve());
+const mockExpiryHandlers: Array<() => void> = [];
+jest.mock('../backgroundDownloadService', () => ({
+  beginBackgroundDownloads: () => mockBeginBackgroundDownloads(),
+  endBackgroundDownloads: jest.fn(),
+  onBackgroundDownloadsExpired: (fn: () => void) => {
+    mockExpiryHandlers.push(fn);
+    return { remove: jest.fn() };
   },
 }));
 
@@ -3617,5 +3634,83 @@ describe('global transfer pool', () => {
     expect(partial?.derived).toBe(true);
     expect(partial?.songIds).toEqual(['cx-1']);
     expect(musicCacheStore.getState().cachedSongs['cx-1']).toBeDefined();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Continued-processing task                                          */
+/* ------------------------------------------------------------------ */
+
+describe('continued-processing task', () => {
+  async function settle(ticks = 30) {
+    for (let i = 0; i < ticks; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setImmediate(r));
+    }
+  }
+
+  beforeEach(() => {
+    mockFileExists = true;
+    mockFileSize = 1000;
+    mockAppState.currentState = 'background';
+  });
+
+  it('begins the background task when the user queues a download', async () => {
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
+    mockFetchAlbum.mockResolvedValue({ id: 'bg-a', name: 'A', song: [makeChild('bg-1', { albumId: 'bg-a' })] });
+    await enqueueAlbumDownload('bg-a');
+    expect(mockBeginBackgroundDownloads).toHaveBeenCalled();
+    await waitForQueueIdle();
+  });
+
+  it('on expiry, hands in-progress items back to the queue and waits for foreground', async () => {
+    expect(mockExpiryHandlers.length).toBeGreaterThan(0);
+    // [0] is this suite's module instance; isolateModules blocks register more.
+    const expire = mockExpiryHandlers[0];
+    let rejectTransfer!: (e: Error) => void;
+    mockDownloadAudioFileAsync.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => { rejectTransfer = reject; }),
+    );
+    mockFetchAlbum.mockResolvedValue({ id: 'ex-a', name: 'A', song: [makeChild('ex-1', { albumId: 'ex-a' })] });
+    await enqueueAlbumDownload('ex-a');
+    await settle();
+    expect(musicCacheStore.getState().downloadQueue[0]?.status).toBe('downloading');
+
+    expire();
+    rejectTransfer(new Error('cancelled'));
+    await settle();
+
+    const item = musicCacheStore.getState().downloadQueue[0];
+    expect(item?.status).toBe('queued');
+    expect(item?.error).toBeUndefined();
+    // The cancelled transfer is not retried while paused.
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(1);
+
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
+    mockAppState.currentState = 'active';
+    for (const listener of mockAppStateListeners) listener('active');
+    await settle();
+    await waitForQueueIdle();
+    expect(musicCacheStore.getState().cachedItems['ex-a']?.derived).toBeFalsy();
+    expect(musicCacheStore.getState().cachedSongs['ex-1']).toBeDefined();
+  });
+
+  it('on expiry in the foreground, restarts at once', async () => {
+    // [0] is this suite's module instance; isolateModules blocks register more.
+    const expire = mockExpiryHandlers[0];
+    mockAppState.currentState = 'active';
+    let rejectTransfer!: (e: Error) => void;
+    mockDownloadAudioFileAsync.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => { rejectTransfer = reject; }),
+    );
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
+    mockFetchAlbum.mockResolvedValue({ id: 'fx-a', name: 'A', song: [makeChild('fx-1', { albumId: 'fx-a' })] });
+    await enqueueAlbumDownload('fx-a');
+    await settle();
+    expire();
+    rejectTransfer(new Error('cancelled'));
+    await settle();
+    await waitForQueueIdle();
+    expect(musicCacheStore.getState().cachedSongs['fx-1']).toBeDefined();
   });
 });
