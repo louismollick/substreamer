@@ -100,6 +100,7 @@ const mockExpiryHandlers: Array<() => void> = [];
 jest.mock('../backgroundDownloadService', () => ({
   beginBackgroundDownloads: () => mockBeginBackgroundDownloads(),
   endBackgroundDownloads: jest.fn(),
+  logDownloadEvent: jest.fn(),
   onBackgroundDownloadsExpired: (fn: () => void) => {
     mockExpiryHandlers.push(fn);
     return { remove: jest.fn() };

@@ -27,6 +27,7 @@ import { onAppForeground } from '../utils/onAppForeground';
 import {
   beginBackgroundDownloads,
   endBackgroundDownloads,
+  logDownloadEvent,
   onBackgroundDownloadsExpired,
 } from './backgroundDownloadService';
 
@@ -1088,6 +1089,7 @@ function startQueueFromUserAction(): void {
  */
 function pauseUntilForeground(): void {
   const inForeground = AppState.currentState === 'active';
+  logDownloadEvent('queue.pause', { inForeground });
   pausedUntilForeground = !inForeground;
   processingId++;
   isProcessing = false;
@@ -1499,7 +1501,9 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
     for (const e of edgesForCommit) {
       registerTrackToItem(e.songId, queueItem.itemId);
     }
+    logDownloadEvent('item.done', { itemId: queueItem.itemId, songs: songs.length });
   } else {
+    logDownloadEvent('item.partial', { itemId: queueItem.itemId, done: uniqueSongIds.size, songs: songs.length });
     musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
       status: 'error',
       error: `Downloaded ${uniqueSongIds.size} of ${new Set(songs.map((s) => s.id)).size} songs`,
@@ -1541,7 +1545,6 @@ async function downloadSong(track: Child): Promise<CachedSongMeta | null> {
 }
 
 async function transferSong(track: Child): Promise<CachedSongMeta | null> {
-
   await ensureCoverArtAuth();
 
   const url = getDownloadStreamUrl(track.id);
@@ -1571,6 +1574,7 @@ async function transferSong(track: Child): Promise<CachedSongMeta | null> {
     await tmpDest.move(dest);
 
     const bytes = dest.exists ? dest.size ?? 0 : 0;
+    logDownloadEvent('song.done', { songId: track.id, bytes });
 
     clearDownload(track.id);
 
@@ -1615,7 +1619,8 @@ async function transferSong(track: Child): Promise<CachedSongMeta | null> {
     musicCacheStore.getState().upsertCachedSong(meta, track);
 
     return meta;
-  } catch {
+  } catch (error) {
+    logDownloadEvent('song.failed', { songId: track.id, error: errMessage(error) });
     clearDownload(track.id);
     const tmpFile = new File(albumDir, tmpName);
     if (tmpFile.exists) {
@@ -1639,6 +1644,12 @@ async function transferAudio(url: string, dest: string, downloadId: string): Pro
     // eslint-disable-next-line no-await-in-loop
     const result = await downloadAudioFileAsync(url, dest, downloadId);
     if (!result.rejected) return true;
+    logDownloadEvent('song.rejected', {
+      songId: downloadId,
+      status: result.status,
+      reason: result.rejected,
+      retryAfterSeconds: result.retryAfterSeconds,
+    });
     const retryable = result.rejected === 'http'
       && (result.status === 429 || result.status === 503)
       && result.retryAfterSeconds !== undefined;
