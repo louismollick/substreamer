@@ -1780,6 +1780,18 @@ export async function retryDownload(queueId: string): Promise<void> {
   startQueueFromUserAction();
 }
 
+/** Retry every failed queue item and keep downloading in the background. */
+export async function retryFailedDownloads(): Promise<void> {
+  const failed = musicCacheStore.getState().downloadQueue.filter((q) => q.status === 'error');
+  if (failed.length === 0) return;
+  for (const item of failed) {
+    // eslint-disable-next-line no-await-in-loop
+    await cleanupTmpFilesForQueueItem(item);
+    musicCacheStore.getState().updateQueueItem(item.queueId, { status: 'queued', error: undefined });
+  }
+  startQueueFromUserAction();
+}
+
 /** Re-download an entire cached item with current settings. */
 export async function redownloadItem(itemId: string): Promise<void> {
   const cached = musicCacheStore.getState().cachedItems[itemId];

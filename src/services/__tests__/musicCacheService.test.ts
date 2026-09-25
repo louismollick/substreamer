@@ -413,6 +413,7 @@ import {
   resumeIfSpaceAvailable,
   deleteStarredSongsDownload,
   retryDownload,
+  retryFailedDownloads,
   redownloadItem,
   redownloadTrack,
   registerMusicCacheOnAlbumReferencedHook,
@@ -3891,5 +3892,30 @@ describe('continued-processing task', () => {
     await settle();
     await waitForQueueIdle();
     expect(musicCacheStore.getState().cachedSongs['fx-1']).toBeDefined();
+  });
+});
+
+describe('retryFailedDownloads', () => {
+  it('re-queues every failed item and begins background downloads', async () => {
+    musicCacheStore.setState({
+      downloadQueue: [
+        { queueId: 'f1', itemId: 'fa1', type: 'album', name: 'A', status: 'error', error: 'x',
+          totalSongs: 1, completedSongs: 0, addedAt: 1, queuePosition: 1 },
+        { queueId: 'f2', itemId: 'fa2', type: 'album', name: 'B', status: 'error', error: 'y',
+          totalSongs: 1, completedSongs: 0, addedAt: 2, queuePosition: 2 },
+      ],
+    } as any);
+    mockCheckStorageLimit.mockReturnValue(true); // keep them from starting
+    mockBeginBackgroundDownloads.mockClear();
+    await retryFailedDownloads();
+    const statuses = musicCacheStore.getState().downloadQueue.map((q: any) => [q.status, q.error]);
+    expect(statuses).toEqual([['queued', undefined], ['queued', undefined]]);
+    expect(mockBeginBackgroundDownloads).toHaveBeenCalled();
+  });
+
+  it('does nothing without failed items', async () => {
+    mockBeginBackgroundDownloads.mockClear();
+    await retryFailedDownloads();
+    expect(mockBeginBackgroundDownloads).not.toHaveBeenCalled();
   });
 });
