@@ -224,14 +224,16 @@ export async function ensureCoverArtAuth(): Promise<void> {
       .join('');
   } else {
     const bytes = await getRandomBytesAsync(16);
-    cachedCoverArtSalt = Array.from(bytes)
+    const salt = Array.from(bytes)
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('');
-    cachedCoverArtToken = await digestStringAsync(
+    const token = await digestStringAsync(
       CryptoDigestAlgorithm.MD5,
-      password + cachedCoverArtSalt,
+      password + salt,
       { encoding: CryptoEncoding.HEX }
     );
+    cachedCoverArtSalt = salt;
+    cachedCoverArtToken = token;
   }
   cachedCoverArtKey = key;
 }
