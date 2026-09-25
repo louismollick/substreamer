@@ -9,6 +9,7 @@ import { ensureCached, hasCachedCoverArt } from './imageCacheService';
 import { getArtist as getServerArtist } from './subsonicService';
 
 const CONCURRENCY = 3;
+const COVER_RETRY_DELAYS_MS = [2_000, 5_000] as const;
 
 export class DownloadedArtistMetadataError extends Error {
   constructor(readonly artistId: string, readonly artistName?: string) {
@@ -49,9 +50,18 @@ export async function ensureDownloadedArtistMetadata(songs: Child[]): Promise<vo
       const coverArt = typeof row.cover_art === 'string' ? row.cover_art : undefined;
       if (!coverArt) return;
       // Song transfers wait on this; don't queue it behind prefetched covers.
-      await ensureCached(coverArt, { priority: true });
-      if (!(await hasCachedCoverArt(coverArt))) {
-        throw new DownloadedArtistMetadataError(artistId, artistName);
+      // ensureCached also resolves when a download fails, so check and retry
+      // a couple of times before failing the whole item over one image.
+      for (let attempt = 0; ; attempt++) {
+        // eslint-disable-next-line no-await-in-loop
+        await ensureCached(coverArt, { priority: true });
+        // eslint-disable-next-line no-await-in-loop
+        if (await hasCachedCoverArt(coverArt)) return;
+        if (attempt >= COVER_RETRY_DELAYS_MS.length) {
+          throw new DownloadedArtistMetadataError(artistId, artistName);
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise<void>((resolve) => setTimeout(resolve, COVER_RETRY_DELAYS_MS[attempt]));
       }
     },
     { concurrency: CONCURRENCY },
