@@ -53,7 +53,7 @@ it('deduplicates primary artists, writes only the artist row, and awaits its ima
 
   expect(mockGetServerArtist).toHaveBeenCalledTimes(1);
   expect(mockUpsertArtists).toHaveBeenCalledTimes(1);
-  expect(mockEnsureCached).toHaveBeenCalledWith('cover-ar1');
+  expect(mockEnsureCached).toHaveBeenCalledWith('cover-ar1', { priority: true });
   expect(mockHasCachedCoverArt).toHaveBeenCalledWith('cover-ar1');
 });
 

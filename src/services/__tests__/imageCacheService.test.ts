@@ -690,6 +690,45 @@ describe('reportBadRemote — a present local source always wins', () => {
 });
 
 describe('download pipeline — cacheAllSizes + processQueue', () => {
+  it('fetches a priority cover ahead of covers already queued', async () => {
+    (getCoverArtUrl as jest.Mock).mockImplementation((id: string) => `https://example.com/${id}`);
+    const releases: Array<() => void> = [];
+    mockFetch.mockImplementation(() => new Promise((resolve) => {
+      releases.push(() => resolve({
+        ok: true,
+        headers: { get: () => 'image/jpeg' },
+        arrayBuffer: () => Promise.resolve(jpegBuffer(1024)),
+      }));
+    }));
+    const settle = async () => {
+      for (let i = 0; i < 20; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((r) => setImmediate(r));
+      }
+    };
+
+    const all = ['busy-1', 'busy-2', 'busy-3', 'q-1', 'q-2'].map((id) => ensureCached(id));
+    await settle();
+    all.push(ensureCached('q-2', { priority: true }), ensureCached('prio', { priority: true }));
+    await settle();
+    releases.shift()!();
+    await settle();
+
+    while (releases.length) {
+      releases.shift()!();
+      // eslint-disable-next-line no-await-in-loop
+      await settle();
+    }
+    await Promise.all(all);
+    const fetched = mockFetch.mock.calls.map((c: unknown[]) => String(c[0]).split('/').pop());
+    const inFlight = fetched.indexOf('prio');
+    // Whatever was already downloading finishes first; then the priority covers
+    // (latest first), then the rest in their original order.
+    expect(fetched.slice(inFlight)).toEqual(
+      ['prio', 'q-2', ...['busy-1', 'busy-2', 'busy-3', 'q-1'].slice(inFlight)],
+    );
+  });
+
   it('downloads source image and generates resized variants', async () => {
     const id = 'download-full';
     // Subdirectory defaults to exists=true, files don't exist

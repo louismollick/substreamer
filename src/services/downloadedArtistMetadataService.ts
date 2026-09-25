@@ -48,7 +48,8 @@ export async function ensureDownloadedArtistMetadata(songs: Child[]): Promise<vo
       if (!row) throw new DownloadedArtistMetadataError(artistId, artistName);
       const coverArt = typeof row.cover_art === 'string' ? row.cover_art : undefined;
       if (!coverArt) return;
-      await ensureCached(coverArt);
+      // Song transfers wait on this; don't queue it behind prefetched covers.
+      await ensureCached(coverArt, { priority: true });
       if (!(await hasCachedCoverArt(coverArt))) {
         throw new DownloadedArtistMetadataError(artistId, artistName);
       }
