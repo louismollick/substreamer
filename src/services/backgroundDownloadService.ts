@@ -47,42 +47,24 @@ let beginRefused = false;
  *  seen. Both come from one queue snapshot, so the total never flickers. */
 let songsDone = 0;
 let lastRemaining = 0;
-/** Albums and playlists a full-library run has to queue, and has queued, during
- *  this task. Counted as progress units so queueing work moves the bar, and kept
- *  after queueing ends so the bar never drops back. */
-let libraryUnitsTotal = 0;
-let libraryUnitsDone = 0;
+/** Songs a full-library run is expected to download, known before its albums
+ *  are queued, so the total is right from the first second. */
+let expectedSongs = 0;
 
 function progressSubtitle(completed: number, total: number): string {
   return i18n.t('backgroundDownloadProgress', { completed, total });
 }
 
-/** Returns true while the full library is still being queued. */
-function trackLibraryUnits(): boolean {
-  const library = fullLibraryDownloadStore.getState();
-  const toQueue = library.albumsTotal + library.playlistsTotal;
-  if (library.active && toQueue > 0) {
-    libraryUnitsTotal = Math.max(libraryUnitsTotal, toQueue);
-    libraryUnitsDone = Math.max(libraryUnitsDone, library.albumsQueued + library.playlistsQueued);
-    return library.phase === 'queueing';
-  }
-  libraryUnitsDone = libraryUnitsTotal;
-  return false;
-}
-
-/** One progress measure: queueing units plus songs. Completed never decreases. */
-function progressCounts(remaining: number): { completed: number; total: number } {
-  return {
-    completed: libraryUnitsDone + songsDone,
-    total: libraryUnitsTotal + songsDone + remaining,
-  };
+function songTotal(remaining: number): number {
+  return Math.max(expectedSongs, songsDone + remaining);
 }
 
 function reportProgress(): void {
   const { downloadQueue } = musicCacheStore.getState();
-  const queueing = trackLibraryUnits();
-  // Ends only once no item is queued or still being finalised, so the last
-  // item's completion write lands while the task keeps the app running.
+  const queueing = fullLibraryDownloadStore.getState().active;
+  // Ends only once no item is queued or still being finalised (and a full-library
+  // run has finished queueing), so the last item's completion write lands while
+  // the task keeps the app running.
   if (!queueing && !downloadQueue.some((q) => q.status === 'queued' || q.status === 'downloading')) {
     endBackgroundDownloads(!downloadQueue.some((q) => q.status === 'error'));
     return;
@@ -90,11 +72,8 @@ function reportProgress(): void {
   const remaining = remainingQueuedSongs(downloadQueue);
   if (remaining < lastRemaining) songsDone += lastRemaining - remaining;
   lastRemaining = remaining;
-  const { completed, total } = progressCounts(remaining);
-  const subtitle = queueing
-    ? i18n.t('backgroundDownloadQueueing', { completed: libraryUnitsDone, total: libraryUnitsTotal })
-    : progressSubtitle(songsDone, songsDone + remaining);
-  setContinuedProcessingProgress(completed, total, subtitle);
+  const total = songTotal(remaining);
+  setContinuedProcessingProgress(songsDone, total, progressSubtitle(songsDone, total));
 }
 
 function startTracking(): void {
@@ -130,25 +109,28 @@ function stopTracking(): void {
 /**
  * Start the background task, or raise the running one's total. Call from a
  * user's download tap: iOS only grants the task for a foreground user action.
+ * `expectedSongs` lets a full-library run start the task before anything is
+ * queued, with the number of songs it is about to queue.
  */
-export async function beginBackgroundDownloads(): Promise<void> {
+export async function beginBackgroundDownloads(
+  { expectedSongs: expected = 0 }: { expectedSongs?: number } = {},
+): Promise<void> {
   if (!isContinuedProcessingSupported()) return;
   if (AppState.currentState !== 'active') return;
   const remaining = remainingQueuedSongs();
-  if (remaining === 0) return;
+  if (remaining === 0 && expected === 0) return;
 
   const wasActive = isContinuedProcessingActive();
   if (!wasActive) {
     songsDone = 0;
-    libraryUnitsTotal = 0;
-    libraryUnitsDone = 0;
+    expectedSongs = 0;
   }
+  expectedSongs = Math.max(expectedSongs, songsDone + expected);
   lastRemaining = remaining;
-  trackLibraryUnits();
-  const { total } = progressCounts(remaining);
+  const total = songTotal(remaining);
   const ok = await beginContinuedProcessing(
     i18n.t('backgroundDownloadTitle'),
-    progressSubtitle(songsDone, songsDone + remaining),
+    progressSubtitle(songsDone, total),
     total,
   );
   logDownloadEvent('task.begin', { ok, wasActive, total });

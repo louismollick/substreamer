@@ -131,26 +131,25 @@ describe('beginBackgroundDownloads', () => {
     }
   });
 
-  it('counts queueing and songs as one measure that never goes backwards', async () => {
+  it('starts a full-library task before anything is queued, counting songs only', async () => {
+    musicCacheStore.setState({ downloadQueue: [] } as any);
     fullLibraryDownloadStore.getState().start();
-    fullLibraryDownloadStore.getState().setTotals(10, 0);
-    fullLibraryDownloadStore.getState().setPhase('queueing');
     try {
-      await beginBackgroundDownloads();
-      // 10 albums to queue + the 3 songs already queued.
-      expect(mockNative.begin).toHaveBeenLastCalledWith('Downloading music', '0 of 3 songs', 13);
-      fullLibraryDownloadStore.getState().incAlbum();
-      expect(mockNative.setProgress).toHaveBeenLastCalledWith(1, 13, 'Queueing 1 of 10 albums');
-      const seen: number[] = [];
-      mockNative.setProgress.mockImplementation((done: number) => seen.push(done));
-      for (let i = 0; i < 9; i++) fullLibraryDownloadStore.getState().incAlbum();
-      fullLibraryDownloadStore.getState().finish();
+      await beginBackgroundDownloads({ expectedSongs: 92 });
+      expect(mockNative.begin).toHaveBeenLastCalledWith('Downloading music', '0 of 92 songs', 92);
+      // Albums arrive while queueing: the total stays at the expected 92.
       musicCacheStore.setState({ downloadQueue: [item('a', 'downloading', 3, 1)] } as any);
-      expect(mockNative.setProgress).toHaveBeenLastCalledWith(11, 13, '1 of 3 songs');
-      expect(seen).toEqual([...seen].sort((x, y) => x - y));
+      expect(mockNative.setProgress).toHaveBeenLastCalledWith(0, 92, '0 of 92 songs');
+      musicCacheStore.setState({ downloadQueue: [item('a', 'downloading', 3, 2)] } as any);
+      expect(mockNative.setProgress).toHaveBeenLastCalledWith(1, 92, '1 of 92 songs');
+      // An empty queue mid-queueing does not end the task.
+      musicCacheStore.setState({ downloadQueue: [] } as any);
+      expect(mockNative.end).not.toHaveBeenCalled();
+      fullLibraryDownloadStore.getState().finish();
+      musicCacheStore.setState({ downloadQueue: [] } as any);
+      expect(mockNative.end).toHaveBeenCalledWith(true);
     } finally {
       fullLibraryDownloadStore.getState().finish();
-      mockNative.setProgress.mockReset();
     }
   });
 

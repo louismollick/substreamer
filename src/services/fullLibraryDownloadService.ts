@@ -18,7 +18,8 @@ import { refreshPlaylistLibrary } from './normalizedLibrarySync';
 import { getDb } from '../store/persistence/db';
 import { listAlbumIds } from '../db/repository/albums';
 import { listPlaylistIds } from '../db/repository/playlists';
-import { logDownloadEvent } from './backgroundDownloadService';
+import { countSongsNotDownloaded } from '../db/repository/songs';
+import { beginBackgroundDownloads, logDownloadEvent } from './backgroundDownloadService';
 import { enqueueAlbumDownload, enqueuePlaylistDownload } from './musicCacheService';
 
 /** True when the server is reachable and the user isn't in offline mode. */
@@ -44,6 +45,12 @@ export async function enqueueFullLibraryDownload(): Promise<void> {
   let failed = 0;
   let total = 0;
   try {
+    // Start the background task on the tap, before any network call, with the
+    // number of songs about to be queued — so leaving the app at once is safe.
+    const startDb = getDb();
+    const expectedSongs = startDb ? await countSongsNotDownloaded(startDb) : 0;
+    await beginBackgroundDownloads({ expectedSongs });
+
     // Phase 1 — enumerate what we already know. The album list is deliberately NOT
     // re-fetched: on basic servers that re-pages the whole list off the legacy
     // `library_albums` count, which the normalized sync never writes. Albums added since
