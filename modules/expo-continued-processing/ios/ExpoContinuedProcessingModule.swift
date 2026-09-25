@@ -122,6 +122,12 @@ private final class TaskHolder {
 
   private func started(_ task: BGContinuedProcessingTask) {
     lock.lock()
+    // end() ran between submit and launch: nothing wants this task any more.
+    guard pendingSubmit else {
+      lock.unlock()
+      task.setTaskCompleted(success: true)
+      return
+    }
     self.task = task
     pendingSubmit = false
     task.progress.totalUnitCount = max(total, 1)

@@ -101,6 +101,7 @@ jest.mock('../backgroundDownloadService', () => ({
   beginBackgroundDownloads: () => mockBeginBackgroundDownloads(),
   endBackgroundDownloads: jest.fn(),
   logDownloadEvent: jest.fn(),
+  recordBackgroundSongDone: jest.fn(),
   onBackgroundDownloadsExpired: (fn: () => void) => {
     mockExpiryHandlers.push(fn);
     return { remove: jest.fn() };
@@ -208,6 +209,7 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
   // The queued payload, keyed by queueId — the fake's stand-in for
   // `download_queue_songs`. Written by the append, dropped with the queue row.
   const queueSongs = new Map<string, Array<Record<string, unknown>>>();
+  const queuePositions = new Map<string, number>();
   const isDerived = (itemId: string) => derivedItems.has(itemId);
   return {
     // Hydrate helpers — return empty; tests seed in-memory state directly.
@@ -310,13 +312,19 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
       ) => {
         await new Promise((resolve) => setImmediate(resolve));
         queueSongs.set(row.queueId, [...songs]);
+        queuePositions.set(row.queueId, row.queuePosition);
         return row.queuePosition;
       },
     ),
     removeDownloadQueueItem: jest.fn((queueId: string) => {
       queueSongs.delete(queueId);
     }),
-    removeDownloadQueueItemsThroughPosition: jest.fn(async () => true),
+    removeDownloadQueueItemsThroughPosition: jest.fn(async (max: number) => {
+      for (const [queueId, position] of queuePositions) {
+        if (position <= max) queueSongs.delete(queueId);
+      }
+      return true;
+    }),
     updateDownloadQueueItem: jest.fn(),
     reorderDownloadQueue: jest.fn(),
     markDownloadComplete: jest.fn((queueId, item, songs, incomingEdges) => {
@@ -339,7 +347,13 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
     readDownloadQueueSongRefsAsync: jest.fn(async (queueId: string) =>
       (queueSongs.get(queueId) ?? []).map((s: any) => ({ id: s.id, albumId: s.albumId })),
     ),
-    readQueuedSongStatus: jest.fn(() => null),
+    // Any live payload listing the song counts as queued.
+    readQueuedSongStatus: jest.fn((songId: string) => {
+      for (const songs of queueSongs.values()) {
+        if (songs.some((x: any) => x.id === songId)) return 'queued';
+      }
+      return null;
+    }),
     bulkReplace: jest.fn(),
     clearAllMusicCacheRows: jest.fn(() => {
       edges.length = 0;
@@ -3608,6 +3622,66 @@ describe('global transfer pool', () => {
     const done = musicCacheStore.getState().cachedItems['pr-album'];
     expect(done?.derived).toBeFalsy();
     expect(done?.songIds).toEqual(['pr-1', 'pr-2']);
+  });
+
+  it('does not start a song that was waiting for a slot when its item is cancelled', async () => {
+    musicCacheStore.setState({ maxConcurrentDownloads: 1 } as any);
+    const gate = gatedDownloads();
+    mockFetchAlbum.mockImplementation(async (id: string) => ({
+      id, name: id, song: [1, 2].map((n) => makeChild(`${id}-w${n}`, { albumId: id })),
+    }));
+    await enqueueAlbumDownload('wait-a');
+    await settle();
+    expect(gate.pending).toHaveLength(1);
+    const queueId = musicCacheStore.getState().downloadQueue[0].queueId;
+    await cancelDownload(queueId);
+    gate.pending.shift()!.fail();
+    await settle();
+    await waitForQueueIdle();
+    // wait-a-w2 was queued behind the slot; it must never transfer.
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not claim the next item while the queue is being cleared', async () => {
+    musicCacheStore.setState({ maxConcurrentDownloads: 1 } as any);
+    const gate = gatedDownloads();
+    mockFetchAlbum.mockImplementation(async (id: string) => ({
+      id, name: id, song: [makeChild(`${id}-c`, { albumId: id })],
+    }));
+    await enqueueAlbumDownload('clr-1');
+    await enqueueAlbumDownload('clr-2');
+    await settle();
+    expect(gate.pending).toHaveLength(1);
+    const clearing = clearDownloadQueue();
+    gate.pending.shift()!.fail();
+    await clearing;
+    await settle();
+    await waitForQueueIdle();
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(1);
+    expect(musicCacheStore.getState().downloadQueue).toHaveLength(0);
+  });
+
+  it('creates one derived album row with dense edges when songs finish together', async () => {
+    const gate = gatedDownloads();
+    mockFetchAlbum.mockResolvedValue({
+      id: 'race-a',
+      name: 'A',
+      song: [1, 2, 3].map((n) => makeChild(`race-${n}`, { albumId: 'race-a' })),
+    });
+    const insertEdge = persistenceMock.insertCachedItemSong as jest.Mock;
+    insertEdge.mockClear();
+    await enqueueAlbumDownload('race-a');
+    await settle();
+    expect(gate.pending).toHaveLength(3);
+    // Release all three in the same tick so the partial-album updates overlap.
+    for (const p of gate.pending.splice(0)) p.release();
+    await settle();
+    const positions = insertEdge.mock.calls
+      .filter((c: any[]) => c[0] === 'race-a')
+      .map((c: any[]) => c[1])
+      .sort();
+    expect(positions).toEqual([1, 2, 3]);
+    await waitForQueueIdle();
   });
 
   it('keeps finished songs as a partial album when the album download is cancelled', async () => {

@@ -161,6 +161,7 @@ class ExpoAsyncFsModule : Module() {
     promise: Promise,
   ) {
     CoroutineScope(Dispatchers.IO).launch {
+      var call: Call? = null
       try {
         val destPath = Uri.parse(destinationUri).path
           ?: throw Exception("Invalid destination URI")
@@ -200,7 +201,7 @@ class ExpoAsyncFsModule : Module() {
           .build()
 
         val request = Request.Builder().url(url).build()
-        val call = client.newCall(request)
+        call = client.newCall(request)
         activeCalls[downloadId] = call
         val response = call.execute()
 
@@ -243,7 +244,8 @@ class ExpoAsyncFsModule : Module() {
       } catch (e: Exception) {
         promise.reject("ERR_DOWNLOAD", e.message ?: "Download failed", e)
       } finally {
-        activeCalls.remove(downloadId)
+        // Only our own call: a retry of the same id may already have registered.
+        call?.let { activeCalls.remove(downloadId, it) }
       }
     }
   }

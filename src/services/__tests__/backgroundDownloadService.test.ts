@@ -49,6 +49,7 @@ import {
   endBackgroundDownloads,
   logDownloadEvent,
   onBackgroundDownloadsExpired,
+  recordBackgroundSongDone,
   remainingQueuedSongs,
   shouldOfferResume,
 } from '../backgroundDownloadService';
@@ -106,10 +107,19 @@ describe('beginBackgroundDownloads', () => {
 
   it('reports progress as songs finish and ends when the queue drains', async () => {
     await beginBackgroundDownloads();
-    musicCacheStore.setState({ downloadQueue: [item('a', 'downloading', 3, 1)], totalFiles: 11 } as any);
+    musicCacheStore.setState({ downloadQueue: [item('a', 'downloading', 3, 1)] } as any);
+    recordBackgroundSongDone();
     expect(mockNative.setProgress).toHaveBeenLastCalledWith(1, 3, '1 of 3 songs');
-    musicCacheStore.setState({ downloadQueue: [], totalFiles: 13 } as any);
+    // Every song landed but the item is not finalised yet: keep the task.
+    musicCacheStore.setState({ downloadQueue: [item('a', 'downloading', 3, 3)] } as any);
+    expect(mockNative.end).not.toHaveBeenCalled();
+    musicCacheStore.setState({ downloadQueue: [] } as any);
     expect(mockNative.end).toHaveBeenCalledWith(true);
+  });
+
+  it('ignores song completions while no task is tracked', () => {
+    recordBackgroundSongDone();
+    expect(mockNative.setProgress).not.toHaveBeenCalled();
   });
 
   it('raises the total when more is queued while running', async () => {
@@ -129,7 +139,8 @@ describe('expiry', () => {
     mockNative.expiredListener!();
     expect(handler).toHaveBeenCalled();
     mockNative.setProgress.mockClear();
-    musicCacheStore.setState({ downloadQueue: [item('a', 'downloading', 3, 1)], totalFiles: 11 } as any);
+    musicCacheStore.setState({ downloadQueue: [item('a', 'downloading', 3, 1)] } as any);
+    recordBackgroundSongDone();
     expect(mockNative.setProgress).not.toHaveBeenCalled();
     sub.remove();
   });

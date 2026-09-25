@@ -29,6 +29,7 @@ import {
   endBackgroundDownloads,
   logDownloadEvent,
   onBackgroundDownloadsExpired,
+  recordBackgroundSongDone,
 } from './backgroundDownloadService';
 
 import i18n from '../i18n/i18n';
@@ -1074,6 +1075,8 @@ let claiming = false;
 let claimAgain = false;
 /** Set when the background task expired; the queue waits for the app to return. */
 let pausedUntilForeground = false;
+/** True while clearDownloadQueue runs, so a cancelled item's exit does not claim the next. */
+let clearingQueue = false;
 
 /** Start the queue for a download the user just asked for, and keep it
  *  running in the background where the platform allows. */
@@ -1102,7 +1105,7 @@ function pauseUntilForeground(): void {
 }
 
 async function processQueue(): Promise<void> {
-  if (isPausedForOffline() || pausedUntilForeground) return;
+  if (isPausedForOffline() || pausedUntilForeground || clearingQueue) return;
   if (claiming) {
     claimAgain = true;
     return;
@@ -1226,7 +1229,25 @@ async function buildCachedItemMetadata(
  * count unknown rather than blocking: the edge is still stitched in, and the next
  * refresh corrects the count.
  */
+const partialAlbumLocks = new Map<string, Promise<void>>();
+
+/** One partial-album update per album at a time: concurrent workers of the
+ *  same album would otherwise both create the row or claim the same position. */
 async function ensurePartialAlbumEdge(song: Child): Promise<void> {
+  if (!song.albumId) return;
+  const albumId = song.albumId;
+  const previous = partialAlbumLocks.get(albumId) ?? Promise.resolve();
+  const current = previous.then(() => ensurePartialAlbumEdgeUnlocked(song));
+  const settled = current.catch(() => { /* surfaced to this caller below */ });
+  partialAlbumLocks.set(albumId, settled);
+  try {
+    await current;
+  } finally {
+    if (partialAlbumLocks.get(albumId) === settled) partialAlbumLocks.delete(albumId);
+  }
+}
+
+async function ensurePartialAlbumEdgeUnlocked(song: Child): Promise<void> {
   if (!song.albumId) return;
 
   const albumId = song.albumId;
@@ -1531,6 +1552,9 @@ async function downloadSong(track: Child): Promise<CachedSongMeta | null> {
   const transfer = (async () => {
     await acquireTransferSlot();
     try {
+      // While this waited for a slot the queue may have been paused, or every
+      // item wanting the song cancelled or cleared.
+      if (pausedUntilForeground || readQueuedSongStatus(track.id) === null) return null;
       return await transferSong(track);
     } finally {
       releaseTransferSlot();
@@ -1575,6 +1599,7 @@ async function transferSong(track: Child): Promise<CachedSongMeta | null> {
 
     const bytes = dest.exists ? dest.size ?? 0 : 0;
     logDownloadEvent('song.done', { songId: track.id, bytes });
+    recordBackgroundSongDone();
 
     clearDownload(track.id);
 
@@ -2274,6 +2299,16 @@ export async function clearDownloadQueue(): Promise<void> {
     return;
   }
 
+  clearingQueue = true;
+  try {
+    await clearQueueSnapshot(queue);
+  } finally {
+    clearingQueue = false;
+  }
+  resumeIfSpaceAvailable();
+}
+
+async function clearQueueSnapshot(queue: DownloadQueueItem[]): Promise<void> {
   // Only items being downloaded have transfers to stop and .tmp files to sweep;
   // cancel those one by one. Everything else goes in one SQL delete.
   for (const item of queue) {
@@ -2306,7 +2341,6 @@ export async function clearDownloadQueue(): Promise<void> {
       await cancelDownload(item.queueId);
     }
   }
-  resumeIfSpaceAvailable();
 }
 
 /**

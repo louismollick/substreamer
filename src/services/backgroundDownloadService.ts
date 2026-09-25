@@ -39,27 +39,37 @@ export function remainingQueuedSongs(
 
 let unsubscribeProgress: (() => void) | null = null;
 let heartbeat: ReturnType<typeof setInterval> | null = null;
-let filesAtBegin = 0;
+/** Songs transferred since the running task began. */
+let songsDone = 0;
 
 function progressSubtitle(completed: number, total: number): string {
   return i18n.t('backgroundDownloadProgress', { completed, total });
 }
 
 function reportProgress(): void {
-  const remaining = remainingQueuedSongs();
-  const completed = Math.max(0, musicCacheStore.getState().totalFiles - filesAtBegin);
-  const total = completed + remaining;
-  if (remaining === 0) {
+  const { downloadQueue } = musicCacheStore.getState();
+  // Ends only once no item is queued or still being finalised, so the last
+  // item's completion write lands while the task keeps the app running.
+  if (!downloadQueue.some((q) => q.status === 'queued' || q.status === 'downloading')) {
     endBackgroundDownloads(true);
     return;
   }
-  setContinuedProcessingProgress(completed, total, progressSubtitle(completed, total));
+  const remaining = remainingQueuedSongs(downloadQueue);
+  const total = songsDone + remaining;
+  setContinuedProcessingProgress(songsDone, total, progressSubtitle(songsDone, total));
+}
+
+/** Called by the download pipeline each time a song finishes transferring. */
+export function recordBackgroundSongDone(): void {
+  if (!unsubscribeProgress) return;
+  songsDone++;
+  reportProgress();
 }
 
 function startTracking(): void {
   if (unsubscribeProgress) return;
   unsubscribeProgress = musicCacheStore.subscribe((state, prev) => {
-    if (state.downloadQueue === prev.downloadQueue && state.totalFiles === prev.totalFiles) return;
+    if (state.downloadQueue === prev.downloadQueue) return;
     reportProgress();
   });
   if (isDownloadDiagnosticsEnabled()) {
@@ -92,12 +102,11 @@ export async function beginBackgroundDownloads(): Promise<void> {
   if (remaining === 0) return;
 
   const wasActive = isContinuedProcessingActive();
-  if (!wasActive) filesAtBegin = musicCacheStore.getState().totalFiles;
-  const completed = Math.max(0, musicCacheStore.getState().totalFiles - filesAtBegin);
-  const total = completed + remaining;
+  if (!wasActive) songsDone = 0;
+  const total = songsDone + remaining;
   const ok = await beginContinuedProcessing(
     i18n.t('backgroundDownloadTitle'),
-    progressSubtitle(completed, total),
+    progressSubtitle(songsDone, total),
     total,
   );
   logDownloadEvent('task.begin', { ok, wasActive, total });
