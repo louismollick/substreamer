@@ -2379,7 +2379,10 @@ describe('download pipeline', () => {
     });
     await enqueueAlbumDownload('album-cx');
     await waitForQueueIdle();
-    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(2);
+    // No network retry; the item is handed back 3 times (2 attempts each), then fails.
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(8);
+    const item = musicCacheStore.getState().downloadQueue.find((q: any) => q.itemId === 'album-cx');
+    expect(item?.status).toBe('error');
   });
 
   it('does not register a song when the server returns a non-audio body', async () => {
@@ -3849,6 +3852,26 @@ describe('continued-processing task', () => {
     await waitForQueueIdle();
     expect(musicCacheStore.getState().cachedItems['ex-a']?.derived).toBeFalsy();
     expect(musicCacheStore.getState().cachedSongs['ex-1']).toBeDefined();
+  });
+
+  it('hands an item back to the queue when its transfer is cancelled before the expiry event arrives', async () => {
+    mockDownloadAudioFileAsync.mockRejectedValueOnce(new Error('cancelled'));
+    mockDownloadAudioFileAsync.mockRejectedValueOnce(new Error('cancelled'));
+    mockFetchAlbum.mockResolvedValue({ id: 'ir-a', name: 'A', song: [makeChild('ir-1', { albumId: 'ir-a' })] });
+    let observed: string | undefined;
+    const unsub = musicCacheStore.subscribe((st) => {
+      const q = st.downloadQueue.find((x: any) => x.itemId === 'ir-a');
+      if (q?.status === 'queued' && observed === 'downloading') observed = 'requeued';
+      else if (q?.status === 'downloading' && observed === undefined) observed = 'downloading';
+      if (q?.status === 'error') observed = 'error';
+    });
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
+    await enqueueAlbumDownload('ir-a');
+    await settle();
+    await waitForQueueIdle();
+    unsub();
+    expect(observed).toBe('requeued');
+    expect(musicCacheStore.getState().cachedSongs['ir-1']).toBeDefined();
   });
 
   it('on expiry in the foreground, restarts at once', async () => {

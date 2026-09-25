@@ -1190,6 +1190,16 @@ function releaseTransferSlot(): void {
   transferWaiters.shift()?.();
 }
 
+/**
+ * Songs whose transfer was cancelled natively. An item that still exists
+ * afterwards was not cancelled by the user: the background task expired, and
+ * the item goes back to the queue instead of failing.
+ */
+const interruptedSongs = new Set<string>();
+/** Bounds requeues per item, so a transfer that is always cancelled still fails. */
+const interruptedRequeues = new Map<string, number>();
+const MAX_INTERRUPTED_REQUEUES = 3;
+
 /** Resolves when the in-flight transfer of the same song finishes. */
 const inFlightSongs = new Map<string, Promise<CachedSongMeta | null>>();
 
@@ -1510,6 +1520,19 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
   if (finalState.status !== 'downloading') return;
 
   const uniqueSongIds = new Set(itemEdges.map((e) => e.songId));
+  const interrupted = songs.filter((s) => interruptedSongs.delete(s.id)).length;
+  const requeues = interruptedRequeues.get(queueItem.queueId) ?? 0;
+  if (
+    interrupted > 0
+    && requeues < MAX_INTERRUPTED_REQUEUES
+    && uniqueSongIds.size < new Set(songs.map((s) => s.id)).size
+  ) {
+    interruptedRequeues.set(queueItem.queueId, requeues + 1);
+    logDownloadEvent('item.interrupted', { itemId: queueItem.itemId, interrupted });
+    musicCacheStore.getState().updateQueueItem(queueItem.queueId, { status: 'queued' });
+    return;
+  }
+  interruptedRequeues.delete(queueItem.queueId);
 
   if (uniqueSongIds.size === new Set(songs.map((s) => s.id)).size) {
     // All unique songs covered — finalise the item.
@@ -1663,7 +1686,9 @@ async function transferSong(track: Child): Promise<CachedSongMeta | null> {
 
     return meta;
   } catch (error) {
-    logDownloadEvent('song.failed', { songId: track.id, error: errMessage(error) });
+    const message = errMessage(error);
+    logDownloadEvent('song.failed', { songId: track.id, error: message });
+    if (/cancel/i.test(message)) interruptedSongs.add(track.id);
     clearDownload(track.id);
     const tmpFile = new File(albumDir, tmpName);
     if (tmpFile.exists) {
