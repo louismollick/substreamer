@@ -40,6 +40,7 @@ jest.mock('react-native', () => ({
 jest.mock('../../store/persistence/kvStorage', () => require('../../store/persistence/__mocks__/kvStorage'));
 
 import { downloadResumePromptStore } from '../../store/downloadResumePromptStore';
+import { fullLibraryDownloadStore } from '../../store/fullLibraryDownloadStore';
 import { musicCacheStore } from '../../store/musicCacheStore';
 import { offlineModeStore } from '../../store/offlineModeStore';
 import { storageLimitStore } from '../../store/storageLimitStore';
@@ -127,6 +128,29 @@ describe('beginBackgroundDownloads', () => {
     for (let done = 1; done <= 3; done++) {
       musicCacheStore.setState({ downloadQueue: [item('a', 'downloading', 3, done)] } as any);
       expect(mockNative.setProgress.mock.calls.at(-1)![1]).toBe(3);
+    }
+  });
+
+  it('counts queueing and songs as one measure that never goes backwards', async () => {
+    fullLibraryDownloadStore.getState().start();
+    fullLibraryDownloadStore.getState().setTotals(10, 0);
+    fullLibraryDownloadStore.getState().setPhase('queueing');
+    try {
+      await beginBackgroundDownloads();
+      // 10 albums to queue + the 3 songs already queued.
+      expect(mockNative.begin).toHaveBeenLastCalledWith('Downloading music', '0 of 3 songs', 13);
+      fullLibraryDownloadStore.getState().incAlbum();
+      expect(mockNative.setProgress).toHaveBeenLastCalledWith(1, 13, 'Queueing 1 of 10 albums');
+      const seen: number[] = [];
+      mockNative.setProgress.mockImplementation((done: number) => seen.push(done));
+      for (let i = 0; i < 9; i++) fullLibraryDownloadStore.getState().incAlbum();
+      fullLibraryDownloadStore.getState().finish();
+      musicCacheStore.setState({ downloadQueue: [item('a', 'downloading', 3, 1)] } as any);
+      expect(mockNative.setProgress).toHaveBeenLastCalledWith(11, 13, '1 of 3 songs');
+      expect(seen).toEqual([...seen].sort((x, y) => x - y));
+    } finally {
+      fullLibraryDownloadStore.getState().finish();
+      mockNative.setProgress.mockReset();
     }
   });
 

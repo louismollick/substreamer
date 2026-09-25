@@ -1381,7 +1381,9 @@ async function ensurePartialAlbumEdgeUnlocked(song: Child): Promise<void> {
 async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise<void> {
   const { maxConcurrentDownloads } = musicCacheStore.getState();
 
+  const claimedAt = Date.now();
   const songs = await readDownloadQueueSongsAsync(queueItem.queueId);
+  logDownloadEvent('item.payload', { itemId: queueItem.itemId, ms: Date.now() - claimedAt });
   // An item with nothing to download is NOT a completed one. Without this the
   // all-covered test below reads `0 === 0` and finalises the item, silently
   // discarding a queued download — the failure the row-backed payload is gated
@@ -1396,6 +1398,7 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
 
   try {
     await ensureDownloadedArtistMetadata(songs);
+    logDownloadEvent('item.ready', { itemId: queueItem.itemId, ms: Date.now() - claimedAt });
   } catch (error) {
     musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
       status: 'error',

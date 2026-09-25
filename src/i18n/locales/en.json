@@ -1122,5 +1122,6 @@
   "resumeDownloadsBody_one": "{{count}} song is still waiting to download. Resume to keep downloading when you leave the app.",
   "resumeDownloadsBody_other": "{{count}} songs are still waiting to download. Resume to keep downloading when you leave the app.",
   "resumeDownloadsNotNow": "Not now",
-  "resumeDownloadsInBackground": "Resume in background"
+  "resumeDownloadsInBackground": "Resume in background",
+  "backgroundDownloadQueueing": "Queueing {{completed}} of {{total}} albums"
 }

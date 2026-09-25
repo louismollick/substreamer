@@ -18,6 +18,7 @@ import { refreshPlaylistLibrary } from './normalizedLibrarySync';
 import { getDb } from '../store/persistence/db';
 import { listAlbumIds } from '../db/repository/albums';
 import { listPlaylistIds } from '../db/repository/playlists';
+import { logDownloadEvent } from './backgroundDownloadService';
 import { enqueueAlbumDownload, enqueuePlaylistDownload } from './musicCacheService';
 
 /** True when the server is reachable and the user isn't in offline mode. */
@@ -70,7 +71,9 @@ export async function enqueueFullLibraryDownload(): Promise<void> {
     // purge-protected, so the offline copy still completes.
     for (const albumId of albumIds) {
       if (!fullLibraryDownloadStore.getState().active) return; // cancelled
+      const startedAt = Date.now();
       await enqueueAlbumDownload(albumId, { awaitCover: false }).catch(() => { failed += 1; });
+      logDownloadEvent('library.enqueue', { albumId, ms: Date.now() - startedAt });
       fullLibraryDownloadStore.getState().incAlbum();
     }
 
