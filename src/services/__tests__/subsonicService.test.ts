@@ -215,10 +215,11 @@ describe('getDownloadStreamUrl', () => {
     expect(getDownloadStreamUrl('')).toBeNull();
   });
 
-  it('builds download URL with estimateContentLength', async () => {
+  it('never asks for an estimated Content-Length', async () => {
     await ensureCoverArtAuth();
     const url = getDownloadStreamUrl('track-1');
-    expect(url).toContain('estimateContentLength=true');
+    expect(url).toContain('/rest/stream.view?');
+    expect(url).not.toContain('estimateContentLength');
   });
 
   it('includes download format when set', async () => {

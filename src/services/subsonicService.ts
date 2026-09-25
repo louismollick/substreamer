@@ -333,8 +333,9 @@ export function getStreamUrl(trackId: string): string | null {
 /**
  * Build an authenticated stream URL for downloading a track.
  * Uses the separate download quality settings (downloadMaxBitRate,
- * downloadFormat) and always sets estimateContentLength=true for
- * accurate progress tracking.
+ * downloadFormat). Never asks for an estimated Content-Length: Navidrome
+ * aborts a transcode whose output outgrows its estimate
+ * (core/stream/media_streamer.go Serve), which fails the download.
  */
 export function getDownloadStreamUrl(trackId: string): string | null {
   const { isLoggedIn, serverUrl, username } = authStore.getState();
@@ -347,7 +348,6 @@ export function getDownloadStreamUrl(trackId: string): string | null {
     id: trackId,
     v: SUBSONIC_API_VERSION,
     c: SUBSONIC_CLIENT_NAME,
-    estimateContentLength: 'true',
   });
   applyUrlAuth(params, username);
 
