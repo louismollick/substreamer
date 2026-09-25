@@ -76,7 +76,13 @@ def check_events(events):
     rejected = [e for e in events if e.get('event') == 'song.rejected']
     limited = [e for e in rejected if e.get('status') in (429, 503)]
     not_audio = [e for e in rejected if e.get('reason') == 'notAudio']
-    report('PASS' if not limited else 'FAIL', 'no server back-off responses', f'{len(limited)} 429/503')
+    # The server's own limit (e.g. Navidrome's transcode cap) answers 429; the
+    # queue lowers its concurrency and retries, so this is informational.
+    report('INFO', 'server back-off responses', f'{len(limited)} 429/503, '
+           f"{sum(1 for e in events if e.get('event') == 'cap.lowered')} cap reductions")
+    dropped = sum(1 for e in events if e.get('event') == 'song.networkRetry')
+    failed = sum(1 for e in events if e.get('event') == 'song.failed')
+    report('INFO', 'network retries / songs failed', f'{dropped} / {failed}')
     report('INFO', 'non-audio bodies rejected before registration', str(len(not_audio)))
 
     expired = counts.get('task.expired', 0)
@@ -106,6 +112,8 @@ def check_database(root):
         "SELECT name, error FROM download_queue WHERE status = 'error' LIMIT 5").fetchall()
     for name, error in errors:
         report('INFO', 'queue error', f'{name}: {error}')
+    report('PASS' if not statuses.get('error') else 'FAIL', 'no queue item ended in error',
+           f"{statuses.get('error', 0)} items")
 
     tiny = db.execute(
         'SELECT song_id, bytes FROM cached_songs WHERE bytes < ?', (MIN_AUDIO_BYTES,)).fetchall()

@@ -49,7 +49,6 @@ import {
   endBackgroundDownloads,
   logDownloadEvent,
   onBackgroundDownloadsExpired,
-  recordBackgroundSongDone,
   remainingQueuedSongs,
   shouldOfferResume,
 } from '../backgroundDownloadService';
@@ -111,21 +110,30 @@ describe('beginBackgroundDownloads', () => {
     expect(canResumeInBackground()).toBe(true);
   });
 
-  it('reports progress as songs finish and ends when the queue drains', async () => {
+  it('reports progress from one queue snapshot and ends when the queue drains', async () => {
     await beginBackgroundDownloads();
     musicCacheStore.setState({ downloadQueue: [item('a', 'downloading', 3, 1)] } as any);
-    recordBackgroundSongDone();
     expect(mockNative.setProgress).toHaveBeenLastCalledWith(1, 3, '1 of 3 songs');
     // Every song landed but the item is not finalised yet: keep the task.
     musicCacheStore.setState({ downloadQueue: [item('a', 'downloading', 3, 3)] } as any);
+    expect(mockNative.setProgress).toHaveBeenLastCalledWith(3, 3, '3 of 3 songs');
     expect(mockNative.end).not.toHaveBeenCalled();
     musicCacheStore.setState({ downloadQueue: [] } as any);
     expect(mockNative.end).toHaveBeenCalledWith(true);
   });
 
-  it('ignores song completions while no task is tracked', () => {
-    recordBackgroundSongDone();
-    expect(mockNative.setProgress).not.toHaveBeenCalled();
+  it('keeps the total steady while songs finish', async () => {
+    await beginBackgroundDownloads();
+    for (let done = 1; done <= 3; done++) {
+      musicCacheStore.setState({ downloadQueue: [item('a', 'downloading', 3, done)] } as any);
+      expect(mockNative.setProgress.mock.calls.at(-1)![1]).toBe(3);
+    }
+  });
+
+  it('ends unsuccessfully when an item errored', async () => {
+    await beginBackgroundDownloads();
+    musicCacheStore.setState({ downloadQueue: [item('a', 'error', 3, 2)] } as any);
+    expect(mockNative.end).toHaveBeenCalledWith(false);
   });
 
   it('raises the total when more is queued while running', async () => {
@@ -146,7 +154,6 @@ describe('expiry', () => {
     expect(handler).toHaveBeenCalled();
     mockNative.setProgress.mockClear();
     musicCacheStore.setState({ downloadQueue: [item('a', 'downloading', 3, 1)] } as any);
-    recordBackgroundSongDone();
     expect(mockNative.setProgress).not.toHaveBeenCalled();
     sub.remove();
   });

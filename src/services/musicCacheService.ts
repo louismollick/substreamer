@@ -29,7 +29,6 @@ import {
   endBackgroundDownloads,
   logDownloadEvent,
   onBackgroundDownloadsExpired,
-  recordBackgroundSongDone,
 } from './backgroundDownloadService';
 
 import i18n from '../i18n/i18n';
@@ -267,6 +266,8 @@ export function teardownMusicCache(): void {
   offlineSubscription?.();
   offlineSubscription = null;
   cacheDir = null;
+  // The next login may be a different server.
+  serverTransferCap = Number.POSITIVE_INFINITY;
 }
 
 /**
@@ -1154,8 +1155,23 @@ async function processQueue(): Promise<void> {
   if (claimAgain) void processQueue();
 }
 
+/**
+ * Concurrency the server has shown it accepts. A 429 (e.g. Navidrome's
+ * transcode limit) lowers it to one below what was in flight, for the rest of
+ * the session, so the queue stops tripping the limit on every song.
+ */
+let serverTransferCap = Number.POSITIVE_INFINITY;
+
+function lowerServerTransferCap(): void {
+  const next = Math.max(1, Math.min(serverTransferCap, activeTransfers - 1));
+  if (next < serverTransferCap) {
+    serverTransferCap = next;
+    logDownloadEvent('cap.lowered', { cap: next });
+  }
+}
+
 function maxTransfers(): number {
-  return Math.max(1, musicCacheStore.getState().maxConcurrentDownloads);
+  return Math.max(1, Math.min(musicCacheStore.getState().maxConcurrentDownloads, serverTransferCap));
 }
 
 let activeTransfers = 0;
@@ -1602,7 +1618,6 @@ async function transferSong(track: Child): Promise<CachedSongMeta | null> {
 
     const bytes = dest.exists ? dest.size ?? 0 : 0;
     logDownloadEvent('song.done', { songId: track.id, bytes });
-    recordBackgroundSongDone();
 
     clearDownload(track.id);
 
@@ -1659,6 +1674,8 @@ async function transferSong(track: Child): Promise<CachedSongMeta | null> {
 }
 
 const MAX_RETRY_AFTER_ATTEMPTS = 3;
+const MAX_NETWORK_ATTEMPTS = 3;
+const NETWORK_RETRY_DELAY_MS = 2000;
 const MAX_RETRY_AFTER_SECONDS = 30;
 
 /**
@@ -1669,8 +1686,23 @@ const MAX_RETRY_AFTER_SECONDS = 30;
  */
 async function transferAudio(url: string, dest: string, downloadId: string): Promise<boolean> {
   for (let attempt = 1; ; attempt++) {
-    // eslint-disable-next-line no-await-in-loop
-    const result = await downloadAudioFileAsync(url, dest, downloadId);
+    logDownloadEvent('song.start', { songId: downloadId, attempt, inFlight: activeTransfers });
+    let result;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      result = await downloadAudioFileAsync(url, dest, downloadId);
+    } catch (error) {
+      // A dropped connection is retried after a pause; a cancel (expiry, the
+      // user cancelling) or a paused queue is not.
+      const message = errMessage(error);
+      if (/cancel/i.test(message) || pausedUntilForeground || attempt >= MAX_NETWORK_ATTEMPTS) {
+        throw error;
+      }
+      logDownloadEvent('song.networkRetry', { songId: downloadId, attempt, error: message });
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise<void>((resolve) => setTimeout(resolve, NETWORK_RETRY_DELAY_MS * attempt));
+      continue;
+    }
     if (!result.rejected) return true;
     logDownloadEvent('song.rejected', {
       songId: downloadId,
@@ -1678,6 +1710,7 @@ async function transferAudio(url: string, dest: string, downloadId: string): Pro
       reason: result.rejected,
       retryAfterSeconds: result.retryAfterSeconds,
     });
+    if (result.status === 429) lowerServerTransferCap();
     const retryable = result.rejected === 'http'
       && (result.status === 429 || result.status === 503)
       && result.retryAfterSeconds !== undefined;

@@ -101,7 +101,6 @@ jest.mock('../backgroundDownloadService', () => ({
   beginBackgroundDownloads: () => mockBeginBackgroundDownloads(),
   endBackgroundDownloads: jest.fn(),
   logDownloadEvent: jest.fn(),
-  recordBackgroundSongDone: jest.fn(),
   onBackgroundDownloadsExpired: (fn: () => void) => {
     mockExpiryHandlers.push(fn);
     return { remove: jest.fn() };
@@ -390,6 +389,7 @@ import {
   STARRED_SONGS_ITEM_ID,
   STARRED_COVER_ART_ID,
   initMusicCache,
+  teardownMusicCache,
   deferredMusicCacheInit,
   recoverStalledDownloadsAsync,
   forceRecoverDownloadsAsync,
@@ -2345,17 +2345,41 @@ describe('download pipeline', () => {
     if (item) expect(item.status).toBe('error');
   });
 
-  it('handles download failure', async () => {
-    mockDownloadAudioFileAsync.mockRejectedValue(new Error('net'));
+  it('retries a dropped connection, then fails the item', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    try {
+      mockDownloadAudioFileAsync.mockRejectedValue(new Error('The network connection was lost.'));
+      mockFetchAlbum.mockResolvedValue({
+        id: 'album-fail',
+        name: 'X',
+        song: [makeChild('fail-t1', { albumId: 'album-fail' })],
+      });
+      await enqueueAlbumDownload('album-fail');
+      for (let i = 0; i < 40; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await jest.advanceTimersByTimeAsync(1000);
+      }
+      jest.useRealTimers();
+      await waitForQueueIdle();
+      // 3 network attempts per downloadSong call; the worker calls it twice.
+      expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(6);
+      const item = musicCacheStore.getState().downloadQueue.find((q: any) => q.itemId === 'album-fail');
+      expect(item?.status).toBe('error');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not retry a cancelled transfer', async () => {
+    mockDownloadAudioFileAsync.mockRejectedValue(new Error('cancelled'));
     mockFetchAlbum.mockResolvedValue({
-      id: 'album-fail',
+      id: 'album-cx',
       name: 'X',
-      song: [makeChild('fail-t1', { albumId: 'album-fail' })],
+      song: [makeChild('cx-t1', { albumId: 'album-cx' })],
     });
-    await enqueueAlbumDownload('album-fail');
+    await enqueueAlbumDownload('album-cx');
     await waitForQueueIdle();
-    const item = musicCacheStore.getState().downloadQueue.find((q: any) => q.itemId === 'album-fail');
-    if (item) expect(item.status).toBe('error');
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(2);
   });
 
   it('does not register a song when the server returns a non-audio body', async () => {
@@ -2397,6 +2421,8 @@ describe('download pipeline', () => {
       expect(musicCacheStore.getState().cachedSongs['r-t1']).toBeDefined();
     } finally {
       jest.useRealTimers();
+      teardownMusicCache();
+      initMusicCache();
     }
   });
 
@@ -2939,7 +2965,8 @@ describe('download error branches', () => {
   });
 
   it('cleans up .tmp on download failure', async () => {
-    mockDownloadAudioFileAsync.mockRejectedValue(new Error('transport'));
+    // 'cancelled' fails at once; a network error would be retried first.
+    mockDownloadAudioFileAsync.mockRejectedValue(new Error('cancelled'));
     mockFileExists = true; // tmp is present, enter delete branch
 
     mockFetchAlbum.mockResolvedValue({
@@ -3622,6 +3649,41 @@ describe('global transfer pool', () => {
     const done = musicCacheStore.getState().cachedItems['pr-album'];
     expect(done?.derived).toBeFalsy();
     expect(done?.songIds).toEqual(['pr-1', 'pr-2']);
+  });
+
+  it('lowers concurrency below what was in flight when the server answers 429', async () => {
+    const gate = gatedDownloads();
+    const gated = mockDownloadAudioFileAsync.getMockImplementation()!;
+    let first = true;
+    mockDownloadAudioFileAsync.mockImplementation((...args: any[]) => {
+      if (first) {
+        first = false;
+        return Promise.resolve({ status: 429, rejected: 'http' });
+      }
+      return gated(...args);
+    });
+    mockFetchAlbum.mockResolvedValue({
+      id: 'cap-a',
+      name: 'A',
+      song: [1, 2, 3, 4, 5, 6].map((n) => makeChild(`cap-${n}`, { albumId: 'cap-a' })),
+    });
+    try {
+      await enqueueAlbumDownload('cap-a');
+      await settle();
+      let peakAfter = 0;
+      for (let round = 0; round < 10; round++) {
+        // eslint-disable-next-line no-await-in-loop
+        await gate.releaseAll();
+        // eslint-disable-next-line no-await-in-loop
+        await settle();
+        peakAfter = Math.max(peakAfter, gate.pending.length);
+      }
+      await waitForQueueIdle();
+      expect(peakAfter).toBeLessThanOrEqual(2);
+    } finally {
+      teardownMusicCache();
+      initMusicCache();
+    }
   });
 
   it('does not start a song that was waiting for a slot when its item is cancelled', async () => {

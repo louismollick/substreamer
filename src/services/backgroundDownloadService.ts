@@ -42,8 +42,10 @@ let heartbeat: ReturnType<typeof setInterval> | null = null;
 /** The system refused the last request; cleared by the next accepted one. */
 let beginRefused = false;
 
-/** Songs transferred since the running task began. */
+/** Songs finished since the running task began, and the remaining count last
+ *  seen. Both come from one queue snapshot, so the total never flickers. */
 let songsDone = 0;
+let lastRemaining = 0;
 
 function progressSubtitle(completed: number, total: number): string {
   return i18n.t('backgroundDownloadProgress', { completed, total });
@@ -54,19 +56,14 @@ function reportProgress(): void {
   // Ends only once no item is queued or still being finalised, so the last
   // item's completion write lands while the task keeps the app running.
   if (!downloadQueue.some((q) => q.status === 'queued' || q.status === 'downloading')) {
-    endBackgroundDownloads(true);
+    endBackgroundDownloads(!downloadQueue.some((q) => q.status === 'error'));
     return;
   }
   const remaining = remainingQueuedSongs(downloadQueue);
+  if (remaining < lastRemaining) songsDone += lastRemaining - remaining;
+  lastRemaining = remaining;
   const total = songsDone + remaining;
   setContinuedProcessingProgress(songsDone, total, progressSubtitle(songsDone, total));
-}
-
-/** Called by the download pipeline each time a song finishes transferring. */
-export function recordBackgroundSongDone(): void {
-  if (!unsubscribeProgress) return;
-  songsDone++;
-  reportProgress();
 }
 
 function startTracking(): void {
@@ -106,6 +103,7 @@ export async function beginBackgroundDownloads(): Promise<void> {
 
   const wasActive = isContinuedProcessingActive();
   if (!wasActive) songsDone = 0;
+  lastRemaining = remaining;
   const total = songsDone + remaining;
   const ok = await beginContinuedProcessing(
     i18n.t('backgroundDownloadTitle'),
