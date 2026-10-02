@@ -468,7 +468,7 @@ describe('orphanSongIfUnreferencedAsync (real SQL)', () => {
       expect(itemExists('album:x')).toBe(true);
     });
 
-    it('counts queued downloads as real references', async () => {
+    it('does not count queued downloads as real references', async () => {
       await seedHolder('album:x', ['s1'], { derived: true });
       await insertDownloadQueueItem(makeQueueRow({ queueId: 'q-count' }), [
         { id: 's1', title: 'Track One', isDir: false } as Child,
@@ -476,7 +476,7 @@ describe('orphanSongIfUnreferencedAsync (real SQL)', () => {
 
       const counts = await countRealSongRefsForSongsAsync(['s1', 's2']);
 
-      expect(counts.get('s1')).toBe(1);
+      expect(counts.has('s1')).toBe(false);
       expect(counts.has('s2')).toBe(false);
     });
 

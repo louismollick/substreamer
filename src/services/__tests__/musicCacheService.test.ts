@@ -242,6 +242,12 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
     orphanSongIfUnreferencedAsync: jest.fn(async (songId: string) => {
       const realRefs = edges.filter((e) => e.songId === songId && !isDerived(e.itemId)).length;
       if (realRefs !== 0) return { orphaned: false, affectedItems: [], prunedItems: [] };
+      // A queued download that still lists the song protects it (production's SQL guard).
+      for (const songs of queueSongs.values()) {
+        if (songs.some((x: any) => x.id === songId)) {
+          return { orphaned: false, affectedItems: [], prunedItems: [] };
+        }
+      }
       const affected = new Set<string>();
       const removed = edges.filter((e) => e.songId === songId);
       for (const e of removed) affected.add(e.itemId);
@@ -318,10 +324,8 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
     removeDownloadQueueItem: jest.fn((queueId: string) => {
       queueSongs.delete(queueId);
     }),
-    removeDownloadQueueItemsThroughPosition: jest.fn(async (max: number) => {
-      for (const [queueId, position] of queuePositions) {
-        if (position <= max) queueSongs.delete(queueId);
-      }
+    removeDownloadQueueItems: jest.fn(async (queueIds: string[]) => {
+      for (const queueId of queueIds) queueSongs.delete(queueId);
       return true;
     }),
     updateDownloadQueueItem: jest.fn(),
@@ -1533,6 +1537,27 @@ describe('demoteAlbumToPartial', () => {
     expect(fileDeletesAsync.some((u) => u.includes('s2'))).toBe(false);
   });
 
+  it('keeps the file of a song a queued download still lists', async () => {
+    mockFileExists = true;
+    seedSong(makeCachedSong('s1'));
+    seedSong(makeCachedSong('s2'));
+    seedSong(makeCachedSong('s3'));
+    seedItem('album-1', { type: 'album', songIds: ['s1', 's2', 's3'], expectedSongCount: 3 });
+    seedItem('pl-1', { type: 'playlist', songIds: ['s1'] });
+    // A failed playlist item stays in the queue with its payload; it lists s2.
+    await persistenceMock.insertDownloadQueueItem(
+      { queueId: 'q-keep', queuePosition: 1 } as any,
+      [{ id: 's2', albumId: 'album-1' }] as any,
+    );
+
+    const result = await demoteAlbumToPartial('album-1');
+
+    expect(result).toEqual({ demoted: true, removed: false });
+    expect(fileDeletesAsync.some((u) => u.includes('s3'))).toBe(true);
+    expect(fileDeletesAsync.some((u) => u.includes('s2'))).toBe(false);
+    expect(musicCacheStore.getState().cachedSongs['s2']).toBeDefined();
+  });
+
   it('no-op guard when album item has no orphans (defensive: survivors fully cover it)', async () => {
     seedSong(makeCachedSong('s1'));
     seedItem('album-1', { type: 'album', songIds: ['s1'], expectedSongCount: 1 });
@@ -1982,7 +2007,7 @@ describe('clearDownloadQueue', () => {
 
   it('does not read every queued payload when clearing a large queue', async () => {
     const readRefs = persistenceMock.readDownloadQueueSongRefsAsync as jest.Mock;
-    const bulkRemove = persistenceMock.removeDownloadQueueItemsThroughPosition as jest.Mock;
+    const bulkRemove = persistenceMock.removeDownloadQueueItems as jest.Mock;
     readRefs.mockClear();
     bulkRemove.mockClear();
     musicCacheStore.setState({
@@ -2004,12 +2029,14 @@ describe('clearDownloadQueue', () => {
 
     expect(readRefs).not.toHaveBeenCalled();
     expect(bulkRemove).toHaveBeenCalledTimes(1);
-    expect(bulkRemove).toHaveBeenCalledWith(100);
+    expect(bulkRemove).toHaveBeenCalledWith(
+      Array.from({ length: 100 }, (_, i) => `bulk-q${i}`),
+    );
     expect(musicCacheStore.getState().downloadQueue).toHaveLength(0);
   });
 
-  it('mirrors the SQL position boundary when an enqueue races the clear', async () => {
-    const bulkRemove = persistenceMock.removeDownloadQueueItemsThroughPosition as jest.Mock;
+  it('keeps an item enqueued during the clear, even at a vacated position', async () => {
+    const bulkRemove = persistenceMock.removeDownloadQueueItems as jest.Mock;
     mockCheckStorageLimit.mockReturnValue(true);
     musicCacheStore.setState({
       downloadQueue: [
@@ -2024,8 +2051,9 @@ describe('clearDownloadQueue', () => {
         downloadQueue: [
           ...state.downloadQueue,
           {
-            queueId: 'raced-high', itemId: 'a3', type: 'album', name: 'X', status: 'queued',
-            totalSongs: 1, completedSongs: 0, addedAt: 3, queuePosition: 101,
+            // Reuses a position inside the range the clear snapshotted.
+            queueId: 'raced', itemId: 'a3', type: 'album', name: 'X', status: 'queued',
+            totalSongs: 1, completedSongs: 0, addedAt: 3, queuePosition: 50,
           },
         ],
       }));
@@ -2034,13 +2062,12 @@ describe('clearDownloadQueue', () => {
 
     await clearDownloadQueue();
 
-    expect(musicCacheStore.getState().downloadQueue.map((item) => item.queueId)).toEqual([
-      'raced-high',
-    ]);
+    expect(bulkRemove).toHaveBeenCalledWith(['snapshot']);
+    expect(musicCacheStore.getState().downloadQueue.map((item) => item.queueId)).toEqual(['raced']);
   });
 
   it('falls back to per-item cancel when the bulk delete fails', async () => {
-    const bulkRemove = persistenceMock.removeDownloadQueueItemsThroughPosition as jest.Mock;
+    const bulkRemove = persistenceMock.removeDownloadQueueItems as jest.Mock;
     mockCheckStorageLimit.mockReturnValue(true);
     bulkRemove.mockResolvedValueOnce(false);
     musicCacheStore.setState({

@@ -64,7 +64,7 @@ import {
   readDownloadQueueSongRefsAsync,
   readDownloadQueueSongsAsync,
   readQueuedSongStatus,
-  removeDownloadQueueItemsThroughPosition,
+  removeDownloadQueueItems,
 } from '../store/persistence/musicCacheTables';
 import { logImageCache } from './imageCacheLogger';
 import { processingOverlayStore } from '../store/processingOverlayStore';
@@ -2048,6 +2048,7 @@ export async function demoteAlbumToPartial(
     if (s) orphanSnapshot.push(s);
   }
 
+  const removedSongIds = new Set<string>();
   // Remove each orphan edge. Positions shift after each removal, so we
   // re-read the current index every iteration.
   for (const songId of orphanSongIds) {
@@ -2056,11 +2057,12 @@ export async function demoteAlbumToPartial(
     const idx = current.songIds.indexOf(songId);
     if (idx < 0) continue;
     // eslint-disable-next-line no-await-in-loop
-    await musicCacheStore.getState().removeCachedItemSong(itemId, idx + 1);
-    // `removeCachedItemSong` has already deleted the cached_songs row and
-    // decremented refcount-via-COUNT. Update the in-memory mirrors.
+    const { orphanedSongId } = await musicCacheStore.getState().removeCachedItemSong(itemId, idx + 1);
+    // A song a queued download still lists keeps its row and its file.
+    if (orphanedSongId === null) continue;
     trackToItems.delete(songId);
     trackUriMap.delete(songId);
+    removedSongIds.add(songId);
   }
 
   // The album is now a PARTIAL grouping: every surviving song is — by the
@@ -2078,7 +2080,7 @@ export async function demoteAlbumToPartial(
   // Delete orphan files OFF-THREAD (best-effort), then re-check the storage
   // limit once the unlinks have freed space — same ordering as the prior
   // sync deletes → resume.
-  const deletions = orphanSnapshot.map((song) =>
+  const deletions = orphanSnapshot.filter((song) => removedSongIds.has(song.id)).map((song) =>
     deleteFileAsync(resolveSongFile(song).uri).catch(() => { /* best-effort */ }),
   );
   void Promise.all(deletions).then(() => resumeIfSpaceAvailable());
@@ -2397,18 +2399,12 @@ async function clearQueueSnapshot(queue: DownloadQueueItem[]): Promise<void> {
   // bulk DELETE cannot run ahead of a parked insert that would then reappear.
   await Promise.all(queue.map((item) => whenQueuePayloadWritten(item.queueId)));
 
-  // queue_position is sparse by design. Deleting through the snapshot maximum is
-  // one SQLite write; mirror the same boundary in memory so an item enqueued
-  // meanwhile can never be deleted from SQL while surviving only in the store.
-  const maxQueuePosition = queue.reduce(
-    (max, item) => Math.max(max, item.queuePosition),
-    queue[0].queuePosition,
-  );
-  if (await removeDownloadQueueItemsThroughPosition(maxQueuePosition)) {
+  // One SQL delete for the snapshot's rows. An item enqueued meanwhile is not in
+  // the snapshot, so it survives in SQL and in memory alike.
+  const snapshotIds = new Set(queue.map((item) => item.queueId));
+  if (await removeDownloadQueueItems([...snapshotIds])) {
     musicCacheStore.setState((state) => ({
-      downloadQueue: state.downloadQueue.filter(
-        (item) => item.queuePosition > maxQueuePosition,
-      ),
+      downloadQueue: state.downloadQueue.filter((item) => !snapshotIds.has(item.queueId)),
     }));
     scheduleRecalculate();
   } else {

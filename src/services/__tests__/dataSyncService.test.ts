@@ -990,6 +990,21 @@ describe('dataSyncService — reconcileStaleLibrary', () => {
     expect(mockRunLibraryReapIfNeeded).toHaveBeenCalled();
   });
 
+  it('does not stamp the week when the walk left the sync incomplete', async () => {
+    insertSongs(3);
+    mockRunNormalizedLibrarySync.mockImplementationOnce(() => {
+      syncStatusStore.setState({ songSyncComplete: false });
+      return Promise.resolve();
+    });
+    await reconcileStaleLibrary();
+    expect(mockRunLibraryReapIfNeeded).not.toHaveBeenCalled();
+
+    syncStatusStore.setState({ songSyncComplete: true });
+    mockRunNormalizedLibrarySync.mockClear();
+    await reconcileStaleLibrary();
+    expect(mockRunNormalizedLibrarySync).toHaveBeenCalled();
+  });
+
   it('runs at most once a week', async () => {
     insertSongs(3);
     await reconcileStaleLibrary();

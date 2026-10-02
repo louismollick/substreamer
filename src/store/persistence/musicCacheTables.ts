@@ -897,8 +897,9 @@ export function countDownloadQueueItems(): number {
 /**
  * Batched, async real-holder refcount for a set of songs in one round-trip.
  * Returns a Map songId → count of edges whose holder is
- * NOT a derived partial-album grouping (`COALESCE(derived,0)=0`), plus queued
- * downloads that still list the song. Songs with no real
+ * NOT a derived partial-album grouping (`COALESCE(derived,0)=0`). Queued
+ * downloads are not holders here: they protect a song from deletion
+ * (`NO_REAL_HOLDER_SQL`) but must not make a downloaded item look unremovable. Songs with no real
  * holder are omitted (caller treats a missing key as 0). Chunked to stay under the
  * SQLite bound-variable limit. Fails SAFE: if the `derived` column doesn't exist yet
  * (migrations not yet run) the JOIN throws and we fall back to the raw all-edges count
@@ -924,14 +925,6 @@ export async function countRealSongRefsForSongsAsync(
         chunk,
       );
       for (const r of rows) counts.set(r.song_id, r.c);
-      // eslint-disable-next-line no-await-in-loop
-      const queued = await db.getAllAsync<{ song_id: string; c: number }>(
-        `SELECT song_id, COUNT(*) AS c FROM download_queue_songs
-          WHERE song_id IN (${placeholders})
-          GROUP BY song_id;`,
-        chunk,
-      );
-      for (const r of queued) counts.set(r.song_id, (counts.get(r.song_id) ?? 0) + r.c);
     } catch {
       // eslint-disable-next-line no-await-in-loop
       const rows = await db.getAllAsync<{ song_id: string; c: number }>(
@@ -1869,19 +1862,16 @@ export async function removeDownloadQueueItem(queueId: string): Promise<void> {
 }
 
 /**
- * Delete every queue row at or before a snapshot position in one SQLite write.
- * Queue positions are sparse; callers must mirror the same position boundary
- * in memory after this succeeds. Returns false when the write could not be persisted.
+ * Delete the given queue rows in one SQLite write. Returns false when the write
+ * could not be persisted.
  */
-export async function removeDownloadQueueItemsThroughPosition(
-  maxQueuePosition: number,
-): Promise<boolean> {
+export async function removeDownloadQueueItems(queueIds: readonly string[]): Promise<boolean> {
   const db = getDb();
   if (db === null) return false;
   try {
     await db.runAsync(
-      'DELETE FROM download_queue WHERE queue_position <= ?;',
-      [maxQueuePosition],
+      'DELETE FROM download_queue WHERE queue_id IN (SELECT value FROM json_each(?));',
+      [JSON.stringify(queueIds)],
     );
     return true;
   } catch {

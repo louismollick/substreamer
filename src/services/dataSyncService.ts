@@ -386,9 +386,13 @@ export async function reconcileStaleLibrary(): Promise<void> {
   if (localCount <= serverCount) return;
   const last = Number(await kvStorage.getItem(RECONCILE_KEY)) || 0;
   if (Date.now() - last < RECONCILE_INTERVAL_MS) return;
-  await kvStorage.setItem(RECONCILE_KEY, String(Date.now()));
   await runNormalizedLibrarySync({ full: true, reason: `reconcile:local=${localCount},server=${serverCount}` });
+  // A walk that paused on an error leaves the sync incomplete; stamp (and reap)
+  // only once both halves finished, so an interrupted one retries next launch.
+  const after = syncStatusStore.getState();
+  if (!after.librarySyncComplete || !after.songSyncComplete) return;
   await runLibraryReapIfNeeded();
+  await kvStorage.setItem(RECONCILE_KEY, String(Date.now()));
 }
 
 let _offlineSyncPhaseUnsub: (() => void) | null = null;

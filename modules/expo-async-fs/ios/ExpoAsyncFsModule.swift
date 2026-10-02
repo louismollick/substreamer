@@ -149,14 +149,17 @@ public class ExpoAsyncFsModule: Module {
       delegateQueue: nil
     )
 
+    var ownTask: URLSessionTask?
     defer {
-      ActiveDownloads.remove(downloadId)
+      // Only our own task: a retry of the same id may already have registered.
+      if let ownTask = ownTask { ActiveDownloads.remove(downloadId, ownTask) }
       session.finishTasksAndInvalidate()
     }
 
     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
       delegate.continuation = continuation
       let task = session.downloadTask(with: request)
+      ownTask = task
       ActiveDownloads.add(downloadId, task)
       task.resume()
     }
@@ -335,9 +338,9 @@ private enum ActiveDownloads {
     tasks[id] = task
   }
 
-  static func remove(_ id: String) {
+  static func remove(_ id: String, _ task: URLSessionTask) {
     lock.lock(); defer { lock.unlock() }
-    tasks.removeValue(forKey: id)
+    if tasks[id] === task { tasks.removeValue(forKey: id) }
   }
 
   static func cancel(_ id: String) -> Bool {
