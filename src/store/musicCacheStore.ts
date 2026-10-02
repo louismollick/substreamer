@@ -468,7 +468,12 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
   },
 
   markItemComplete: (queueId, item, songs, edges, childBySongId) => {
-    const existing = get().cachedItems[item.itemId];
+    const current = get().cachedItems[item.itemId];
+    // A derived partial-album row being completed by a real download is replaced,
+    // not topped up: its edges were written in finish order and its metadata is
+    // the partial grouping's.
+    const promoting = current?.derived === true && !item.derived;
+    const existing = promoting ? undefined : current;
     // For top-ups (existing row):
     //   - preserve `downloadedAt` (user "downloaded" this earlier).
     //   - preserve `expectedSongCount`: the worker derives it from `songs.length`,
@@ -483,7 +488,7 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
         }
       : item;
 
-    markDownloadComplete(queueId, itemToPersist, songs, edges, childBySongId);
+    markDownloadComplete(queueId, itemToPersist, songs, edges, childBySongId, promoting);
 
     // New songIds from this run, in caller-supplied position order.
     const newSongIdsInOrder = [...edges]

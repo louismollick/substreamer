@@ -30,6 +30,10 @@ export function useDownloadBackgroundNotification() {
   const notificationId = useRef<string | null>(null);
 
   useEffect(() => {
+    // iOS: downloads continue under the continued-processing task (iOS 26+),
+    // whose Live Activity shows progress; the "return to the app" warning is
+    // Android-only.
+    if (Platform.OS === 'ios') return;
     const sub = AppState.addEventListener('change', async (next) => {
       const hasActive = musicCacheStore.getState().downloadQueue
         .some((q) => q.status === 'queued' || q.status === 'downloading');

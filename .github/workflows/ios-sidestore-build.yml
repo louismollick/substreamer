@@ -60,8 +60,7 @@ jobs:
             MAJOR_VERSION=${BASE_VERSION%%.*}
             VERSION_REMAINDER=${BASE_VERSION#*.}
             MINOR_VERSION=${VERSION_REMAINDER%%.*}
-            # Give each main build a unique CFBundleShortVersionString so
-            # SideStore can detect updates without relying on buildVersion alone.
+            # Give each main workflow run a distinct CFBundleShortVersionString.
             # Offset the CI run number to keep dev builds above normal patch versions.
             VERSION="${MAJOR_VERSION}.${MINOR_VERSION}.$((1000 + GITHUB_RUN_NUMBER))"
             IPA_NAME=Substreamer-Main.ipa
