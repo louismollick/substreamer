@@ -147,6 +147,17 @@ jest.mock('../scanService', () => ({
   registerScanCompletedHook: () => {},
 }));
 
+const mockCanUserScan = jest.fn(() => true);
+jest.mock('../serverCapabilityService', () => ({
+  ...jest.requireActual('../serverCapabilityService'),
+  canUserScan: () => mockCanUserScan(),
+}));
+
+const mockRunLibraryReapIfNeeded = jest.fn(() => Promise.resolve());
+jest.mock('../libraryReapService', () => ({
+  runLibraryReapIfNeeded: () => mockRunLibraryReapIfNeeded(),
+}));
+
 jest.mock('../scrobbleService', () => ({
   __esModule: true,
   registerScrobbleBatchCompletedHook: () => {},
@@ -226,6 +237,7 @@ import {
   onStartup,
   forceFullResync,
   recoverStalledSync,
+  reconcileStaleLibrary,
   __internal,
 } from '../dataSyncService';
 import * as subsonicService from '../subsonicService';
@@ -233,6 +245,8 @@ import type { Playlist } from '../subsonicService';
 import { authStore } from '../../store/authStore';
 import { syncStatusStore } from '../../store/syncStatusStore';
 import { getDb } from '../../store/persistence/db';
+import { scanStatusStore } from '../../store/scanStatusStore';
+import { kvStorage } from '../../store/persistence';
 
 const mockFetchServerInfo = subsonicService.fetchServerInfo as jest.Mock;
 
@@ -944,3 +958,84 @@ describe('pausing a running sync', () => {
   });
 });
 
+
+describe('dataSyncService — reconcileStaleLibrary', () => {
+  const insertSongs = (n: number) => {
+    const db = getDb()!;
+    for (let i = 0; i < n; i++) {
+      db.runSync("INSERT OR REPLACE INTO songs (id, title) VALUES (?, 'x')", [`rs-${i}`]);
+    }
+  };
+
+  beforeEach(async () => {
+    getDb()!.runSync("DELETE FROM songs WHERE id LIKE 'rs-%'");
+    await kvStorage.removeItem('substreamer-library-reconcile-at');
+    mockCanUserScan.mockReturnValue(true);
+    syncStatusStore.setState({ librarySyncComplete: true, songSyncComplete: true });
+    // Other suites' rows share the table: the server count is relative to them.
+    const base = (getDb()!.getFirstSync<{ n: number }>('SELECT COUNT(*) AS n FROM songs')?.n ?? 0);
+    scanStatusStore.setState({ count: base + 2 } as any);
+  });
+
+  afterAll(() => {
+    getDb()!.runSync("DELETE FROM songs WHERE id LIKE 'rs-%'");
+  });
+
+  it('re-walks the library in full and reaps when local holds more songs than the server', async () => {
+    insertSongs(3);
+    await reconcileStaleLibrary();
+    expect(mockRunNormalizedLibrarySync).toHaveBeenCalledWith(
+      expect.objectContaining({ full: true }),
+    );
+    expect(mockRunLibraryReapIfNeeded).toHaveBeenCalled();
+  });
+
+  it('does not stamp the week when the walk left the sync incomplete', async () => {
+    insertSongs(3);
+    mockRunNormalizedLibrarySync.mockImplementationOnce(() => {
+      syncStatusStore.setState({ songSyncComplete: false });
+      return Promise.resolve();
+    });
+    await reconcileStaleLibrary();
+    expect(mockRunLibraryReapIfNeeded).not.toHaveBeenCalled();
+
+    syncStatusStore.setState({ songSyncComplete: true });
+    mockRunNormalizedLibrarySync.mockClear();
+    await reconcileStaleLibrary();
+    expect(mockRunNormalizedLibrarySync).toHaveBeenCalled();
+  });
+
+  it('ignores a persisted server count when the scan-status fetch failed', async () => {
+    insertSongs(3);
+    scanStatusStore.setState({ error: 'Failed to fetch scan status' } as any);
+    try {
+      await reconcileStaleLibrary();
+      expect(mockRunNormalizedLibrarySync).not.toHaveBeenCalled();
+    } finally {
+      scanStatusStore.setState({ error: null } as any);
+    }
+  });
+
+  it('runs at most once a week', async () => {
+    insertSongs(3);
+    await reconcileStaleLibrary();
+    mockRunNormalizedLibrarySync.mockClear();
+    await reconcileStaleLibrary();
+    expect(mockRunNormalizedLibrarySync).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when counts agree, the sync is incomplete, or the server gives no count', async () => {
+    insertSongs(2);
+    await reconcileStaleLibrary();
+    insertSongs(3);
+    syncStatusStore.setState({ songSyncComplete: false });
+    await reconcileStaleLibrary();
+    syncStatusStore.setState({ songSyncComplete: true });
+    mockCanUserScan.mockReturnValue(false);
+    await reconcileStaleLibrary();
+    mockCanUserScan.mockReturnValue(true);
+    scanStatusStore.setState({ count: 0 } as any);
+    await reconcileStaleLibrary();
+    expect(mockRunNormalizedLibrarySync).not.toHaveBeenCalled();
+  });
+});

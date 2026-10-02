@@ -15,6 +15,7 @@ import type { Child } from 'subsonic-api';
 
 import { __setDbForTests, getDb, type InternalDb } from '../db';
 import {
+  countRealSongRefsForSongsAsync,
   insertCachedItemSong,
   insertDownloadQueueItem,
   markDownloadComplete,
@@ -204,6 +205,21 @@ describe('markDownloadComplete (real SQL)', () => {
       { position: 2, song_id: 's2' },
       { position: 3, song_id: 's3' },
     ]);
+  });
+
+  it('promotes partial-album edges in track order while retaining the recovery payload', async () => {
+    await seedHolder('alb-1', ['s2', 's1'], { derived: true });
+    await insertDownloadQueueItem(makeQueueRow(), [{ id: 's1' }, { id: 's2' }] as Child[]);
+    expect(await markDownloadComplete(
+      'q-1', makeItem({ derived: false }), [makeSong({ id: 's1' }), makeSong({ id: 's2' })],
+      [{ songId: 's1', position: 1 }, { songId: 's2', position: 2 }],
+      undefined, { keepQueue: true, replaceEdges: true },
+    )).toBe(true);
+    expect(edgesOf('alb-1')).toEqual([
+      { position: 1, song_id: 's1' }, { position: 2, song_id: 's2' },
+    ]);
+    expect(count('download_queue')).toBe(1);
+    expect(count('download_queue_songs')).toBe(2);
   });
 
   it('orders edges by the caller position, not by array order', async () => {
@@ -455,6 +471,44 @@ describe('orphanSongIfUnreferencedAsync (real SQL)', () => {
     });
   });
 
+  describe('the queued-download guard', () => {
+    it('keeps a song a queued download still lists, even with only derived holders', async () => {
+      await seedHolder('album:x', ['s1'], { derived: true });
+      await insertDownloadQueueItem(makeQueueRow({ queueId: 'q-keep' }), [
+        { id: 's1', title: 'Track One', isDir: false } as Child,
+      ]);
+
+      const result = await orphanSongIfUnreferencedAsync('s1');
+
+      expect(result.orphaned).toBe(false);
+      expect(songExists('s1')).toBe(true);
+      expect(itemExists('album:x')).toBe(true);
+    });
+
+    it('does not count queued downloads as real references', async () => {
+      await seedHolder('album:x', ['s1'], { derived: true });
+      await insertDownloadQueueItem(makeQueueRow({ queueId: 'q-count' }), [
+        { id: 's1', title: 'Track One', isDir: false } as Child,
+      ]);
+
+      const counts = await countRealSongRefsForSongsAsync(['s1', 's2']);
+
+      expect(counts.has('s1')).toBe(false);
+      expect(counts.has('s2')).toBe(false);
+    });
+
+    it('orphans again once the queue row is gone', async () => {
+      await seedHolder('album:x', ['s1'], { derived: true });
+      await insertDownloadQueueItem(makeQueueRow({ queueId: 'q-gone' }), [
+        { id: 's1', title: 'Track One', isDir: false } as Child,
+      ]);
+      realDb.runSync('DELETE FROM download_queue WHERE queue_id = ?;', ['q-gone']);
+
+      expect((await orphanSongIfUnreferencedAsync('s1')).orphaned).toBe(true);
+      expect(songExists('s1')).toBe(false);
+    });
+  });
+
   describe('holder pruning', () => {
     it('prunes a derived holder whose only song was this one, cascading its edge', async () => {
       await seedHolder('album:x', ['s1'], { derived: true });
@@ -614,6 +668,16 @@ describe('orphanSongIfUnreferencedAsync (real SQL)', () => {
 /* ------------------------------------------------------------------ */
 
 describe('removeCachedItemSongAndOrphanAsync (real SQL)', () => {
+  it('drops an album edge while retaining a queued song and its row', async () => {
+    await seedHolder('alb-1', ['s1', 's2']);
+    await insertDownloadQueueItem(makeQueueRow(), [{ id: 's1' }] as Child[]);
+    expect(await removeCachedItemSongAndOrphanAsync('alb-1', 1, 's1')).toEqual({
+      persisted: true, orphaned: false,
+    });
+    expect(songExists('s1')).toBe(true);
+    expect(edgesOf('alb-1')).toEqual([{ position: 1, song_id: 's2' }]);
+  });
+
   it('removes the exact edge and orphans the song in one commit', async () => {
     await seedHolder('alb-1', ['s1', 's2']);
 
@@ -683,6 +747,16 @@ describe('removeCachedItemSongAndOrphanAsync (real SQL)', () => {
 });
 
 describe('demoteCachedAlbumToPartialAsync (real SQL)', () => {
+  it('retains a queued song during atomic demotion', async () => {
+    await seedHolder('alb-1', ['s1', 's2']);
+    await insertDownloadQueueItem(makeQueueRow(), [{ id: 's1' }] as Child[]);
+    expect(await demoteCachedAlbumToPartialAsync('alb-1', ['s1', 's2'])).toEqual({
+      persisted: true, orphanedSongIds: ['s2'],
+    });
+    expect(songExists('s1')).toBe(true);
+    expect(edgesOf('alb-1')).toEqual([{ position: 1, song_id: 's1' }]);
+  });
+
   it('marks the album derived and orphans only the supplied candidates atomically', async () => {
     await seedHolder('album:a', ['s1', 's2', 's3']);
     await seedHolder('pl-1', ['s1', 's2']);

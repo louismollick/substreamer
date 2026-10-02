@@ -897,7 +897,9 @@ export function countDownloadQueueItems(): number {
 /**
  * Batched, async real-holder refcount for a set of songs in one round-trip.
  * Returns a Map songId → count of edges whose holder is
- * NOT a derived partial-album grouping (`COALESCE(derived,0)=0`). Songs with no real
+ * NOT a derived partial-album grouping (`COALESCE(derived,0)=0`). Queued
+ * downloads are not holders here: they protect a song from deletion
+ * (`NO_REAL_HOLDER_SQL`) but must not make a downloaded item look unremovable. Songs with no real
  * holder are omitted (caller treats a missing key as 0). Chunked to stay under the
  * SQLite bound-variable limit. Fails SAFE: if the `derived` column doesn't exist yet
  * (migrations not yet run) the JOIN throws and we fall back to the raw all-edges count
@@ -981,7 +983,8 @@ function positionShiftCommands(spec: {
 
 /**
  * The guard every destructive statement of the orphan batch carries: true only
- * while NO real (non-derived) holder still has an edge to this song. It is
+ * while NO real (non-derived) holder still has an edge to this song and no
+ * queued download still lists it (its intent will need it). Binds `songId` twice. It is
  * uncorrelated with the row being written and none of the statements can change
  * it — they only ever remove derived holders and this song's own edges — so the
  * batch's outcome does not depend on evaluation order, and a real holder that
@@ -990,7 +993,8 @@ function positionShiftCommands(spec: {
  */
 const NO_REAL_HOLDER_SQL = `NOT EXISTS (SELECT 1 FROM cached_item_songs e2
              JOIN cached_items i2 ON i2.item_id = e2.item_id
-            WHERE e2.song_id = ? AND COALESCE(i2.derived, 0) = 0)`;
+            WHERE e2.song_id = ? AND COALESCE(i2.derived, 0) = 0)
+        AND NOT EXISTS (SELECT 1 FROM download_queue_songs q2 WHERE q2.song_id = ?)`;
 
 /**
  * The orphan itself, as five self-guarded statements. Every decision is in the
@@ -1015,7 +1019,7 @@ const orphanSongCommands = (songId: string): BatchCommand[] => {
                       WHERE d.item_id = cached_item_songs.item_id AND d.song_id = ?
                         AND d.position < cached_item_songs.position)
             AND ${NO_REAL_HOLDER_SQL}`,
-    params: [songId, songId],
+    params: [songId, songId, songId],
   });
   return [
     // 1. Prune derived holders whose ONLY song is this one — FK cascade takes
@@ -1028,20 +1032,21 @@ const orphanSongCommands = (songId: string): BatchCommand[] => {
          AND NOT EXISTS (SELECT 1 FROM cached_item_songs x
                           WHERE x.item_id = cached_items.item_id AND x.song_id <> ?)
          AND ${NO_REAL_HOLDER_SQL};`,
-      [songId, songId, songId],
+      [songId, songId, songId, songId],
     ],
     // 2. Survivors above the doomed slot go negative, already decremented.
     tailShift.shift,
     // 3. Drop the edges. By song_id, not by (item_id, position) — there is no edge
     //    list read in JS, so there is nothing that can go stale.
-    [`DELETE FROM cached_item_songs WHERE song_id = ? AND ${NO_REAL_HOLDER_SQL};`, [songId, songId]],
+    [`DELETE FROM cached_item_songs WHERE song_id = ? AND ${NO_REAL_HOLDER_SQL};`, [songId, songId, songId]],
     // 4. Bring the shifted tails back up.
     tailShift.restore,
-    // 5. The song row, iff no edge anywhere still points at it.
+    // 5. The song row, iff no edge anywhere and no queued download still points at it.
     [
       `DELETE FROM cached_songs WHERE song_id = ?
-       AND NOT EXISTS (SELECT 1 FROM cached_item_songs WHERE cached_item_songs.song_id = ?);`,
-      [songId, songId],
+       AND NOT EXISTS (SELECT 1 FROM cached_item_songs WHERE cached_item_songs.song_id = ?)
+       AND NOT EXISTS (SELECT 1 FROM download_queue_songs WHERE download_queue_songs.song_id = ?);`,
+      [songId, songId, songId],
     ],
   ];
 };
@@ -1080,6 +1085,11 @@ export async function orphanSongIfUnreferencedAsync(
       [songId],
     );
     if (holders.some((h) => h.derived === 0)) return { orphaned: false, affectedItems, prunedItems };
+    const queued = await db.getFirstAsync<{ c: number }>(
+      'SELECT COUNT(*) AS c FROM download_queue_songs WHERE song_id = ?;',
+      [songId],
+    );
+    if ((queued?.c ?? 0) > 0) return { orphaned: false, affectedItems, prunedItems };
     affectedItems.push(...new Set(holders.map((h) => h.item_id)));
 
     await db.runAtomicBatchAsync(orphanSongCommands(songId));
@@ -1954,6 +1964,24 @@ export async function removeDownloadQueueItem(queueId: string): Promise<boolean>
 }
 
 /**
+ * Delete the given queue rows in one SQLite write. Returns false when the write
+ * could not be persisted.
+ */
+export async function removeDownloadQueueItems(queueIds: readonly string[]): Promise<boolean> {
+  const db = getDb();
+  if (db === null) return false;
+  try {
+    await db.runAsync(
+      'DELETE FROM download_queue WHERE queue_id IN (SELECT value FROM json_each(?));',
+      [JSON.stringify(queueIds)],
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Partial update of a queue row. Only status / completedSongs / error can be
  * updated via this path; other fields are immutable once the item is queued.
  */
@@ -2061,6 +2089,9 @@ const APPEND_CACHED_ITEM_SONG_SQL = `INSERT OR IGNORE INTO cached_item_songs (it
  *
  * `songs` is a mix of `Child`-derived rows and rows rebuilt from memory. Only ids
  * present in `childBySongId` get their `cached_song_*` mirrors rewritten.
+ *
+ * `replaceEdges` replaces a derived partial-album row's finish-order edges with
+ * the completed album's track order.
  */
 export async function markDownloadComplete(
   queueId: string,
@@ -2068,7 +2099,7 @@ export async function markDownloadComplete(
   songs: CachedSongRow[],
   edges: Array<{ songId: string; position: number }>,
   childBySongId?: Map<string, Child>,
-  options?: { keepQueue?: boolean },
+  options?: { keepQueue?: boolean; replaceEdges?: boolean },
 ): Promise<boolean> {
   const db = getDb();
   if (db === null) return false;
@@ -2076,6 +2107,9 @@ export async function markDownloadComplete(
     const commands: BatchCommand[] = [];
     if (!options?.keepQueue) {
       commands.push(['DELETE FROM download_queue WHERE queue_id = ?;', [queueId]]);
+    }
+    if (options?.replaceEdges) {
+      commands.push(['DELETE FROM cached_item_songs WHERE item_id = ?;', [item.itemId]]);
     }
     commands.push(...cachedItemCommands(item));
     for (const song of songs) {

@@ -29,6 +29,8 @@ jest.mock('../../store/playbackSettingsStore', () => ({
   ],
 }));
 
+import { digestStringAsync, getRandomBytesAsync } from 'expo-crypto';
+
 import { authStore } from '../../store/authStore';
 import { playbackSettingsStore } from '../../store/playbackSettingsStore';
 import {
@@ -62,6 +64,32 @@ beforeEach(() => {
 });
 
 describe('getCoverArtUrl', () => {
+  it('keeps each token paired with its salt during concurrent auth setup', async () => {
+    const random = getRandomBytesAsync as jest.Mock;
+    const digest = digestStringAsync as jest.Mock;
+    random.mockResolvedValueOnce(new Uint8Array(16).fill(1));
+    random.mockResolvedValueOnce(new Uint8Array(16).fill(2));
+    let finishFirst!: (value: string) => void;
+    let finishSecond!: (value: string) => void;
+    digest.mockImplementationOnce(() => new Promise<string>((resolve) => { finishFirst = resolve; }));
+    digest.mockImplementationOnce(() => new Promise<string>((resolve) => { finishSecond = resolve; }));
+
+    const first = ensureCoverArtAuth();
+    const second = ensureCoverArtAuth();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    finishFirst('token-for-salt-1');
+    await first;
+    const firstUrl = new URL(getCoverArtUrl('al-1')!);
+    expect(firstUrl.searchParams.get('s')).toBe('01'.repeat(16));
+    expect(firstUrl.searchParams.get('t')).toBe('token-for-salt-1');
+
+    finishSecond('token-for-salt-2');
+    await second;
+    const secondUrl = new URL(getCoverArtUrl('al-1')!);
+    expect(secondUrl.searchParams.get('s')).toBe('02'.repeat(16));
+    expect(secondUrl.searchParams.get('t')).toBe('token-for-salt-2');
+  });
+
   it('returns null when not logged in', async () => {
     mockAuthStore.getState.mockReturnValue({
       isLoggedIn: false,
@@ -187,10 +215,11 @@ describe('getDownloadStreamUrl', () => {
     expect(getDownloadStreamUrl('')).toBeNull();
   });
 
-  it('builds download URL with estimateContentLength', async () => {
+  it('never asks for an estimated Content-Length', async () => {
     await ensureCoverArtAuth();
     const url = getDownloadStreamUrl('track-1');
-    expect(url).toContain('estimateContentLength=true');
+    expect(url).toContain('/rest/stream.view?');
+    expect(url).not.toContain('estimateContentLength');
   });
 
   it('includes download format when set', async () => {

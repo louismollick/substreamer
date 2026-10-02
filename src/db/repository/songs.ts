@@ -364,6 +364,10 @@ export async function listSongsBefore(
 
 export const countSongs = (db: InternalDb): Promise<number> => countRows(db, 'songs');
 
+/** Library songs with no downloaded file — what a full-library download will fetch. */
+export const countSongsNotDownloaded = (db: InternalDb): Promise<number> =>
+  countRows(db, 'songs', 'id NOT IN (SELECT song_id FROM cached_songs)');
+
 /**
  * Drop this album's songs that the server no longer lists. Servers that derive song ids
  * from path+tags (Navidrome et al.) emit fresh ids after a re-tag, and since nothing

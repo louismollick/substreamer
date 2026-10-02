@@ -11,6 +11,17 @@ interface DownloadResult {
   bytes: number;
 }
 
+export interface AudioDownloadResult {
+  uri: string;
+  bytes: number;
+  /** HTTP status of the response. */
+  status: number;
+  /** Set when nothing was written: non-2xx (`http`) or a non-audio body (`notAudio`). */
+  rejected?: 'http' | 'notAudio';
+  /** Parsed `Retry-After` header (seconds) on a rejected response, when present. */
+  retryAfterSeconds?: number;
+}
+
 export interface DirectoryEntry {
   name: string;
   size: number;
@@ -35,6 +46,12 @@ interface ExpoAsyncFsNativeModule {
     destinationUri: string,
     downloadId: string,
   ): Promise<DownloadResult>;
+  downloadAudioFileAsync(
+    url: string,
+    destinationUri: string,
+    downloadId: string,
+  ): Promise<AudioDownloadResult>;
+  cancelDownloadAsync(downloadId: string): Promise<boolean>;
   addListener(eventName: string, listener: (event: DownloadProgressEvent) => void): EventSubscription;
 }
 
@@ -56,6 +73,8 @@ try {
     deleteFileAsync: () => Promise.resolve(false),
     deleteDirectoryAsync: () => Promise.resolve(false),
     downloadFileAsyncWithProgress: () => Promise.resolve({ uri: '', bytes: 0 }),
+    downloadAudioFileAsync: () => Promise.resolve({ uri: '', bytes: 0, status: 0, rejected: 'http' }),
+    cancelDownloadAsync: () => Promise.resolve(false),
     addListener: () => ({ remove: () => {} }),
   } as unknown as ExpoAsyncFsNativeModule;
 }

@@ -200,6 +200,8 @@ beforeEach(() => {
   mockHydrateCachedSongsAsync.mockResolvedValue({});
   mockHydrateCachedItemsAsync.mockResolvedValue({});
   mockHydrateDownloadQueueAsync.mockResolvedValue([]);
+  mockMarkDownloadComplete.mockResolvedValue(true);
+  mockReorderCachedItemSongs.mockResolvedValue(true);
   mockRemoveDownloadQueueItem.mockResolvedValue(true);
   mockRemoveCachedItemSongAndOrphan.mockResolvedValue({ persisted: true, orphaned: false });
   mockDemoteCachedAlbumToPartial.mockResolvedValue({ persisted: true, orphanedSongIds: [] });
@@ -584,7 +586,7 @@ describe('markItemComplete', () => {
     musicCacheStore.getState().markItemComplete(qid, item, songs, edges);
 
     // Trailing `undefined` = no `childBySongId`: these rows carry no real `Child`.
-    expect(mockMarkDownloadComplete).toHaveBeenCalledWith(qid, item, songs, edges, undefined);
+    expect(mockMarkDownloadComplete).toHaveBeenCalledWith(qid, item, songs, edges, undefined, { replaceEdges: false });
     const state = musicCacheStore.getState();
     expect(state.downloadQueue).toHaveLength(0);
     expect(state.cachedItems['a']).toBeDefined();

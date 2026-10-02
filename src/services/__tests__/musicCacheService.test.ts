@@ -5,7 +5,8 @@
 
 const mockListDirectoryAsync = jest.fn();
 const mockGetDirectorySizeAsync = jest.fn();
-const mockDownloadFileAsyncWithProgress = jest.fn();
+const mockDownloadAudioFileAsync = jest.fn();
+const mockCancelDownloadAsync = jest.fn(async (..._args: any[]) => false);
 
 // Filesystem mock state
 let mockFileExists = false;
@@ -76,14 +77,33 @@ jest.mock('expo-file-system', () => {
 jest.mock('expo-async-fs', () => ({
   listDirectoryAsync: (...args: any[]) => mockListDirectoryAsync(...args),
   getDirectorySizeAsync: (...args: any[]) => mockGetDirectorySizeAsync(...args),
-  downloadFileAsyncWithProgress: (...args: any[]) => mockDownloadFileAsyncWithProgress(...args),
+  downloadAudioFileAsync: (...args: any[]) => mockDownloadAudioFileAsync(...args),
+  cancelDownloadAsync: (...args: any[]) => mockCancelDownloadAsync(...args),
   deleteFileAsync: jest.fn(async (uri: string) => { fileDeletesAsync.push(uri); return true; }),
   deleteDirectoryAsync: jest.fn(async (uri: string) => { dirDeletesAsync.push(uri); return true; }),
 }));
 
+const mockAppStateListeners: Array<(state: string) => void> = [];
+const mockAppState = { currentState: 'background' };
 jest.mock('react-native', () => ({
   AppState: {
-    addEventListener: jest.fn(() => ({ remove: jest.fn() })),
+    get currentState() { return mockAppState.currentState; },
+    addEventListener: jest.fn((_e: string, fn: (state: string) => void) => {
+      mockAppStateListeners.push(fn);
+      return { remove: jest.fn() };
+    }),
+  },
+}));
+
+const mockBeginBackgroundDownloads = jest.fn(() => Promise.resolve());
+const mockExpiryHandlers: Array<() => void> = [];
+jest.mock('../backgroundDownloadService', () => ({
+  beginBackgroundDownloads: () => mockBeginBackgroundDownloads(),
+  endBackgroundDownloads: jest.fn(),
+  logDownloadEvent: jest.fn(),
+  onBackgroundDownloadsExpired: (fn: () => void) => {
+    mockExpiryHandlers.push(fn);
+    return { remove: jest.fn() };
   },
 }));
 
@@ -188,10 +208,16 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
   // The queued payload, keyed by queueId — the fake's stand-in for
   // `download_queue_songs`. Written by the append, dropped with the queue row.
   const queueSongs = new Map<string, Array<Record<string, unknown>>>();
+  const queuePositions = new Map<string, number>();
   const isDerived = (itemId: string) => derivedItems.has(itemId);
   const orphanSongInMock = (songId: string) => {
     const realRefs = edges.filter((e) => e.songId === songId && !isDerived(e.itemId)).length;
     if (realRefs !== 0) return { orphaned: false, affectedItems: [], prunedItems: [] };
+    for (const songs of queueSongs.values()) {
+      if (songs.some((song) => song.id === songId)) {
+        return { orphaned: false, affectedItems: [], prunedItems: [] };
+      }
+    }
     const affected = new Set<string>();
     const removed = edges.filter((e) => e.songId === songId);
     for (const e of removed) affected.add(e.itemId);
@@ -299,7 +325,7 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
         return { persisted: true, orphanedSongIds };
       },
     ),
-    reorderCachedItemSongs: jest.fn(),
+    reorderCachedItemSongs: jest.fn(async () => true),
     // download_queue writes. The append echoes the store's optimistic slot back —
     // SQL assigns it for real, and here memory and disk agree.
     //
@@ -316,6 +342,7 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
       ) => {
         await new Promise((resolve) => setImmediate(resolve));
         queueSongs.set(row.queueId, [...songs]);
+        queuePositions.set(row.queueId, row.queuePosition);
         return row.queuePosition;
       },
     ),
@@ -323,17 +350,27 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
       queueSongs.delete(queueId);
       return true;
     }),
+    removeDownloadQueueItems: jest.fn(async (queueIds: string[]) => {
+      for (const queueId of queueIds) queueSongs.delete(queueId);
+      return true;
+    }),
     updateDownloadQueueItem: jest.fn(),
     reorderDownloadQueue: jest.fn(),
     markDownloadComplete: jest.fn(
       (queueId, item, songs, incomingEdges, _childBySongId, options) => {
         if (!options?.keepQueue) queueSongs.delete(queueId);
+        if (options?.replaceEdges) {
+          for (let i = edges.length - 1; i >= 0; i--) {
+            if (edges[i].itemId === item.itemId) edges.splice(i, 1);
+          }
+        }
         // An explicit finished download is a REAL holder.
         if (item?.derived) derivedItems.add(item.itemId);
         else derivedItems.delete(item.itemId);
         for (const e of incomingEdges) {
           edges.push({ itemId: item.itemId, position: e.position, songId: e.songId });
         }
+        return Promise.resolve(true);
       },
     ),
     // The four gated readers. The fake has one source, so there is no gate: a
@@ -347,7 +384,13 @@ jest.mock('../../store/persistence/musicCacheTables', () => {
     readDownloadQueueSongRefsAsync: jest.fn(async (queueId: string) =>
       (queueSongs.get(queueId) ?? []).map((s: any) => ({ id: s.id, albumId: s.albumId })),
     ),
-    readQueuedSongStatus: jest.fn(() => null),
+    // Any live payload listing the song counts as queued.
+    readQueuedSongStatus: jest.fn((songId: string) => {
+      for (const songs of queueSongs.values()) {
+        if (songs.some((x: any) => x.id === songId)) return 'queued';
+      }
+      return null;
+    }),
     bulkReplace: jest.fn(),
     clearAllMusicCacheRows: jest.fn(() => {
       edges.length = 0;
@@ -384,6 +427,7 @@ import {
   STARRED_SONGS_ITEM_ID,
   STARRED_COVER_ART_ID,
   initMusicCache,
+  teardownMusicCache,
   deferredMusicCacheInit,
   recoverStalledDownloadsAsync,
   forceRecoverDownloadsAsync,
@@ -407,6 +451,7 @@ import {
   resumeIfSpaceAvailable,
   deleteStarredSongsDownload,
   retryDownload,
+  retryFailedDownloads,
   redownloadItem,
   redownloadTrack,
   registerMusicCacheOnAlbumReferencedHook,
@@ -515,7 +560,7 @@ function seedSong(song: any) {
 beforeEach(() => {
   mockListDirectoryAsync.mockReset();
   mockGetDirectorySizeAsync.mockReset();
-  mockDownloadFileAsyncWithProgress.mockReset();
+  mockDownloadAudioFileAsync.mockReset();
   mockFetchAlbum.mockReset();
   mockFetchPlaylist.mockReset();
   mockAlbumDetailAlbums.value = {};
@@ -552,11 +597,15 @@ beforeEach(() => {
 });
 
 async function waitForQueueIdle(maxIter = 200): Promise<void> {
+  // Idle for several consecutive macrotasks: between one item finishing and the
+  // next being claimed there is a short window with nothing 'downloading'.
+  let idleTicks = 0;
   for (let i = 0; i < maxIter; i++) {
     await new Promise((r) => setImmediate(r));
     const { downloadQueue } = musicCacheStore.getState();
     const hasActive = downloadQueue.some((q: any) => q.status === 'downloading');
-    if (!hasActive) return;
+    idleTicks = hasActive ? 0 : idleTicks + 1;
+    if (idleTicks >= 5) return;
   }
 }
 
@@ -1618,6 +1667,7 @@ describe('demoteAlbumToPartial', () => {
   });
 
   it('replays an uncertain demotion and finishes cleanup from the replay result', async () => {
+    persistenceMock.demoteCachedAlbumToPartialAsync.mockClear();
     mockFileExists = true;
     seedSong(makeCachedSong('s1'));
     seedSong(makeCachedSong('s2'));
@@ -1642,6 +1692,27 @@ describe('demoteAlbumToPartial', () => {
     });
     expect(musicCacheStore.getState().cachedSongs['s2']).toBeUndefined();
     expect(fileDeletesAsync.some((u) => u.includes('s2'))).toBe(true);
+  });
+
+  it('keeps the file of a song a queued download still lists', async () => {
+    mockFileExists = true;
+    seedSong(makeCachedSong('s1'));
+    seedSong(makeCachedSong('s2'));
+    seedSong(makeCachedSong('s3'));
+    seedItem('album-1', { type: 'album', songIds: ['s1', 's2', 's3'], expectedSongCount: 3 });
+    seedItem('pl-1', { type: 'playlist', songIds: ['s1'] });
+    // A failed playlist item stays in the queue with its payload; it lists s2.
+    await persistenceMock.insertDownloadQueueItem(
+      { queueId: 'q-keep', queuePosition: 1 } as any,
+      [{ id: 's2', albumId: 'album-1' }] as any,
+    );
+
+    const result = await demoteAlbumToPartial('album-1');
+
+    expect(result).toEqual({ demoted: true, removed: false });
+    expect(fileDeletesAsync.some((u) => u.includes('s3'))).toBe(true);
+    expect(fileDeletesAsync.some((u) => u.includes('s2'))).toBe(false);
+    expect(musicCacheStore.getState().cachedSongs['s2']).toBeDefined();
   });
 
   it('no-op guard when album item has no orphans (defensive: survivors fully cover it)', async () => {
@@ -2112,6 +2183,85 @@ describe('clearDownloadQueue', () => {
     await clearDownloadQueue();
     expect(musicCacheStore.getState().downloadQueue).toHaveLength(0);
   });
+
+  it('does not read every queued payload when clearing a large queue', async () => {
+    const readRefs = persistenceMock.readDownloadQueueSongRefsAsync as jest.Mock;
+    const bulkRemove = persistenceMock.removeDownloadQueueItems as jest.Mock;
+    readRefs.mockClear();
+    bulkRemove.mockClear();
+    musicCacheStore.setState({
+      downloadQueue: Array.from({ length: 100 }, (_, i) => ({
+        queueId: `bulk-q${i}`,
+        itemId: `bulk-a${i}`,
+        type: 'album',
+        name: 'X',
+        status: 'queued',
+        totalSongs: 1,
+        completedSongs: 0,
+        addedAt: i,
+        queuePosition: i + 1,
+      })),
+    } as any);
+    mockCheckStorageLimit.mockReturnValue(true);
+
+    await clearDownloadQueue();
+
+    expect(readRefs).not.toHaveBeenCalled();
+    expect(bulkRemove).toHaveBeenCalledTimes(1);
+    expect(bulkRemove).toHaveBeenCalledWith(
+      Array.from({ length: 100 }, (_, i) => `bulk-q${i}`),
+    );
+    expect(musicCacheStore.getState().downloadQueue).toHaveLength(0);
+  });
+
+  it('keeps an item enqueued during the clear, even at a vacated position', async () => {
+    const bulkRemove = persistenceMock.removeDownloadQueueItems as jest.Mock;
+    mockCheckStorageLimit.mockReturnValue(true);
+    musicCacheStore.setState({
+      downloadQueue: [
+        {
+          queueId: 'snapshot', itemId: 'a1', type: 'album', name: 'X', status: 'queued',
+          totalSongs: 1, completedSongs: 0, addedAt: 1, queuePosition: 100,
+        },
+      ],
+    } as any);
+    bulkRemove.mockImplementationOnce(async () => {
+      musicCacheStore.setState((state: any) => ({
+        downloadQueue: [
+          ...state.downloadQueue,
+          {
+            // Reuses a position inside the range the clear snapshotted.
+            queueId: 'raced', itemId: 'a3', type: 'album', name: 'X', status: 'queued',
+            totalSongs: 1, completedSongs: 0, addedAt: 3, queuePosition: 50,
+          },
+        ],
+      }));
+      return true;
+    });
+
+    await clearDownloadQueue();
+
+    expect(bulkRemove).toHaveBeenCalledWith(['snapshot']);
+    expect(musicCacheStore.getState().downloadQueue.map((item) => item.queueId)).toEqual(['raced']);
+  });
+
+  it('falls back to per-item cancel when the bulk delete fails', async () => {
+    const bulkRemove = persistenceMock.removeDownloadQueueItems as jest.Mock;
+    mockCheckStorageLimit.mockReturnValue(true);
+    bulkRemove.mockResolvedValueOnce(false);
+    musicCacheStore.setState({
+      downloadQueue: [
+        {
+          queueId: 'fb-1', itemId: 'a1', type: 'album', name: 'X', status: 'queued',
+          totalSongs: 1, completedSongs: 0, addedAt: 1, queuePosition: 1,
+        },
+      ],
+    } as any);
+
+    await clearDownloadQueue();
+
+    expect(musicCacheStore.getState().downloadQueue).toHaveLength(0);
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -2259,7 +2409,7 @@ describe('offline mode pauses the download queue', () => {
     offlineModeStore.setState({ offlineMode: true } as any);
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockFetchAlbum.mockResolvedValue({
       id: 'album-off1',
       name: 'Offline',
@@ -2272,7 +2422,7 @@ describe('offline mode pauses the download queue', () => {
     // Queued, not downloading, and no bytes moved — the user told us not to talk to
     // the server, so the queue waits rather than burning retries.
     expect(musicCacheStore.getState().downloadQueue[0].status).toBe('queued');
-    expect(mockDownloadFileAsyncWithProgress).not.toHaveBeenCalled();
+    expect(mockDownloadAudioFileAsync).not.toHaveBeenCalled();
     expect(musicCacheStore.getState().cachedItems['album-off1']).toBeUndefined();
   });
 
@@ -2281,7 +2431,7 @@ describe('offline mode pauses the download queue', () => {
     offlineModeStore.setState({ offlineMode: true } as any);
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockFetchAlbum.mockResolvedValue({
       id: 'album-off2',
       name: 'Resumes',
@@ -2326,7 +2476,7 @@ describe('download pipeline', () => {
   it('downloads and marks item complete', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockFetchAlbum.mockResolvedValue({
       id: 'album-dl1',
       name: 'Test',
@@ -2347,7 +2497,7 @@ describe('download pipeline', () => {
   it('resolves file extensions from suffix, contentType, fallback', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockFetchAlbum.mockResolvedValue({
       id: 'album-ext',
       name: 'X',
@@ -2373,7 +2523,7 @@ describe('download pipeline', () => {
   it('uses downloadFormat extension when not raw', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     playbackSettingsStore.setState({ downloadFormat: 'mp3', downloadMaxBitRate: 192 } as any);
 
     mockFetchAlbum.mockResolvedValue({
@@ -2388,7 +2538,7 @@ describe('download pipeline', () => {
   });
 
   it('errors when getDownloadStreamUrl returns null', async () => {
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     (getDownloadStreamUrl as jest.Mock).mockReturnValue(null);
     mockFetchAlbum.mockResolvedValue({
       id: 'album-nu',
@@ -2402,23 +2552,108 @@ describe('download pipeline', () => {
     if (item) expect(item.status).toBe('error');
   });
 
-  it('handles download failure', async () => {
-    mockDownloadFileAsyncWithProgress.mockRejectedValue(new Error('net'));
+  it('retries a dropped connection, then fails the item', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    try {
+      mockDownloadAudioFileAsync.mockRejectedValue(new Error('The network connection was lost.'));
+      mockFetchAlbum.mockResolvedValue({
+        id: 'album-fail',
+        name: 'X',
+        song: [makeChild('fail-t1', { albumId: 'album-fail' })],
+      });
+      await enqueueAlbumDownload('album-fail');
+      for (let i = 0; i < 40; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await jest.advanceTimersByTimeAsync(1000);
+      }
+      jest.useRealTimers();
+      await waitForQueueIdle();
+      // 3 network attempts per downloadSong call; the worker calls it twice.
+      expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(6);
+      const item = musicCacheStore.getState().downloadQueue.find((q: any) => q.itemId === 'album-fail');
+      expect(item?.status).toBe('error');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not retry a cancelled transfer', async () => {
+    mockDownloadAudioFileAsync.mockRejectedValue(new Error('cancelled'));
     mockFetchAlbum.mockResolvedValue({
-      id: 'album-fail',
+      id: 'album-cx',
       name: 'X',
-      song: [makeChild('fail-t1', { albumId: 'album-fail' })],
+      song: [makeChild('cx-t1', { albumId: 'album-cx' })],
     });
-    await enqueueAlbumDownload('album-fail');
+    await enqueueAlbumDownload('album-cx');
     await waitForQueueIdle();
-    const item = musicCacheStore.getState().downloadQueue.find((q: any) => q.itemId === 'album-fail');
-    if (item) expect(item.status).toBe('error');
+    // No network retry; the item is handed back 3 times (2 attempts each), then fails.
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(8);
+    const item = musicCacheStore.getState().downloadQueue.find((q: any) => q.itemId === 'album-cx');
+    expect(item?.status).toBe('error');
+  });
+
+  it('does not register a song when the server returns a non-audio body', async () => {
+    mockFileExists = true;
+    mockFileSize = 70;
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200, rejected: 'notAudio' });
+    mockFetchAlbum.mockResolvedValue({
+      id: 'album-xml',
+      name: 'X',
+      song: [makeChild('xml-t1', { albumId: 'album-xml' })],
+    });
+    await enqueueAlbumDownload('album-xml');
+    await waitForQueueIdle();
+    expect(musicCacheStore.getState().cachedSongs['xml-t1']).toBeUndefined();
+    expect(musicCacheStore.getState().cachedItems['album-xml']).toBeUndefined();
+  });
+
+  it('waits out Retry-After on 429 and then registers the song', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    try {
+      mockFileExists = true;
+      mockFileSize = 5000;
+      mockDownloadAudioFileAsync
+        .mockResolvedValueOnce({ status: 429, rejected: 'http', retryAfterSeconds: 5 })
+        .mockResolvedValue({ status: 200 });
+      mockFetchAlbum.mockResolvedValue({
+        id: 'album-429',
+        name: 'X',
+        song: [makeChild('r-t1', { albumId: 'album-429' })],
+      });
+      await enqueueAlbumDownload('album-429');
+      for (let i = 0; i < 20 && mockDownloadAudioFileAsync.mock.calls.length < 2; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await jest.advanceTimersByTimeAsync(1000);
+      }
+      jest.useRealTimers();
+      await waitForQueueIdle();
+      expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(2);
+      expect(musicCacheStore.getState().cachedSongs['r-t1']).toBeDefined();
+    } finally {
+      jest.useRealTimers();
+      teardownMusicCache();
+      initMusicCache();
+    }
+  });
+
+  it('does not retry a rejection without Retry-After', async () => {
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 500, rejected: 'http' });
+    mockFetchAlbum.mockResolvedValue({
+      id: 'album-500',
+      name: 'X',
+      song: [makeChild('e-t1', { albumId: 'album-500' })],
+    });
+    await enqueueAlbumDownload('album-500');
+    await waitForQueueIdle();
+    // One call per downloadSong attempt; the caller retries downloadSong once.
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(2);
+    expect(musicCacheStore.getState().cachedSongs['e-t1']).toBeUndefined();
   });
 
   it('deduplicates song within a playlist item', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     musicCacheStore.setState({ maxConcurrentDownloads: 1 } as any);
 
     const t = makeChild('dup-t1', { albumId: 'album-dup' });
@@ -2434,13 +2669,13 @@ describe('download pipeline', () => {
     expect(cached).toBeDefined();
     expect(cached.songIds.length).toBe(3); // 3 edges even though dup-t1 is the same song
     // Only 2 unique transfers
-    expect(mockDownloadFileAsyncWithProgress).toHaveBeenCalledTimes(2);
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(2);
   });
 
   it('cross-item dedup: playlist song already in downloaded album skips transfer', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
 
     // Seed album A as already-downloaded with song s1.
     seedSong(makeCachedSong('s1', { albumId: 'album-A' }));
@@ -2455,7 +2690,7 @@ describe('download pipeline', () => {
     await waitForQueueIdle();
 
     // Only s2 should have been transferred (s1 was deduped).
-    expect(mockDownloadFileAsyncWithProgress).toHaveBeenCalledTimes(1);
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(1);
     const pl = musicCacheStore.getState().cachedItems['pl-x'];
     expect(pl).toBeDefined();
     expect(pl.songIds.sort()).toEqual(['s1', 's2']);
@@ -2464,7 +2699,7 @@ describe('download pipeline', () => {
   it('replaces stale album ids after the full fresh payload succeeds', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     seedSong(makeCachedSong('old-id', {
       albumId: 'album-rekey',
       bytes: 253,
@@ -2496,7 +2731,7 @@ describe('download pipeline', () => {
     expect(musicCacheStore.getState().cachedSongs['old-id']).toBeUndefined();
     expect(musicCacheStore.getState().cachedSongs['new-id']).toBeDefined();
     expect(fileDeletesAsync.some((uri) => uri.includes('old-id'))).toBe(true);
-    expect(mockDownloadFileAsyncWithProgress).toHaveBeenCalledTimes(1);
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(1);
   });
 
   it('keeps stale album ids when a replacement download fails', async () => {
@@ -2517,7 +2752,7 @@ describe('download pipeline', () => {
         makeChild('keep-id', { albumId: 'album-rekey' }),
       ],
     });
-    mockDownloadFileAsyncWithProgress.mockRejectedValue(new Error('network'));
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 404, rejected: 'http' });
 
     await enqueueAlbumDownload('album-rekey');
     await waitForQueueIdle();
@@ -2537,7 +2772,7 @@ describe('download pipeline', () => {
   it('keeps the recovery row when stale-edge persistence fails', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     seedSong(makeCachedSong('old-id', { albumId: 'album-rekey', bytes: 253 }));
     seedSong(makeCachedSong('keep-id', { albumId: 'album-rekey' }));
     seedItem('album-rekey', {
@@ -2578,7 +2813,7 @@ describe('download pipeline', () => {
   it('keeps the recovery row when album-order persistence fails', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     seedSong(makeCachedSong('old-id', { albumId: 'album-rekey', bytes: 253 }));
     seedSong(makeCachedSong('keep-id', { albumId: 'album-rekey' }));
     seedItem('album-rekey', {
@@ -2614,7 +2849,7 @@ describe('download pipeline', () => {
   it('keeps the repaired recovery row when its final delete fails', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     seedSong(makeCachedSong('old-id', { albumId: 'album-rekey', bytes: 253 }));
     seedSong(makeCachedSong('keep-id', { albumId: 'album-rekey' }));
     seedItem('album-rekey', {
@@ -2650,7 +2885,7 @@ describe('download pipeline', () => {
   it('drops a stale album edge but preserves its file when another item references it', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     seedSong(makeCachedSong('old-id', { albumId: 'album-rekey', bytes: 253 }));
     seedSong(makeCachedSong('keep-id', { albumId: 'album-rekey' }));
     seedItem('album-rekey', {
@@ -2684,7 +2919,7 @@ describe('download pipeline', () => {
   it('partial-album bookkeeping: playlist download creates partial album row for new song', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     // Preload albumDetailStore entry so expectedSongCount is 10.
     mockAlbumDetailAlbums.value = {
       'album-NEW': { album: { song: new Array(10).fill(null).map((_, i) => ({ id: `nn-${i}` })) } },
@@ -2709,7 +2944,7 @@ describe('download pipeline', () => {
   it('partial-album: subsequent song appended to existing partial row', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
 
     // Seed partial album with one song.
     seedSong(makeCachedSong('p1', { albumId: 'album-Z' }));
@@ -2730,7 +2965,7 @@ describe('download pipeline', () => {
   it('partial-album: cached_songs row captures the full Child in promoted columns', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
 
     const richChild = makeChild('rich-1', {
       albumId: 'album-rich',
@@ -2773,7 +3008,7 @@ describe('download pipeline', () => {
   it('partial-album: row carries AlbumID3 metadata when album detail is cached', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockAlbumDetailAlbums.value = {
       'album-env': {
         album: {
@@ -2810,7 +3045,7 @@ describe('download pipeline', () => {
   it('partial-album: row upgraded with metadata when an earlier partial existed without any', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
 
     // Seed an envelope-less partial row — simulates pre-Migration-19 state.
     seedSong(makeCachedSong('up-a', { albumId: 'album-up' }));
@@ -2849,7 +3084,7 @@ describe('download pipeline', () => {
   it('partial-album: no-op when triggering item IS the album', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
 
     mockFetchAlbum.mockResolvedValue({
       id: 'album-self',
@@ -2866,7 +3101,7 @@ describe('download pipeline', () => {
   it('stops processing at storage limit', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockCheckStorageLimit.mockReturnValue(true);
 
     mockFetchAlbum.mockResolvedValue({
@@ -2877,14 +3112,14 @@ describe('download pipeline', () => {
     await enqueueAlbumDownload('album-sl');
     await waitForQueueIdle();
 
-    expect(mockDownloadFileAsyncWithProgress).not.toHaveBeenCalled();
+    expect(mockDownloadAudioFileAsync).not.toHaveBeenCalled();
   });
 
   it('skips already-pool-cached songs during resume', async () => {
     seedSong(makeCachedSong('res-t1', { albumId: 'album-res' }));
     mockFileExists = true;
     mockFileSize = 3000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
 
     mockFetchAlbum.mockResolvedValue({
       id: 'album-res',
@@ -2895,7 +3130,7 @@ describe('download pipeline', () => {
     await waitForQueueIdle();
 
     // t1 was in pool, only t2 downloads.
-    expect(mockDownloadFileAsyncWithProgress).toHaveBeenCalledTimes(1);
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(1);
     const item = musicCacheStore.getState().cachedItems['album-res'];
     expect(item.songIds.sort()).toEqual(['res-t1', 'res-t2']);
   });
@@ -2903,7 +3138,7 @@ describe('download pipeline', () => {
   it('processes multiple queued items sequentially', async () => {
     mockFileExists = true;
     mockFileSize = 2000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockFetchAlbum.mockImplementation(async (id: string) => ({
       id, name: id, song: [makeChild(`${id}-t`, { albumId: id })],
     }));
@@ -2945,7 +3180,7 @@ describe('download pipeline', () => {
       calls++;
       return calls === 1 ? null : 'https://example.com/stream';
     });
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
 
     mockFetchAlbum.mockResolvedValue({
       id: 'album-retry', name: 'X',
@@ -2962,7 +3197,7 @@ describe('download pipeline', () => {
     mockFileSize = 5000;
     // First download succeeds, storage trips before the second.
     let downloadCalls = 0;
-    mockDownloadFileAsyncWithProgress.mockImplementation(async () => {
+    mockDownloadAudioFileAsync.mockImplementation(async () => {
       downloadCalls++;
       if (downloadCalls >= 1) mockCheckStorageLimit.mockReturnValue(true);
     });
@@ -3015,7 +3250,7 @@ describe('download queue payload durability', () => {
   beforeEach(() => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
   });
 
   afterEach(async () => {
@@ -3160,7 +3395,8 @@ describe('download error branches', () => {
   });
 
   it('cleans up .tmp on download failure', async () => {
-    mockDownloadFileAsyncWithProgress.mockRejectedValue(new Error('transport'));
+    // 'cancelled' fails at once; a network error would be retried first.
+    mockDownloadAudioFileAsync.mockRejectedValue(new Error('cancelled'));
     mockFileExists = true; // tmp is present, enter delete branch
 
     mockFetchAlbum.mockResolvedValue({
@@ -3285,7 +3521,7 @@ describe('storageLimitStore subscription', () => {
   it('resumes queue when storage settings change', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockCheckStorageLimit.mockReturnValue(true);
 
     mockFetchAlbum.mockResolvedValue({
@@ -3305,7 +3541,7 @@ describe('storageLimitStore subscription', () => {
   it('resumes when isStorageFull flips false', async () => {
     mockFileExists = true;
     mockFileSize = 5000;
-    mockDownloadFileAsyncWithProgress.mockResolvedValue(undefined);
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
     mockCheckStorageLimit.mockReturnValue(true);
 
     mockFetchAlbum.mockResolvedValue({
@@ -3705,5 +3941,407 @@ describe('waitForTrackMapsReady', () => {
         expect(resolved).toBe(true);
       });
     });
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Global transfer pool                                               */
+/* ------------------------------------------------------------------ */
+
+describe('global transfer pool', () => {
+  /** Downloads that finish only when released, recording peak concurrency. */
+  function gatedDownloads() {
+    const pending: Array<{ url: string; dest: string; release: () => void; fail: () => void }> = [];
+    let inFlight = 0;
+    let peak = 0;
+    mockDownloadAudioFileAsync.mockImplementation((url: string, dest: string) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      return new Promise((resolve, reject) => {
+        pending.push({
+          url,
+          dest,
+          release: () => {
+            inFlight--;
+            resolve({ status: 200 });
+          },
+          fail: () => {
+            inFlight--;
+            reject(new Error('cancelled'));
+          },
+        });
+      });
+    });
+    return {
+      pending,
+      peak: () => peak,
+      async releaseAll() {
+        while (pending.length > 0) {
+          pending.shift()!.release();
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((r) => setImmediate(r));
+        }
+      },
+    };
+  }
+
+  async function settle(ticks = 30) {
+    for (let i = 0; i < ticks; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setImmediate(r));
+    }
+  }
+
+  beforeEach(() => {
+    mockFileExists = true;
+    mockFileSize = 1000;
+  });
+
+  it('keeps every slot busy across one-song albums', async () => {
+    const gate = gatedDownloads();
+    mockFetchAlbum.mockImplementation(async (id: string) => ({
+      id, name: id, song: [makeChild(`${id}-t`, { albumId: id })],
+    }));
+    for (const id of ['p1', 'p2', 'p3', 'p4']) {
+      // eslint-disable-next-line no-await-in-loop
+      await enqueueAlbumDownload(id);
+    }
+    await settle();
+    expect(gate.pending).toHaveLength(3);
+    await gate.releaseAll();
+    await settle();
+    await gate.releaseAll();
+    await waitForQueueIdle();
+    expect(gate.peak()).toBe(3);
+    for (const id of ['p1', 'p2', 'p3', 'p4']) {
+      expect(musicCacheStore.getState().cachedItems[id]?.derived).toBeFalsy();
+    }
+  });
+
+  it('never exceeds the cap across items', async () => {
+    musicCacheStore.setState({ maxConcurrentDownloads: 2 } as any);
+    const gate = gatedDownloads();
+    mockFetchAlbum.mockImplementation(async (id: string) => ({
+      id,
+      name: id,
+      song: [1, 2, 3, 4].map((n) => makeChild(`${id}-t${n}`, { albumId: id })),
+    }));
+    await enqueueAlbumDownload('c1');
+    await enqueueAlbumDownload('c2');
+    for (let round = 0; round < 10; round++) {
+      // eslint-disable-next-line no-await-in-loop
+      await settle();
+      expect(gate.pending.length).toBeLessThanOrEqual(2);
+      // eslint-disable-next-line no-await-in-loop
+      await gate.releaseAll();
+    }
+    await waitForQueueIdle();
+    expect(gate.peak()).toBe(2);
+    expect(musicCacheStore.getState().cachedItems['c1']?.songIds).toHaveLength(4);
+    expect(musicCacheStore.getState().cachedItems['c2']?.songIds).toHaveLength(4);
+  });
+
+  it('transfers a song shared by two concurrent items once', async () => {
+    const gate = gatedDownloads();
+    const shared = makeChild('shared-1', { albumId: 'sh-album' });
+    mockFetchAlbum.mockResolvedValue({ id: 'sh-album', name: 'A', song: [shared] });
+    mockFetchPlaylist.mockResolvedValue({ id: 'sh-pl', name: 'P', entry: [shared] });
+    await enqueueAlbumDownload('sh-album');
+    await enqueuePlaylistDownload('sh-pl');
+    await settle();
+    expect(gate.pending).toHaveLength(1);
+    await gate.releaseAll();
+    await waitForQueueIdle();
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(1);
+    expect(musicCacheStore.getState().cachedItems['sh-album']?.songIds).toEqual(['shared-1']);
+    expect(musicCacheStore.getState().cachedItems['sh-pl']?.songIds).toEqual(['shared-1']);
+  });
+
+  it('holds an album download\'s finished songs in a derived row, promoted on completion', async () => {
+    musicCacheStore.setState({ maxConcurrentDownloads: 1 } as any);
+    const gate = gatedDownloads();
+    mockFetchAlbum.mockResolvedValue({
+      id: 'pr-album',
+      name: 'A',
+      song: [makeChild('pr-1', { albumId: 'pr-album' }), makeChild('pr-2', { albumId: 'pr-album' })],
+    });
+    await enqueueAlbumDownload('pr-album');
+    await settle();
+    gate.pending.shift()!.release();
+    await settle();
+
+    const partial = musicCacheStore.getState().cachedItems['pr-album'];
+    expect(partial?.derived).toBe(true);
+    expect(partial?.songIds).toEqual(['pr-1']);
+
+    await gate.releaseAll();
+    await waitForQueueIdle();
+    const done = musicCacheStore.getState().cachedItems['pr-album'];
+    expect(done?.derived).toBeFalsy();
+    expect(done?.songIds).toEqual(['pr-1', 'pr-2']);
+  });
+
+  it('lowers concurrency below what was in flight when the server answers 429', async () => {
+    const gate = gatedDownloads();
+    const gated = mockDownloadAudioFileAsync.getMockImplementation()!;
+    let first = true;
+    mockDownloadAudioFileAsync.mockImplementation((...args: any[]) => {
+      if (first) {
+        first = false;
+        return Promise.resolve({ status: 429, rejected: 'http' });
+      }
+      return gated(...args);
+    });
+    mockFetchAlbum.mockResolvedValue({
+      id: 'cap-a',
+      name: 'A',
+      song: [1, 2, 3, 4, 5, 6].map((n) => makeChild(`cap-${n}`, { albumId: 'cap-a' })),
+    });
+    try {
+      await enqueueAlbumDownload('cap-a');
+      await settle();
+      let peakAfter = 0;
+      for (let round = 0; round < 10; round++) {
+        // eslint-disable-next-line no-await-in-loop
+        await gate.releaseAll();
+        // eslint-disable-next-line no-await-in-loop
+        await settle();
+        peakAfter = Math.max(peakAfter, gate.pending.length);
+      }
+      await waitForQueueIdle();
+      expect(peakAfter).toBeLessThanOrEqual(2);
+    } finally {
+      teardownMusicCache();
+      initMusicCache();
+    }
+  });
+
+  it('does not start a song that was waiting for a slot when its item is cancelled', async () => {
+    musicCacheStore.setState({ maxConcurrentDownloads: 1 } as any);
+    const gate = gatedDownloads();
+    mockFetchAlbum.mockImplementation(async (id: string) => ({
+      id, name: id, song: [1, 2].map((n) => makeChild(`${id}-w${n}`, { albumId: id })),
+    }));
+    await enqueueAlbumDownload('wait-a');
+    await settle();
+    expect(gate.pending).toHaveLength(1);
+    const queueId = musicCacheStore.getState().downloadQueue[0].queueId;
+    await cancelDownload(queueId);
+    gate.pending.shift()!.fail();
+    await settle();
+    await waitForQueueIdle();
+    // wait-a-w2 was queued behind the slot; it must never transfer.
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not claim the next item while the queue is being cleared', async () => {
+    musicCacheStore.setState({ maxConcurrentDownloads: 1 } as any);
+    const gate = gatedDownloads();
+    mockFetchAlbum.mockImplementation(async (id: string) => ({
+      id, name: id, song: [makeChild(`${id}-c`, { albumId: id })],
+    }));
+    await enqueueAlbumDownload('clr-1');
+    await enqueueAlbumDownload('clr-2');
+    await settle();
+    expect(gate.pending).toHaveLength(1);
+    const clearing = clearDownloadQueue();
+    gate.pending.shift()!.fail();
+    await clearing;
+    await settle();
+    await waitForQueueIdle();
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(1);
+    expect(musicCacheStore.getState().downloadQueue).toHaveLength(0);
+  });
+
+  it('creates one derived album row with dense edges when songs finish together', async () => {
+    const gate = gatedDownloads();
+    mockFetchAlbum.mockResolvedValue({
+      id: 'race-a',
+      name: 'A',
+      song: [1, 2, 3].map((n) => makeChild(`race-${n}`, { albumId: 'race-a' })),
+    });
+    const insertEdge = persistenceMock.insertCachedItemSong as jest.Mock;
+    insertEdge.mockClear();
+    await enqueueAlbumDownload('race-a');
+    await settle();
+    expect(gate.pending).toHaveLength(3);
+    // Release all three in the same tick so the partial-album updates overlap.
+    for (const p of gate.pending.splice(0)) p.release();
+    await settle();
+    const positions = insertEdge.mock.calls
+      .filter((c: any[]) => c[0] === 'race-a')
+      .map((c: any[]) => c[1])
+      .sort();
+    expect(positions).toEqual([1, 2, 3]);
+    await waitForQueueIdle();
+  });
+
+  it('leaves an item queued, not failed, when the storage limit pauses it mid-run', async () => {
+    musicCacheStore.setState({ maxConcurrentDownloads: 1 } as any);
+    const gate = gatedDownloads();
+    mockFetchAlbum.mockResolvedValue({
+      id: 'full-a',
+      name: 'A',
+      song: [1, 2].map((n) => makeChild(`full-${n}`, { albumId: 'full-a' })),
+    });
+    await enqueueAlbumDownload('full-a');
+    await settle();
+    mockCheckStorageLimit.mockReturnValue(true);
+    gate.pending.shift()!.release();
+    await settle();
+    await waitForQueueIdle();
+    const item = musicCacheStore.getState().downloadQueue.find((q: any) => q.itemId === 'full-a');
+    expect(item?.status).toBe('queued');
+    expect(item?.error).toBeUndefined();
+  });
+
+  it('keeps finished songs as a partial album when the album download is cancelled', async () => {
+    musicCacheStore.setState({ maxConcurrentDownloads: 1 } as any);
+    const gate = gatedDownloads();
+    mockFetchAlbum.mockResolvedValue({
+      id: 'cx-album',
+      name: 'A',
+      song: [makeChild('cx-1', { albumId: 'cx-album' }), makeChild('cx-2', { albumId: 'cx-album' })],
+    });
+    await enqueueAlbumDownload('cx-album');
+    await settle();
+    gate.pending.shift()!.release();
+    await settle();
+
+    const queueId = musicCacheStore.getState().downloadQueue[0].queueId;
+    await cancelDownload(queueId);
+    expect(mockCancelDownloadAsync).toHaveBeenCalledWith('cx-2');
+    // The native cancel rejects the pending transfer.
+    gate.pending.shift()!.fail();
+    await gate.releaseAll();
+    await waitForQueueIdle();
+
+    const partial = musicCacheStore.getState().cachedItems['cx-album'];
+    expect(partial?.derived).toBe(true);
+    expect(partial?.songIds).toEqual(['cx-1']);
+    expect(musicCacheStore.getState().cachedSongs['cx-1']).toBeDefined();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Continued-processing task                                          */
+/* ------------------------------------------------------------------ */
+
+describe('continued-processing task', () => {
+  async function settle(ticks = 30) {
+    for (let i = 0; i < ticks; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setImmediate(r));
+    }
+  }
+
+  beforeEach(() => {
+    mockFileExists = true;
+    mockFileSize = 1000;
+    mockAppState.currentState = 'background';
+  });
+
+  it('begins the background task when the user queues a download', async () => {
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
+    mockFetchAlbum.mockResolvedValue({ id: 'bg-a', name: 'A', song: [makeChild('bg-1', { albumId: 'bg-a' })] });
+    await enqueueAlbumDownload('bg-a');
+    expect(mockBeginBackgroundDownloads).toHaveBeenCalled();
+    await waitForQueueIdle();
+  });
+
+  it('on expiry, hands in-progress items back to the queue and waits for foreground', async () => {
+    expect(mockExpiryHandlers.length).toBeGreaterThan(0);
+    // [0] is this suite's module instance; isolateModules blocks register more.
+    const expire = mockExpiryHandlers[0];
+    let rejectTransfer!: (e: Error) => void;
+    mockDownloadAudioFileAsync.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => { rejectTransfer = reject; }),
+    );
+    mockFetchAlbum.mockResolvedValue({ id: 'ex-a', name: 'A', song: [makeChild('ex-1', { albumId: 'ex-a' })] });
+    await enqueueAlbumDownload('ex-a');
+    await settle();
+    expect(musicCacheStore.getState().downloadQueue[0]?.status).toBe('downloading');
+
+    expire();
+    rejectTransfer(new Error('cancelled'));
+    await settle();
+
+    const item = musicCacheStore.getState().downloadQueue[0];
+    expect(item?.status).toBe('queued');
+    expect(item?.error).toBeUndefined();
+    // The cancelled transfer is not retried while paused.
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(1);
+
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
+    mockAppState.currentState = 'active';
+    for (const listener of mockAppStateListeners) listener('active');
+    await settle();
+    await waitForQueueIdle();
+    expect(musicCacheStore.getState().cachedItems['ex-a']?.derived).toBeFalsy();
+    expect(musicCacheStore.getState().cachedSongs['ex-1']).toBeDefined();
+  });
+
+  it('hands an item back to the queue when its transfer is cancelled before the expiry event arrives', async () => {
+    mockDownloadAudioFileAsync.mockRejectedValueOnce(new Error('cancelled'));
+    mockDownloadAudioFileAsync.mockRejectedValueOnce(new Error('cancelled'));
+    mockFetchAlbum.mockResolvedValue({ id: 'ir-a', name: 'A', song: [makeChild('ir-1', { albumId: 'ir-a' })] });
+    let observed: string | undefined;
+    const unsub = musicCacheStore.subscribe((st) => {
+      const q = st.downloadQueue.find((x: any) => x.itemId === 'ir-a');
+      if (q?.status === 'queued' && observed === 'downloading') observed = 'requeued';
+      else if (q?.status === 'downloading' && observed === undefined) observed = 'downloading';
+      if (q?.status === 'error') observed = 'error';
+    });
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
+    await enqueueAlbumDownload('ir-a');
+    await settle();
+    await waitForQueueIdle();
+    unsub();
+    expect(observed).toBe('requeued');
+    expect(musicCacheStore.getState().cachedSongs['ir-1']).toBeDefined();
+  });
+
+  it('on expiry in the foreground, restarts at once', async () => {
+    // [0] is this suite's module instance; isolateModules blocks register more.
+    const expire = mockExpiryHandlers[0];
+    mockAppState.currentState = 'active';
+    let rejectTransfer!: (e: Error) => void;
+    mockDownloadAudioFileAsync.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => { rejectTransfer = reject; }),
+    );
+    mockDownloadAudioFileAsync.mockResolvedValue({ status: 200 });
+    mockFetchAlbum.mockResolvedValue({ id: 'fx-a', name: 'A', song: [makeChild('fx-1', { albumId: 'fx-a' })] });
+    await enqueueAlbumDownload('fx-a');
+    await settle();
+    expire();
+    rejectTransfer(new Error('cancelled'));
+    await settle();
+    await waitForQueueIdle();
+    expect(musicCacheStore.getState().cachedSongs['fx-1']).toBeDefined();
+  });
+});
+
+describe('retryFailedDownloads', () => {
+  it('re-queues every failed item and begins background downloads', async () => {
+    musicCacheStore.setState({
+      downloadQueue: [
+        { queueId: 'f1', itemId: 'fa1', type: 'album', name: 'A', status: 'error', error: 'x',
+          totalSongs: 1, completedSongs: 0, addedAt: 1, queuePosition: 1 },
+        { queueId: 'f2', itemId: 'fa2', type: 'album', name: 'B', status: 'error', error: 'y',
+          totalSongs: 1, completedSongs: 0, addedAt: 2, queuePosition: 2 },
+      ],
+    } as any);
+    mockCheckStorageLimit.mockReturnValue(true); // keep them from starting
+    mockBeginBackgroundDownloads.mockClear();
+    await retryFailedDownloads();
+    const statuses = musicCacheStore.getState().downloadQueue.map((q: any) => [q.status, q.error]);
+    expect(statuses).toEqual([['queued', undefined], ['queued', undefined]]);
+    expect(mockBeginBackgroundDownloads).toHaveBeenCalled();
+  });
+
+  it('does nothing without failed items', async () => {
+    mockBeginBackgroundDownloads.mockClear();
+    await retryFailedDownloads();
+    expect(mockBeginBackgroundDownloads).not.toHaveBeenCalled();
   });
 });

@@ -27,6 +27,15 @@ jest.mock('../../db/repository/playlists', () => ({
   listPlaylistIds: jest.fn(async () => mockPlaylistsState.map((p) => p.id)),
 }));
 
+jest.mock('../../db/repository/songs', () => ({
+  countSongsNotDownloaded: jest.fn(async () => 42),
+}));
+const mockBeginBackgroundDownloads = jest.fn(async (..._args: unknown[]) => {});
+jest.mock('../backgroundDownloadService', () => ({
+  beginBackgroundDownloads: (...args: unknown[]) => mockBeginBackgroundDownloads(...args),
+  logDownloadEvent: jest.fn(),
+}));
+
 const mockEnqueueAlbum = jest.fn();
 const mockEnqueuePlaylist = jest.fn();
 jest.mock('../musicCacheService', () => ({
@@ -112,4 +121,13 @@ describe('enqueueFullLibraryDownload', () => {
     // First album enqueued; cancel halts the loop before a2 / playlists.
     expect(calls).toEqual(['a:a1']);
   });
+});
+
+it('starts the background task on the tap, before refreshing or queueing', async () => {
+  const order: string[] = [];
+  mockBeginBackgroundDownloads.mockImplementationOnce(async () => { order.push('begin'); });
+  mockFetchAllPlaylists.mockImplementationOnce(async () => { order.push('refresh'); });
+  await enqueueFullLibraryDownload();
+  expect(mockBeginBackgroundDownloads).toHaveBeenCalledWith({ expectedSongs: 42 });
+  expect(order).toEqual(['begin', 'refresh']);
 });

@@ -159,6 +159,26 @@ export async function addPlaylistToQueue(playlist: Playlist): Promise<void> {
 }
 
 /**
+ * Add an artist's full discography to the end of the play queue.
+ * Offline mode uses the downloaded-artist projection, so only downloaded
+ * tracks are appended and no server requests are made.
+ */
+export async function addArtistToQueue(artistId: string, artistName: string): Promise<void> {
+  processingOverlayStore.getState().show(i18n.t('loading'));
+
+  try {
+    const songs = await fetchAllArtistSongs(artistId, artistName);
+    if (!songs) return;
+
+    const queue = sortArtistSongs(songs);
+    await addToQueue(queue);
+    processingOverlayStore.getState().showSuccess(i18n.t('itemQueued', { count: queue.length }));
+  } catch {
+    processingOverlayStore.getState().showError(i18n.t('failedToLoadArtistSongs', { artist: artistName }));
+  }
+}
+
+/**
  * Remove a track from the play queue by its index.
  */
 export async function removeItemFromQueue(index: number): Promise<void> {
@@ -317,6 +337,16 @@ async function fetchAllArtistSongs(
   return songs;
 }
 
+function sortArtistSongs(songs: Child[]): Child[] {
+  return [...songs].sort((a, b) => {
+    const yearDiff = (a.year ?? 0) - (b.year ?? 0);
+    if (yearDiff !== 0) return yearDiff;
+    const discDiff = (a.discNumber ?? 1) - (b.discNumber ?? 1);
+    if (discDiff !== 0) return discDiff;
+    return (a.track ?? 0) - (b.track ?? 0);
+  });
+}
+
 /**
  * Build a shuffled queue of songs by a specific artist and start playback.
  * Online: fetches all albums by the artist, collects songs, shuffles.
@@ -359,19 +389,7 @@ export async function playAllByArtist(
     const songs = await fetchAllArtistSongs(artistId, artistName);
     if (!songs) return;
 
-    let queue: Child[];
-    if (shuffle) {
-      queue = shuffleArray(songs);
-    } else {
-      // Sort by album year → disc → track for a natural listening order
-      queue = [...songs].sort((a, b) => {
-        const yearDiff = (a.year ?? 0) - (b.year ?? 0);
-        if (yearDiff !== 0) return yearDiff;
-        const discDiff = (a.discNumber ?? 1) - (b.discNumber ?? 1);
-        if (discDiff !== 0) return discDiff;
-        return (a.track ?? 0) - (b.track ?? 0);
-      });
-    }
+    const queue = shuffle ? shuffleArray(songs) : sortArtistSongs(songs);
 
     await playTrack(queue[0], queue);
     processingOverlayStore.getState().showSuccess(

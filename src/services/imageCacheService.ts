@@ -1208,7 +1208,7 @@ function resolveAllWaiters(): void {
  * that resolves once the image has been fully cached (all 4 sizes) or
  * skipped. No-ops if all sizes are already on disk.
  */
-async function cacheAllSizes(coverArtId: string): Promise<void> {
+async function cacheAllSizes(coverArtId: string, priority = false): Promise<void> {
   if (!coverArtId) return;
   // Sentinels render from bundled assets via CachedImage — never queue
   // them for download. Belt-and-braces guard; CachedImage already maps
@@ -1229,13 +1229,20 @@ async function cacheAllSizes(coverArtId: string): Promise<void> {
     list.push(resolve);
     pendingResolvers.set(coverArtId, list);
 
-    if (downloading.has(coverArtId) || downloadQueue.includes(coverArtId)) {
+    if (downloading.has(coverArtId)) {
       logImageCache(`cacheAllSizes id=${coverArtId} dedup waiters=${list.length}`);
       return;
     }
+    const queuedAt = downloadQueue.indexOf(coverArtId);
+    if (queuedAt >= 0) {
+      logImageCache(`cacheAllSizes id=${coverArtId} dedup waiters=${list.length}`);
+      if (!priority) return;
+      downloadQueue.splice(queuedAt, 1);
+    }
 
     logImageCache(`cacheAllSizes id=${coverArtId} enqueued queue=${downloadQueue.length + 1}`);
-    downloadQueue.push(coverArtId);
+    if (priority) downloadQueue.unshift(coverArtId);
+    else downloadQueue.push(coverArtId);
     processQueue();
   });
 }
@@ -1253,12 +1260,18 @@ async function cacheAllSizes(coverArtId: string): Promise<void> {
  * them. The service-side dedup in `cacheAllSizes` (pendingResolvers +
  * downloading set + downloadQueue includes-check) collapses bursts of
  * concurrent calls for the same id to a single download.
+ *
+ * `priority` puts the cover at the front of the download queue — for a cover
+ * something is waiting on (a song download), not one merely prefetched.
  */
-export function ensureCached(coverArtId: string): Promise<void> {
+export function ensureCached(
+  coverArtId: string,
+  { priority = false }: { priority?: boolean } = {},
+): Promise<void> {
   if (!coverArtId) return Promise.resolve();
   if (isSentinelCoverArtId(coverArtId)) return Promise.resolve();
   if (offlineModeStore.getState().offlineMode) return Promise.resolve();
-  return cacheAllSizes(coverArtId);
+  return cacheAllSizes(coverArtId, priority);
 }
 
 /** Whether the durable 600px source file row exists for offline rendering. */

@@ -7,6 +7,16 @@ public class ExpoAsyncFsModule: Module {
 
     Events("onDownloadProgress")
 
+    // Posted by expo-continued-processing when the system expires its task:
+    // stop network work immediately, without a JS round trip.
+    OnCreate {
+      NotificationCenter.default.addObserver(
+        forName: Notification.Name("ExpoAsyncFsCancelAllDownloads"),
+        object: nil,
+        queue: nil
+      ) { _ in ActiveDownloads.cancelAll() }
+    }
+
     AsyncFunction("listDirectoryAsync") { (uri: String) -> [String] in
       return try FileManager.default.contentsOfDirectory(atPath: Self.resolvePath(uri))
     }
@@ -79,57 +89,93 @@ public class ExpoAsyncFsModule: Module {
     }
 
     AsyncFunction("downloadFileAsyncWithProgress") { (urlString: String, destinationUri: String, downloadId: String) -> [String: Any] in
-      guard let url = URL(string: urlString) else {
-        throw DownloadError.invalidUrl
-      }
-      // Remote URL above keeps URL(string:); the destination is a local file
-      // path, so resolve it via the space-tolerant resolver (a literal space
-      // would make URL(string:) nil and fail every download to such a path).
-      let destUrl = Self.fileUrl(destinationUri)
-
-      var request = URLRequest(url: url)
-      request.cachePolicy = .reloadIgnoringLocalCacheData
-
-      let config = URLSessionConfiguration.default
-      config.requestCachePolicy = .reloadIgnoringLocalCacheData
-      config.urlCache = nil
-
-      var lastEventTime: TimeInterval = 0
-      let delegate = DownloadProgressDelegate(
-        destinationUrl: destUrl,
-        onProgress: { [weak self] bytesWritten, totalBytes in
-          let now = ProcessInfo.processInfo.systemUptime
-          let isComplete = totalBytes > 0 && bytesWritten >= totalBytes
-          guard now - lastEventTime >= 0.1 || isComplete else { return }
-          lastEventTime = now
-          self?.sendEvent("onDownloadProgress", [
-            "downloadId": downloadId,
-            "bytesWritten": bytesWritten,
-            "totalBytes": totalBytes,
-          ])
-        }
-      )
-
-      let session = URLSession(
-        configuration: config,
-        delegate: delegate,
-        delegateQueue: nil
-      )
-
-      defer { session.finishTasksAndInvalidate() }
-
-      try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-        delegate.continuation = continuation
-        session.downloadTask(with: request).resume()
-      }
-
-      let fileSize = (try? FileManager.default.attributesOfItem(atPath: destUrl.path)[.size] as? Int64) ?? 0
-
-      return [
-        "uri": destUrl.absoluteString,
-        "bytes": fileSize,
-      ]
+      let result = try await self.download(urlString, destinationUri, downloadId, validateAudio: false)
+      return ["uri": result["uri"]!, "bytes": result["bytes"]!]
     }
+
+    // Audio variant: never throws for an HTTP-level failure. Non-2xx and
+    // non-audio bodies (a Subsonic XML/JSON error returned with HTTP 200)
+    // resolve with `rejected` set and nothing left at the destination.
+    AsyncFunction("downloadAudioFileAsync") { (urlString: String, destinationUri: String, downloadId: String) -> [String: Any] in
+      return try await self.download(urlString, destinationUri, downloadId, validateAudio: true)
+    }
+
+    AsyncFunction("cancelDownloadAsync") { (downloadId: String) -> Bool in
+      return ActiveDownloads.cancel(downloadId)
+    }
+  }
+
+  private func download(
+    _ urlString: String,
+    _ destinationUri: String,
+    _ downloadId: String,
+    validateAudio: Bool
+  ) async throws -> [String: Any] {
+    guard let url = URL(string: urlString) else {
+      throw DownloadError.invalidUrl
+    }
+    // Remote URL above keeps URL(string:); the destination is a local file
+    // path, so resolve it via the space-tolerant resolver (a literal space
+    // would make URL(string:) nil and fail every download to such a path).
+    let destUrl = Self.fileUrl(destinationUri)
+
+    var request = URLRequest(url: url)
+    request.cachePolicy = .reloadIgnoringLocalCacheData
+
+    let config = URLSessionConfiguration.default
+    config.requestCachePolicy = .reloadIgnoringLocalCacheData
+    config.urlCache = nil
+
+    var lastEventTime: TimeInterval = 0
+    let delegate = DownloadProgressDelegate(
+      destinationUrl: destUrl,
+      validateAudio: validateAudio,
+      onProgress: { [weak self] bytesWritten, totalBytes in
+        let now = ProcessInfo.processInfo.systemUptime
+        let isComplete = totalBytes > 0 && bytesWritten >= totalBytes
+        guard now - lastEventTime >= 0.1 || isComplete else { return }
+        lastEventTime = now
+        self?.sendEvent("onDownloadProgress", [
+          "downloadId": downloadId,
+          "bytesWritten": bytesWritten,
+          "totalBytes": totalBytes,
+        ])
+      }
+    )
+
+    let session = URLSession(
+      configuration: config,
+      delegate: delegate,
+      delegateQueue: nil
+    )
+
+    var ownTask: URLSessionTask?
+    defer {
+      // Only our own task: a retry of the same id may already have registered.
+      if let ownTask = ownTask { ActiveDownloads.remove(downloadId, ownTask) }
+      session.finishTasksAndInvalidate()
+    }
+
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+      delegate.continuation = continuation
+      let task = session.downloadTask(with: request)
+      ownTask = task
+      ActiveDownloads.add(downloadId, task)
+      task.resume()
+    }
+
+    let fileSize = delegate.rejected == nil
+      ? ((try? FileManager.default.attributesOfItem(atPath: destUrl.path)[.size] as? Int64) ?? 0)
+      : 0
+
+    var result: [String: Any] = [
+      "uri": destUrl.absoluteString,
+      "bytes": fileSize,
+      "status": delegate.statusCode,
+    ]
+    if let rejected = delegate.rejected { result["rejected"] = rejected }
+    if let retryAfter = delegate.retryAfterSeconds { result["retryAfterSeconds"] = retryAfter }
+    return result
   }
 
   /// Resolve a file URI (or bare path) to a filesystem path. Mirrors the
@@ -170,9 +216,13 @@ private enum DownloadError: Error, LocalizedError {
   case invalidUrl
   case invalidDestination
   case httpError(Int)
+  case cancelled
 
   var errorDescription: String? {
     switch self {
+    // Fixed English text: JS recognises a cancelled transfer by it, and
+    // URLError's own description is localized.
+    case .cancelled: return "cancelled"
     case .invalidUrl: return "Invalid download URL"
     case .invalidDestination: return "Invalid destination path"
     case .httpError(let code): return "Download failed with HTTP status \(code)"
@@ -191,11 +241,16 @@ private enum DownloadError: Error, LocalizedError {
 /// must happen before then.
 private class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate {
   let destinationUrl: URL
+  let validateAudio: Bool
   let onProgress: (Int64, Int64) -> Void
   var continuation: CheckedContinuation<Void, Error>?
+  var statusCode = 0
+  var rejected: String?
+  var retryAfterSeconds: Int?
 
-  init(destinationUrl: URL, onProgress: @escaping (Int64, Int64) -> Void) {
+  init(destinationUrl: URL, validateAudio: Bool, onProgress: @escaping (Int64, Int64) -> Void) {
     self.destinationUrl = destinationUrl
+    self.validateAudio = validateAudio
     self.onProgress = onProgress
   }
 
@@ -214,9 +269,25 @@ private class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate {
     downloadTask: URLSessionDownloadTask,
     didFinishDownloadingTo location: URL
   ) {
-    let statusCode = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 200
+    let http = downloadTask.response as? HTTPURLResponse
+    statusCode = http?.statusCode ?? 200
     guard statusCode >= 200 && statusCode < 300 else {
-      continuation?.resume(throwing: DownloadError.httpError(statusCode))
+      if validateAudio {
+        rejected = "http"
+        if let header = http?.value(forHTTPHeaderField: "Retry-After") {
+          retryAfterSeconds = Int(header.trimmingCharacters(in: .whitespaces))
+        }
+        continuation?.resume(returning: ())
+      } else {
+        continuation?.resume(throwing: DownloadError.httpError(statusCode))
+      }
+      continuation = nil
+      return
+    }
+
+    if validateAudio && Self.looksLikeTextBody(location) {
+      rejected = "notAudio"
+      continuation?.resume(returning: ())
       continuation = nil
       return
     }
@@ -233,13 +304,66 @@ private class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate {
     continuation = nil
   }
 
+  /// A Subsonic error body (XML or JSON) starts with `<` or `{` after optional
+  /// whitespace / UTF-8 BOM. No audio container starts with either byte.
+  static func looksLikeTextBody(_ url: URL) -> Bool {
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+    defer { try? handle.close() }
+    let head = (try? handle.read(upToCount: 64)) ?? Data()
+    for byte in head {
+      switch byte {
+      case 0x20, 0x09, 0x0A, 0x0D, 0xEF, 0xBB, 0xBF: continue
+      case 0x3C, 0x7B: return true
+      default: return false
+      }
+    }
+    return head.isEmpty
+  }
+
   func urlSession(
     _ session: URLSession,
     task: URLSessionTask,
     didCompleteWithError error: Error?
   ) {
     guard let error = error else { return }
-    continuation?.resume(throwing: error)
+    if (error as? URLError)?.code == .cancelled {
+      continuation?.resume(throwing: DownloadError.cancelled)
+    } else {
+      continuation?.resume(throwing: error)
+    }
     continuation = nil
+  }
+}
+
+/// In-flight transfers by downloadId, so JS can cancel one (e.g. when the
+/// continued-processing task expires).
+private enum ActiveDownloads {
+  private static let lock = NSLock()
+  private static var tasks: [String: URLSessionTask] = [:]
+
+  static func add(_ id: String, _ task: URLSessionTask) {
+    lock.lock(); defer { lock.unlock() }
+    tasks[id] = task
+  }
+
+  static func remove(_ id: String, _ task: URLSessionTask) {
+    lock.lock(); defer { lock.unlock() }
+    if tasks[id] === task { tasks.removeValue(forKey: id) }
+  }
+
+  static func cancel(_ id: String) -> Bool {
+    lock.lock()
+    let task = tasks.removeValue(forKey: id)
+    lock.unlock()
+    task?.cancel()
+    return task != nil
+  }
+
+  static func cancelAll() {
+    lock.lock()
+    let all = Array(tasks.values)
+    tasks.removeAll()
+    lock.unlock()
+    all.forEach { $0.cancel() }
   }
 }

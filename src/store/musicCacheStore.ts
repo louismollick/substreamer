@@ -486,7 +486,12 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
   },
 
   markItemComplete: (queueId, item, songs, edges, childBySongId, options) => {
-    const existing = get().cachedItems[item.itemId];
+    const current = get().cachedItems[item.itemId];
+    // A derived partial-album row being completed by a real download is replaced,
+    // not topped up: its edges were written in finish order and its metadata is
+    // the partial grouping's.
+    const promoting = current?.derived === true && !item.derived;
+    const existing = promoting ? undefined : current;
     // For top-ups (existing row):
     //   - preserve `downloadedAt` (user "downloaded" this earlier).
     //   - preserve `expectedSongCount`: the worker derives it from `songs.length`,
@@ -500,12 +505,10 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
         }
       : item;
 
-    // Keep the old five-argument call shape on the normal path. That avoids
-    // changing every mock/caller just because replacement repairs need one option.
-    const persistence = options
-      ? markDownloadComplete(queueId, itemToPersist, songs, edges, childBySongId, options)
-      : markDownloadComplete(queueId, itemToPersist, songs, edges, childBySongId);
-    const persisted = Promise.resolve(persistence).then((ok) => ok !== false);
+    const persisted = markDownloadComplete(
+      queueId, itemToPersist, songs, edges, childBySongId,
+      { ...options, replaceEdges: promoting },
+    );
 
     const newSongIdsInOrder = [...edges]
       .sort((a, b) => a.position - b.position)
@@ -743,9 +746,7 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
     }
     if (fromIdx === toIdx) return true;
 
-    const persisted = await Promise.resolve(
-      reorderCachedItemSongsRow(itemId, fromPosition, toPosition),
-    ).then((ok) => ok !== false);
+    const persisted = await reorderCachedItemSongsRow(itemId, fromPosition, toPosition);
     if (!persisted) return false;
 
     const nextSongIds = [...item.songIds];
