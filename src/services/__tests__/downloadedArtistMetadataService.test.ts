@@ -53,7 +53,7 @@ it('deduplicates primary artists, writes only the artist row, and awaits its ima
 
   expect(mockGetServerArtist).toHaveBeenCalledTimes(1);
   expect(mockUpsertArtists).toHaveBeenCalledTimes(1);
-  expect(mockEnsureCached).toHaveBeenCalledWith('cover-ar1');
+  expect(mockEnsureCached).toHaveBeenCalledWith('cover-ar1', { priority: true });
   expect(mockHasCachedCoverArt).toHaveBeenCalledWith('cover-ar1');
 });
 
@@ -74,7 +74,32 @@ it('identifies the artist when row or image persistence fails', async () => {
 
   mockRows.set('ar1', { id: 'ar1', cover_art: 'cover-ar1' });
   mockHasCachedCoverArt.mockResolvedValue(false);
-  await expect(ensureDownloadedArtistMetadata([
-    { id: 's1', title: 'One', artistId: 'ar1', artist: 'Artist', isDir: false },
-  ])).rejects.toMatchObject({ artistId: 'ar1' });
+  jest.useFakeTimers();
+  try {
+    const result = ensureDownloadedArtistMetadata([
+      { id: 's1', title: 'One', artistId: 'ar1', artist: 'Artist', isDir: false },
+    ]);
+    const assertion = expect(result).rejects.toMatchObject({ artistId: 'ar1' });
+    await jest.advanceTimersByTimeAsync(10_000);
+    await assertion;
+    expect(mockEnsureCached).toHaveBeenCalledTimes(3);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+it('retries a cover that failed to save before failing the item', async () => {
+  mockRows.set('ar1', { id: 'ar1', cover_art: 'cover-ar1' });
+  mockHasCachedCoverArt.mockResolvedValueOnce(false).mockResolvedValue(true);
+  jest.useFakeTimers();
+  try {
+    const result = ensureDownloadedArtistMetadata([
+      { id: 's1', title: 'One', artistId: 'ar1', artist: 'Artist', isDir: false },
+    ]);
+    await jest.advanceTimersByTimeAsync(3_000);
+    await expect(result).resolves.toBeUndefined();
+    expect(mockEnsureCached).toHaveBeenCalledTimes(2);
+  } finally {
+    jest.useRealTimers();
+  }
 });

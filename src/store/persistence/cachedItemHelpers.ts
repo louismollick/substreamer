@@ -35,6 +35,14 @@ export function computeQueueItemProgress(
   cachedItems: Record<string, CachedItemRow>,
 ): { completed: number; total: number } {
   const existing = cachedItems[queueItem.itemId];
+  if (existing && queueItem.type === 'album') {
+    // Every song an album download finishes is edged onto its album row as it
+    // lands, so the row alone holds everything done so far.
+    return {
+      completed: Math.min(existing.songIds.length, existing.expectedSongCount),
+      total: existing.expectedSongCount,
+    };
+  }
   if (existing) {
     return {
       completed: existing.songIds.length + queueItem.completedSongs,

@@ -562,7 +562,7 @@ describe('markItemComplete', () => {
     musicCacheStore.getState().markItemComplete(qid, item, songs, edges);
 
     // Trailing `undefined` = no `childBySongId`: these rows carry no real `Child`.
-    expect(mockMarkDownloadComplete).toHaveBeenCalledWith(qid, item, songs, edges, undefined);
+    expect(mockMarkDownloadComplete).toHaveBeenCalledWith(qid, item, songs, edges, undefined, false);
     const state = musicCacheStore.getState();
     expect(state.downloadQueue).toHaveLength(0);
     expect(state.cachedItems['a']).toBeDefined();

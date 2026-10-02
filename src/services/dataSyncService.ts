@@ -14,7 +14,7 @@ import { genreStore } from '../store/genreStore';
 import { offlineModeStore } from '../store/offlineModeStore';
 import { getDb } from '../store/persistence/db';
 import { albumIdsPresent, countAlbums, listAlbumIds, upsertAlbums } from '../db/repository/albums';
-import { deleteAlbumSongsNotIn, hasAlbumWithoutSongs, upsertSongs } from '../db/repository/songs';
+import { countSongs, deleteAlbumSongsNotIn, hasAlbumWithoutSongs, upsertSongs } from '../db/repository/songs';
 import { countArtists } from '../db/repository/artists';
 import { connectivityStore } from '../store/connectivityStore';
 import { scanStatusStore } from '../store/scanStatusStore';
@@ -33,6 +33,7 @@ import {
   refreshPlaylistLibrary,
   runNormalizedLibrarySync,
 } from './normalizedLibrarySync';
+import { runLibraryReapIfNeeded } from './libraryReapService';
 import { fetchScanStatus, registerScanCompletedHook } from './scanService';
 import { registerScrobbleBatchCompletedHook } from './scrobbleService';
 import { canUserScan } from './serverCapabilityService';
@@ -343,6 +344,7 @@ async function startupOrResumeFlow(): Promise<void> {
               // would return [] and drop the newly-added albums).
               fireAndForget(onScanCompleted(result), 'sync.onScanCompleted');
             }
+            fireAndForget(reconcileStaleLibrary(), 'sync.reconcileStaleLibrary');
           }),
           'sync.detectChanges',
         );
@@ -357,6 +359,43 @@ async function startupOrResumeFlow(): Promise<void> {
       }
     }, STARTUP_PREFETCH_SETTLE_MS);
   });
+}
+
+const RECONCILE_KEY = 'substreamer-library-reconcile-at';
+const RECONCILE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Incremental sync only ever adds: songs the server deleted or re-identified
+ * stay in `songs` (and get queued by downloads, then fail as "not found").
+ * When the local table holds more songs than the server reports, re-walk the
+ * library with a full run and let the epoch reap drop what it did not see.
+ * At most once a week — starred, downloaded and playlist songs are exempt from
+ * the reap, so a count that stays high must not trigger a walk every launch.
+ * Needs the server's song count, i.e. `getScanStatus`.
+ */
+export async function reconcileStaleLibrary(): Promise<void> {
+  const sync = syncStatusStore.getState();
+  if (!sync.librarySyncComplete || !sync.songSyncComplete || isErrorPaused(sync)) return;
+  if (offlineModeStore.getState().offlineMode || !canUserScan()) return;
+  const db = getDb();
+  if (!db) return;
+  await fetchScanStatus();
+  // `count` is persisted, so after a failed fetch it is the previous session's.
+  const scan = scanStatusStore.getState();
+  if (scan.error !== null) return;
+  const serverCount = scan.count;
+  if (!(serverCount > 0)) return;
+  const localCount = await countSongs(db);
+  if (localCount <= serverCount) return;
+  const last = Number(await kvStorage.getItem(RECONCILE_KEY)) || 0;
+  if (Date.now() - last < RECONCILE_INTERVAL_MS) return;
+  await runNormalizedLibrarySync({ full: true, reason: `reconcile:local=${localCount},server=${serverCount}` });
+  // A walk that paused on an error leaves the sync incomplete; stamp (and reap)
+  // only once both halves finished, so an interrupted one retries next launch.
+  const after = syncStatusStore.getState();
+  if (!after.librarySyncComplete || !after.songSyncComplete) return;
+  await runLibraryReapIfNeeded();
+  await kvStorage.setItem(RECONCILE_KEY, String(Date.now()));
 }
 
 let _offlineSyncPhaseUnsub: (() => void) | null = null;
