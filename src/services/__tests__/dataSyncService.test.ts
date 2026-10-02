@@ -1005,6 +1005,17 @@ describe('dataSyncService — reconcileStaleLibrary', () => {
     expect(mockRunNormalizedLibrarySync).toHaveBeenCalled();
   });
 
+  it('ignores a persisted server count when the scan-status fetch failed', async () => {
+    insertSongs(3);
+    scanStatusStore.setState({ error: 'Failed to fetch scan status' } as any);
+    try {
+      await reconcileStaleLibrary();
+      expect(mockRunNormalizedLibrarySync).not.toHaveBeenCalled();
+    } finally {
+      scanStatusStore.setState({ error: null } as any);
+    }
+  });
+
   it('runs at most once a week', async () => {
     insertSongs(3);
     await reconcileStaleLibrary();

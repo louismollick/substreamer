@@ -380,7 +380,10 @@ export async function reconcileStaleLibrary(): Promise<void> {
   const db = getDb();
   if (!db) return;
   await fetchScanStatus();
-  const serverCount = scanStatusStore.getState().count;
+  // `count` is persisted, so after a failed fetch it is the previous session's.
+  const scan = scanStatusStore.getState();
+  if (scan.error !== null) return;
+  const serverCount = scan.count;
   if (!(serverCount > 0)) return;
   const localCount = await countSongs(db);
   if (localCount <= serverCount) return;

@@ -216,9 +216,13 @@ private enum DownloadError: Error, LocalizedError {
   case invalidUrl
   case invalidDestination
   case httpError(Int)
+  case cancelled
 
   var errorDescription: String? {
     switch self {
+    // Fixed English text: JS recognises a cancelled transfer by it, and
+    // URLError's own description is localized.
+    case .cancelled: return "cancelled"
     case .invalidUrl: return "Invalid download URL"
     case .invalidDestination: return "Invalid destination path"
     case .httpError(let code): return "Download failed with HTTP status \(code)"
@@ -322,7 +326,11 @@ private class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate {
     didCompleteWithError error: Error?
   ) {
     guard let error = error else { return }
-    continuation?.resume(throwing: error)
+    if (error as? URLError)?.code == .cancelled {
+      continuation?.resume(throwing: DownloadError.cancelled)
+    } else {
+      continuation?.resume(throwing: error)
+    }
     continuation = nil
   }
 }
