@@ -5,7 +5,7 @@ jest.mock('../../services/musicCacheService', () => ({
   getTrackQueueStatus: (...a: unknown[]) => (mockGetTrackQueueStatus as any)(...a),
 }));
 
-import { renderHook } from '@testing-library/react-native';
+import { act, renderHook } from '@testing-library/react-native';
 
 import { useDownloadStatus } from '../useDownloadStatus';
 import { musicCacheStore } from '../../store/musicCacheStore';
@@ -142,5 +142,31 @@ describe('useDownloadStatus', () => {
       const { result } = renderHook(() => useDownloadStatus('playlist', 'p1'));
       expect(result.current).toBe('complete');
     });
+  });
+});
+
+
+describe('retained download after a refresh error', () => {
+  it.each([
+    ['album', ['s1', 's2'], 2, 'complete'],
+    ['album', ['s1'], 2, 'partial'],
+    ['playlist', ['s1'], 2, 'complete'],
+  ] as const)('shows the retained %s cache instead of a queued retry', (type, songIds, expectedSongCount, expected) => {
+    musicCacheStore.setState({
+      cachedItems: { retained: makeItem({ itemId: 'retained', type, songIds: [...songIds], expectedSongCount }) },
+      downloadQueue: [{ queueId: 'repair', itemId: 'retained', type, name: 'Repair', status: 'downloading', totalSongs: 2, completedSongs: 1, addedAt: 0, queuePosition: 1 }],
+    });
+    const { result } = renderHook(() => useDownloadStatus(type, 'retained'));
+    expect(result.current).toBe('downloading');
+    act(() => musicCacheStore.setState((state) => ({ downloadQueue: state.downloadQueue.map((item) => ({ ...item, status: 'error' as const })) })));
+    expect(result.current).toBe(expected);
+    act(() => musicCacheStore.setState((state) => ({ downloadQueue: state.downloadQueue.map((item) => ({ ...item, status: 'queued' as const })) })));
+    expect(result.current).toBe('queued');
+  });
+
+  it('keeps a failed first download represented as queued when there is no retained item', () => {
+    musicCacheStore.setState({ downloadQueue: [{ queueId: 'first', itemId: 'a1', type: 'album', name: 'First', status: 'error', totalSongs: 2, completedSongs: 0, addedAt: 0, queuePosition: 1 }] });
+    const { result } = renderHook(() => useDownloadStatus('album', 'a1'));
+    expect(result.current).toBe('queued');
   });
 });

@@ -180,6 +180,8 @@ const itemSyncs = new Map<string, Promise<void>>();
 // Cancellation blocks new completion writes and waits for an already-started finalization.
 const cancellingQueueIds = new Set<string>();
 const itemFinalizations = new Map<string, Promise<void>>();
+// Active repairs may publish one last transfer after their queue row is cancelled.
+const cancelledRepairSongs = new Map<string, string[]>();
 
 /* ------------------------------------------------------------------ */
 /*  Path helpers                                                       */
@@ -1159,6 +1161,9 @@ async function processQueue(): Promise<void> {
         .finally(async () => {
           activeQueueIds.delete(next.queueId);
           cancellingQueueIds.delete(next.queueId);
+          const abandonedSongs = cancelledRepairSongs.get(next.queueId);
+          cancelledRepairSongs.delete(next.queueId);
+          if (abandonedSongs) await cleanupUnheldRepairSongs(abandonedSongs);
           if (activeQueueIds.size === 0 && myId === processingId) isProcessing = false;
           await drainPendingItemSync(next.itemId);
           void processQueue();
@@ -2498,22 +2503,35 @@ async function reconcileCachedItemTracks(itemId: string, newSongs: Child[]): Pro
   return true;
 }
 
+/** Remove replacement audio that never gained an item edge; keep every existing holder. */
+async function cleanupUnheldRepairSongs(songIds: readonly string[]): Promise<void> {
+  const state = musicCacheStore.getState();
+  const heldIds = new Set(Object.values(state.cachedItems).flatMap((item) => item.songIds));
+  const candidates = [...new Set(songIds)].filter((id) => !heldIds.has(id) && state.cachedSongs[id]);
+  if (candidates.length === 0) return;
+  const orphaned = await musicCacheStore.getState().orphanCachedSongs(candidates, true);
+  for (const songId of orphaned) {
+    trackToItems.delete(songId);
+    trackUriMap.delete(songId);
+    const song = state.cachedSongs[songId];
+    void deleteFileAsync(resolveSongFile(song).uri).catch(() => { /* best-effort */ });
+  }
+}
+
 /**
  * Cancel a queued or in-progress download and remove its partial files.
  *
- * v2 semantics: if songs completed during this queue item's run exist only
- * because of this item (no other refs), we leave them in the song pool as
- * a partial album — the file is legitimately downloaded, just no user-
- * visible item now references it. The next startup reconciliation or
- * cache-clear will reap them. This is a deliberate softening vs. v1 (which
- * wiped the item dir entirely) — it avoids throwing away work the user's
- * bandwidth paid for, and the partial-album row keeps it reachable.
+ * Completed first downloads remain reachable in derived partial albums. A
+ * replacement's songs without any item edge are removed after its queue row;
+ * an active worker sweeps them after its final transfer result.
  */
 export async function cancelDownload(queueId: string): Promise<void> {
   const item = musicCacheStore.getState().downloadQueue.find(
     (q) => q.queueId === queueId,
   );
   if (!item) return;
+  const cached = musicCacheStore.getState().cachedItems[item.itemId];
+  const isAlbumRepair = item.type === 'album' && cached?.type === 'album' && !cached.derived;
   pendingItemSyncs.delete(item.itemId);
   cancellingQueueIds.add(queueId);
 
@@ -2537,6 +2555,12 @@ export async function cancelDownload(queueId: string): Promise<void> {
       error: 'Failed to cancel download',
     });
     return;
+  }
+
+  if (isAlbumRepair) {
+    const songIds = songs.map((song) => song.id);
+    if (activeQueueIds.has(queueId)) cancelledRepairSongs.set(queueId, songIds);
+    else await cleanupUnheldRepairSongs(songIds);
   }
 
   // Stop this item's in-flight transfers. A song another queued item shares is
@@ -2630,10 +2654,16 @@ async function clearQueueSnapshot(queue: DownloadQueueItem[]): Promise<void> {
   // One SQL delete for the snapshot's rows. An item enqueued meanwhile is not in
   // the snapshot, so it survives in SQL and in memory alike.
   const snapshotIds = new Set(queue.map((item) => item.queueId));
+  const repairSongs = await Promise.all(queue.filter((item) => {
+    const cached = musicCacheStore.getState().cachedItems[item.itemId];
+    return item.type === 'album' && cached?.type === 'album' && !cached.derived
+      && musicCacheStore.getState().downloadQueue.some((q) => q.queueId === item.queueId);
+  }).map((item) => readDownloadQueueSongRefsAsync(item.queueId)));
   if (await removeDownloadQueueItems([...snapshotIds])) {
     musicCacheStore.setState((state) => ({
       downloadQueue: state.downloadQueue.filter((item) => !snapshotIds.has(item.queueId)),
     }));
+    await cleanupUnheldRepairSongs(repairSongs.flat().map((song) => song.id));
     scheduleRecalculate();
   } else {
     for (const item of queue) {

@@ -997,7 +997,8 @@ const NO_REAL_HOLDER_SQL = `NOT EXISTS (SELECT 1 FROM cached_item_songs e2
         AND NOT EXISTS (SELECT 1 FROM download_queue_songs q2 WHERE q2.song_id = ?)`;
 
 /**
- * The orphan itself, as five self-guarded statements. Every decision is in the
+ * The orphan itself, as five self-guarded statements, or only the final song delete
+ * when derived holders must survive. Every decision is in the
  * SQL: nothing here reads a value and then branches on it in JS, which is what
  * makes the whole thing safe to ship as one indivisible batch.
  *
@@ -1007,7 +1008,14 @@ const NO_REAL_HOLDER_SQL = `NOT EXISTS (SELECT 1 FROM cached_item_songs e2
  * them: running the halves back to back would flip a survivor's tail back onto
  * the slot the doomed edge still occupies.
  */
-const orphanSongCommands = (songId: string): BatchCommand[] => {
+const orphanSongCommands = (songId: string, preserveDerived = false): BatchCommand[] => {
+  const deleteUnheldSong: BatchCommand = [
+    `DELETE FROM cached_songs WHERE song_id = ?
+     AND NOT EXISTS (SELECT 1 FROM cached_item_songs WHERE cached_item_songs.song_id = ?)
+     AND NOT EXISTS (SELECT 1 FROM download_queue_songs WHERE download_queue_songs.song_id = ?);`,
+    [songId, songId, songId],
+  ];
+  if (preserveDerived) return [deleteUnheldSong];
   // Every edge ABOVE this song's slot, in its owning item. Unscoped by item —
   // one call repacks every holder at once — so the restore half stays unscoped
   // too. `cached_item_songs` unaliased inside the subquery is the UPDATE target.
@@ -1042,17 +1050,13 @@ const orphanSongCommands = (songId: string): BatchCommand[] => {
     // 4. Bring the shifted tails back up.
     tailShift.restore,
     // 5. The song row, iff no edge anywhere and no queued download still points at it.
-    [
-      `DELETE FROM cached_songs WHERE song_id = ?
-       AND NOT EXISTS (SELECT 1 FROM cached_item_songs WHERE cached_item_songs.song_id = ?)
-       AND NOT EXISTS (SELECT 1 FROM download_queue_songs WHERE download_queue_songs.song_id = ?);`,
-      [songId, songId, songId],
-    ],
+    deleteUnheldSong,
   ];
 };
 
 /**
- * "Orphan this song iff no REAL holder remains" — one advisory pre-read, ONE
+ * Orphan a song without a real holder, or without ANY holder when preserveDerived
+ * is true. One advisory pre-read, ONE
  * atomic batch that makes no decision in JS, then post-reads for what actually
  * happened. Ships as `runAtomicBatchAsync` (one indivisible pool task) rather
  * than a transaction held across a JS yield.
@@ -1067,6 +1071,7 @@ const orphanSongCommands = (songId: string): BatchCommand[] => {
  */
 export async function orphanSongIfUnreferencedAsync(
   songId: string,
+  preserveDerived = false,
 ): Promise<{ orphaned: boolean; affectedItems: string[]; prunedItems: string[] }> {
   const db = getDb();
   const affectedItems: string[] = [];
@@ -1084,7 +1089,7 @@ export async function orphanSongIfUnreferencedAsync(
         WHERE e.song_id = ?;`,
       [songId],
     );
-    if (holders.some((h) => h.derived === 0)) return { orphaned: false, affectedItems, prunedItems };
+    if (holders.some((h) => h.derived === 0) || (preserveDerived && holders.length > 0)) return { orphaned: false, affectedItems, prunedItems };
     const queued = await db.getFirstAsync<{ c: number }>(
       'SELECT COUNT(*) AS c FROM download_queue_songs WHERE song_id = ?;',
       [songId],
@@ -1092,7 +1097,7 @@ export async function orphanSongIfUnreferencedAsync(
     if ((queued?.c ?? 0) > 0) return { orphaned: false, affectedItems, prunedItems };
     affectedItems.push(...new Set(holders.map((h) => h.item_id)));
 
-    await db.runAtomicBatchAsync(orphanSongCommands(songId));
+    await db.runAtomicBatchAsync(orphanSongCommands(songId, preserveDerived));
 
     const remaining = await db.getFirstAsync<{ c: number }>(
       'SELECT COUNT(*) AS c FROM cached_songs WHERE song_id = ?;',

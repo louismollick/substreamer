@@ -801,8 +801,8 @@ describe('removeCachedItem', () => {
 
     expect(mockDeleteCachedItem).toHaveBeenCalledWith('a');
     expect(mockOrphanSongIfUnreferencedAsync).toHaveBeenCalledTimes(2);
-    expect(mockOrphanSongIfUnreferencedAsync).toHaveBeenCalledWith('s1');
-    expect(mockOrphanSongIfUnreferencedAsync).toHaveBeenCalledWith('s2');
+    expect(mockOrphanSongIfUnreferencedAsync).toHaveBeenCalledWith('s1', false);
+    expect(mockOrphanSongIfUnreferencedAsync).toHaveBeenCalledWith('s2', false);
     expect(mockDeleteCachedSong).not.toHaveBeenCalled();
     expect(orphans).toEqual(['s1', 's2']);
     const state = musicCacheStore.getState();
@@ -834,8 +834,8 @@ describe('removeCachedItem', () => {
 
     expect(orphans).toEqual(['s2']);
     // Both songs are checked; only s2 orphans.
-    expect(mockOrphanSongIfUnreferencedAsync).toHaveBeenCalledWith('s1');
-    expect(mockOrphanSongIfUnreferencedAsync).toHaveBeenCalledWith('s2');
+    expect(mockOrphanSongIfUnreferencedAsync).toHaveBeenCalledWith('s1', false);
+    expect(mockOrphanSongIfUnreferencedAsync).toHaveBeenCalledWith('s2', false);
     expect(mockDeleteCachedSong).not.toHaveBeenCalled();
     const state = musicCacheStore.getState();
     expect(state.cachedItems['a']).toBeUndefined();
@@ -1030,7 +1030,7 @@ describe('removeCachedItem — derived-holder orphan matrix', () => {
     const orphans = await musicCacheStore.getState().removeCachedItem('__starred__');
 
     expect(orphans).toEqual(['S']);
-    expect(mockOrphanSongIfUnreferencedAsync).toHaveBeenCalledWith('S');
+    expect(mockOrphanSongIfUnreferencedAsync).toHaveBeenCalledWith('S', false);
     const state = musicCacheStore.getState();
     // Removed item gone, pruned derived holder gone, orphan song gone.
     expect(state.cachedItems['__starred__']).toBeUndefined();
@@ -1722,5 +1722,28 @@ describe('revision', () => {
       { completedSongs: 1 },
     );
     expect(revision()).toBe(before);
+  });
+});
+
+
+describe('orphanCachedSongs', () => {
+  it('counts a song once when two cleanup confirmation reads overlap', async () => {
+    musicCacheStore.setState({
+      cachedSongs: { abandoned: makeSong('abandoned'), kept: makeSong('kept') },
+      totalBytes: 2000, totalFiles: 2,
+    });
+    let release!: () => void;
+    const confirmed = new Promise<void>((resolve) => { release = resolve; });
+    mockOrphanSongIfUnreferencedAsync.mockImplementation(async () => {
+      await confirmed;
+      return { orphaned: true, affectedItems: [], prunedItems: [] };
+    });
+    const first = musicCacheStore.getState().orphanCachedSongs(['abandoned'], true);
+    const second = musicCacheStore.getState().orphanCachedSongs(['abandoned'], true);
+    release();
+    await Promise.all([first, second]);
+    expect(musicCacheStore.getState().cachedSongs).toEqual({ kept: makeSong('kept') });
+    expect(musicCacheStore.getState().totalBytes).toBe(1000);
+    expect(musicCacheStore.getState().totalFiles).toBe(1);
   });
 });

@@ -537,9 +537,11 @@ function seedItem(itemId: string, opts: {
   coverArtId?: string;
   expectedSongCount?: number;
   downloadedAt?: number;
+  derived?: boolean;
 }) {
   const type = opts.type ?? 'album';
   const songIds = opts.songIds ?? [];
+  if (opts.derived) persistenceMock.__derivedItems.add(itemId);
   // Seed edges in the persistence mock so the refcount check is accurate.
   for (let i = 0; i < songIds.length; i++) {
     persistenceMock.__edges.push({ itemId, position: i + 1, songId: songIds[i] });
@@ -557,6 +559,7 @@ function seedItem(itemId: string, opts: {
         parentAlbumId: undefined,
         lastSyncAt: Date.now(),
         downloadedAt: opts.downloadedAt ?? Date.now(),
+        ...(opts.derived ? { derived: true } : {}),
         songIds,
       },
     },
@@ -3074,6 +3077,10 @@ describe('download pipeline', () => {
     await waitForQueueIdle();
     expect(musicCacheStore.getState().cachedItems['cancel-rekey'].songIds).toEqual(['old-a', 'old-b']);
     expect(musicCacheStore.getState().downloadQueue).toEqual([]);
+    expect(musicCacheStore.getState().cachedSongs['new-a']).toBeUndefined();
+    expect(musicCacheStore.getState().cachedSongs['new-b']).toBeUndefined();
+    expect(fileDeletesAsync.some((uri) => uri.includes('new-a.mp3'))).toBe(true);
+    expect(fileDeletesAsync.some((uri) => uri.includes('new-b.mp3'))).toBe(true);
   });
 
   it('keeps stale album ids when a replacement download fails', async () => {
@@ -4685,5 +4692,148 @@ describe('retryFailedDownloads', () => {
     mockBeginBackgroundDownloads.mockClear();
     await retryFailedDownloads();
     expect(mockBeginBackgroundDownloads).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('abandoned album replacement songs', () => {
+  const actual = jest.requireActual<typeof import('../../store/persistence/musicCacheTables')>('../../store/persistence/musicCacheTables');
+
+  async function prepareRepair() {
+    await actual.clearAllMusicCacheRows();
+    const originalUpsertSong = persistenceMock.upsertCachedSong.getMockImplementation();
+    const originalInsertQueue = persistenceMock.insertDownloadQueueItem.getMockImplementation();
+    const originalRemoveQueue = persistenceMock.removeDownloadQueueItem.getMockImplementation();
+    const originalRemoveQueues = persistenceMock.removeDownloadQueueItems.getMockImplementation();
+    const originalOrphan = persistenceMock.orphanSongIfUnreferencedAsync.getMockImplementation();
+    const originalDeleteItem = persistenceMock.deleteCachedItem.getMockImplementation();
+    const originalDemote = persistenceMock.demoteCachedAlbumToPartialAsync.getMockImplementation();
+    persistenceMock.upsertCachedSong.mockImplementation(actual.upsertCachedSong);
+    persistenceMock.insertDownloadQueueItem.mockImplementation(async (...args: Parameters<typeof actual.insertDownloadQueueItem>) => {
+      await actual.insertDownloadQueueItem(...args); await originalInsertQueue(...args);
+    });
+    persistenceMock.removeDownloadQueueItem.mockImplementation(async (queueId: string) => {
+      const ok = await actual.removeDownloadQueueItem(queueId);
+      if (ok) await originalRemoveQueue(queueId);
+      return ok;
+    });
+    persistenceMock.removeDownloadQueueItems.mockImplementation(async (queueIds: string[]) => {
+      const ok = await actual.removeDownloadQueueItems(queueIds);
+      if (ok) await originalRemoveQueues(queueIds);
+      return ok;
+    });
+    persistenceMock.orphanSongIfUnreferencedAsync.mockImplementation(actual.orphanSongIfUnreferencedAsync);
+    persistenceMock.deleteCachedItem.mockImplementation(async (itemId: string) => {
+      await actual.deleteCachedItem(itemId); await originalDeleteItem(itemId);
+    });
+    persistenceMock.demoteCachedAlbumToPartialAsync.mockImplementation(async (...args: Parameters<typeof actual.demoteCachedAlbumToPartialAsync>) => {
+      const result = await actual.demoteCachedAlbumToPartialAsync(...args);
+      if (result.persisted) await originalDemote(...args);
+      return result;
+    });
+    for (const id of ['old-a', 'old-b']) {
+      const song = makeCachedSong(id, { albumId: 'repair-cleanup' });
+      seedSong(song); await actual.upsertCachedSong(song);
+    }
+    seedItem('repair-cleanup', { type: 'album', songIds: ['old-a', 'old-b'], expectedSongCount: 2 });
+    seedItem('shared-old', { type: 'playlist', songIds: ['old-a'] });
+    for (const item of Object.values(musicCacheStore.getState().cachedItems)) {
+      await actual.upsertCachedItem(item);
+      for (let i = 0; i < item.songIds.length; i++) await actual.insertCachedItemSong(item.itemId, i + 1, item.songIds[i]);
+    }
+    mockFileExists = true;
+    mockFileSize = 5000;
+    (getDownloadStreamUrl as jest.Mock).mockImplementation((id: string) => `https://example.com/${id}`);
+    mockFetchAlbum.mockResolvedValue({ id: 'repair-cleanup', name: 'Repaired', songCount: 2,
+      song: [makeChild('fresh-a', { albumId: 'repair-cleanup' }), makeChild('fresh-b', { albumId: 'repair-cleanup' })] });
+    return async () => {
+      persistenceMock.upsertCachedSong.mockImplementation(originalUpsertSong);
+      persistenceMock.insertDownloadQueueItem.mockImplementation(originalInsertQueue);
+      persistenceMock.removeDownloadQueueItem.mockImplementation(originalRemoveQueue);
+      persistenceMock.removeDownloadQueueItems.mockImplementation(originalRemoveQueues);
+      persistenceMock.orphanSongIfUnreferencedAsync.mockImplementation(originalOrphan);
+      persistenceMock.deleteCachedItem.mockImplementation(originalDeleteItem);
+      persistenceMock.demoteCachedAlbumToPartialAsync.mockImplementation(originalDemote);
+      await actual.clearAllMusicCacheRows();
+    };
+  }
+
+  async function waitForCleanup() {
+    for (let i = 0; i < 40; i++) await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  it.each(['cancel', 'delete', 'demote', 'clear'] as const)('removes ownerless fresh songs and late results after %s, including restart state', async (action) => {
+    const dispose = await prepareRepair();
+    let release: (() => void) | undefined;
+    mockDownloadAudioFileAsync.mockImplementation((url: string) => url.endsWith('/fresh-b')
+      ? new Promise((resolve) => { release = () => resolve({ status: 200 }); })
+      : Promise.resolve({ status: 200 }));
+    try {
+      await enqueueAlbumDownload('repair-cleanup');
+      for (let i = 0; i < 30 && (!release || !musicCacheStore.getState().cachedSongs['fresh-a']); i++) await new Promise((resolve) => setImmediate(resolve));
+      expect(musicCacheStore.getState().cachedSongs['fresh-a']).toBeDefined();
+      const queued = musicCacheStore.getState().downloadQueue[0];
+      if (action === 'cancel') await cancelDownload(queued.queueId);
+      else if (action === 'delete') await deleteCachedItem('repair-cleanup');
+      else if (action === 'demote') await demoteAlbumToPartial('repair-cleanup');
+      else await clearDownloadQueue();
+      release?.();
+      await waitForCleanup();
+      expect(musicCacheStore.getState().cachedSongs['fresh-a']).toBeUndefined();
+      expect(musicCacheStore.getState().cachedSongs['fresh-b']).toBeUndefined();
+      expect(fileDeletesAsync).toEqual(expect.arrayContaining([expect.stringContaining('fresh-a.mp3'), expect.stringContaining('fresh-b.mp3')]));
+      const persisted = await actual.hydrateCachedSongsAsync();
+      expect(persisted['fresh-a']).toBeUndefined();
+      expect(persisted['fresh-b']).toBeUndefined();
+      const items = await actual.hydrateCachedItemsAsync();
+      if (action === 'delete') expect(items['repair-cleanup']).toBeUndefined();
+      else if (action === 'demote') expect(items['repair-cleanup']).toMatchObject({ derived: true, songIds: ['old-a'] });
+      else expect(items['repair-cleanup'].songIds).toEqual(['old-a', 'old-b']);
+      expect(persisted['old-a']).toBeDefined();
+      expect(await actual.hydrateDownloadQueueAsync()).toEqual([]);
+    } finally { release?.(); await waitForCleanup(); await dispose(); }
+  });
+
+  it('sweeps completed ownerless songs after bulk clearing an errored replacement', async () => {
+    const dispose = await prepareRepair();
+    mockDownloadAudioFileAsync.mockImplementation(async (url: string) => url.endsWith('/fresh-b')
+      ? { status: 404, rejected: 'http' } : { status: 200 });
+    try {
+      await enqueueAlbumDownload('repair-cleanup');
+      await waitForQueueIdle();
+      expect(musicCacheStore.getState().downloadQueue[0].status).toBe('error');
+      expect(musicCacheStore.getState().cachedSongs['fresh-a']).toBeDefined();
+      await clearDownloadQueue();
+      await waitForCleanup();
+      expect(musicCacheStore.getState().cachedSongs['fresh-a']).toBeUndefined();
+      expect((await actual.hydrateCachedSongsAsync())['fresh-a']).toBeUndefined();
+      expect((await actual.hydrateCachedItemsAsync())['repair-cleanup'].songIds).toEqual(['old-a', 'old-b']);
+      expect(fileDeletesAsync.some((uri) => uri.includes('fresh-a.mp3'))).toBe(true);
+    } finally { await dispose(); }
+  });
+
+  it.each(['real', 'derived', 'queued'] as const)('preserves fresh songs held by another %s download', async (holder) => {
+    const dispose = await prepareRepair();
+    mockDownloadAudioFileAsync.mockImplementation(async (url: string) => url.endsWith('/fresh-b')
+      ? { status: 404, rejected: 'http' } : { status: 200 });
+    try {
+      await enqueueAlbumDownload('repair-cleanup');
+      await waitForQueueIdle();
+      if (holder === 'queued') {
+        const protectedSong = makeChild('fresh-a', { albumId: 'repair-cleanup' });
+        musicCacheStore.getState().enqueue({ itemId: 'queued-protection', type: 'playlist', name: 'Protected', totalSongs: 1 }, [protectedSong]);
+        await whenQueuePayloadWritten(musicCacheStore.getState().downloadQueue.find((q) => q.itemId === 'queued-protection')!.queueId);
+      } else {
+        seedItem('song-holder', { type: 'playlist', songIds: ['fresh-a'], derived: holder === 'derived' });
+        await actual.upsertCachedItem(musicCacheStore.getState().cachedItems['song-holder']);
+        await actual.insertCachedItemSong('song-holder', 1, 'fresh-a');
+      }
+      await cancelDownload(musicCacheStore.getState().downloadQueue.find((q) => q.itemId === 'repair-cleanup')!.queueId);
+      await waitForCleanup();
+      expect(musicCacheStore.getState().cachedSongs['fresh-a']).toBeDefined();
+      expect((await actual.hydrateCachedSongsAsync())['fresh-a']).toBeDefined();
+      expect(fileDeletesAsync.some((uri) => uri.includes('fresh-a.mp3'))).toBe(false);
+      expect((await actual.hydrateCachedItemsAsync())['repair-cleanup'].songIds).toEqual(['old-a', 'old-b']);
+    } finally { await dispose(); }
   });
 });

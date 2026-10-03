@@ -196,6 +196,8 @@ export interface MusicCacheState {
    * store itself has already removed the orphan songs from `cachedSongs`.
    */
   removeCachedItem: (itemId: string) => Promise<string[]>;
+  /** Orphan candidates atomically, then reconcile their rows, holders and counters. */
+  orphanCachedSongs: (songIds: readonly string[], preserveDerived?: boolean) => Promise<string[]>;
   /**
    * Remove a single song at `position` from an item. Returns the song id if
    * that song became orphan (so service can delete its file); `null` if the
@@ -584,13 +586,17 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
     // orphan run in ONE transaction inside `orphanSongIfUnreferencedAsync`, so
     // no concurrent insert can add a holder between the count and the delete.
     await deleteCachedItemRow(itemId);
+    return get().orphanCachedSongs(affectedSongIds);
+  },
+
+  orphanCachedSongs: async (songIds, preserveDerived = false) => {
     const orphaned: string[] = [];
     const touchedHolders = new Set<string>();
     const prunedHolders = new Set<string>();
-    for (const songId of affectedSongIds) {
+    for (const songId of new Set(songIds)) {
       // eslint-disable-next-line no-await-in-loop
       const { orphaned: didOrphan, affectedItems, prunedItems } =
-        await orphanSongIfUnreferencedAsync(songId);
+        await orphanSongIfUnreferencedAsync(songId, preserveDerived);
       if (didOrphan) {
         orphaned.push(songId);
         affectedItems.forEach((i) => touchedHolders.add(i));
@@ -613,7 +619,9 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
       // (symmetric with addBytes/addFiles on download; boot recomputes from truth).
       // Without this the card's file count and disk usage stay stale after a delete.
       let freedBytes = 0;
+      let freedFiles = 0;
       for (const songId of orphaned) {
+        if (prev.cachedSongs[songId]) freedFiles++;
         freedBytes += prev.cachedSongs[songId]?.bytes ?? 0;
         delete nextSongs[songId];
       }
@@ -621,7 +629,7 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
         cachedItems: nextItems,
         cachedSongs: nextSongs,
         totalBytes: Math.max(0, prev.totalBytes - freedBytes),
-        totalFiles: Math.max(0, prev.totalFiles - orphaned.length),
+        totalFiles: Math.max(0, prev.totalFiles - freedFiles),
       });
     });
     return orphaned;

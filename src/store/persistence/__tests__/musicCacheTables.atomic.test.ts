@@ -450,6 +450,36 @@ describe('markDownloadComplete (real SQL)', () => {
 /* ------------------------------------------------------------------ */
 
 describe('orphanSongIfUnreferencedAsync (real SQL)', () => {
+  it('preserves an existing derived holder during repair-only cleanup', async () => {
+    await seedHolder('partial', ['s1'], { derived: true });
+    expect(await orphanSongIfUnreferencedAsync('s1', true)).toEqual({ orphaned: false, affectedItems: [], prunedItems: [] });
+    expect(songExists('s1')).toBe(true);
+    expect(songOrderOf('partial')).toEqual(['s1']);
+  });
+
+  it('removes an unheld repair song without changing unrelated rows', async () => {
+    await upsertCachedSong(makeSong({ id: 's1' }));
+    await seedHolder('partial', ['kept'], { derived: true });
+    expect((await orphanSongIfUnreferencedAsync('s1', true)).orphaned).toBe(true);
+    expect(songExists('s1')).toBe(false);
+    expect(songOrderOf('partial')).toEqual(['kept']);
+  });
+
+  it('keeps a derived holder inserted after the advisory read and before cleanup lands', async () => {
+    await upsertCachedSong(makeSong({ id: 's1' }));
+    await upsertCachedItem(makeItem({ itemId: 'late-partial', derived: true }));
+    __setDbForTests({
+      ...realDb,
+      runAtomicBatchAsync: async (commands) => {
+        await realDb.runAtomicBatchAsync([['INSERT INTO cached_item_songs (item_id, position, song_id) VALUES (?, ?, ?);', ['late-partial', 1, 's1']]]);
+        return realDb.runAtomicBatchAsync(commands);
+      },
+    });
+    expect((await orphanSongIfUnreferencedAsync('s1', true)).orphaned).toBe(false);
+    expect(songExists('s1')).toBe(true);
+    expect(songOrderOf('late-partial')).toEqual(['s1']);
+  });
+
   describe('the real-holder guard', () => {
     it('keeps everything while a real holder still has the song', async () => {
       await seedHolder('alb-1', ['s1', 's2']);
