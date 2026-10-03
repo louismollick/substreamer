@@ -150,6 +150,19 @@ describe('lyricsStore.fetchLyrics', () => {
     expect(mockSave).not.toHaveBeenCalled();
   });
 
+  it('does not expose background prefetch loading or errors to the player', async () => {
+    let fail: ((error: Error) => void) | undefined;
+    mockGetLyrics.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    const pending = lyricsStore.getState().fetchLyrics('background', 'A', 'T', undefined, true);
+    await flush();
+    expect(lyricsStore.getState().loading['background']).toBeUndefined();
+    lyricsStore.setState({ entries: { background: sample } });
+    fail?.(new Error('optional lyrics failed'));
+    expect(await pending).toBeNull();
+    expect(lyricsStore.getState().entries.background).toBe(sample);
+    expect(lyricsStore.getState().errors.background).toBeUndefined();
+  });
+
   it('populates entries on successful fetch, writes one row, and clears loading', async () => {
     mockGetLyrics.mockResolvedValue(sample);
 

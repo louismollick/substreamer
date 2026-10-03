@@ -25,6 +25,7 @@ interface LyricsState {
     artist?: string,
     title?: string,
     signal?: AbortSignal,
+    background?: boolean,
   ) => Promise<LyricsData | null>;
   /**
    * Refetch from the server, consulting neither cache, and overwrite the stored row.
@@ -93,6 +94,7 @@ export const lyricsStore = create<LyricsState>()((set, get) => {
     trackId: string,
     artist?: string,
     title?: string,
+    reportErrors = true,
   ): Promise<LyricsData | null> => {
     const network = new AbortController();
     const cancel = () => network.abort();
@@ -114,7 +116,7 @@ export const lyricsStore = create<LyricsState>()((set, get) => {
 
     if (controller.signal.aborted) return null;
     if (result === 'timeout') {
-      setError(trackId, 'timeout');
+      if (reportErrors) setError(trackId, 'timeout');
       return null;
     }
 
@@ -133,12 +135,12 @@ export const lyricsStore = create<LyricsState>()((set, get) => {
     errors: {},
     revision: 0,
 
-    fetchLyrics: async (trackId, artist, title, signal) => {
+    fetchLyrics: async (trackId, artist, title, signal, background = false) => {
       const cached = get().entries[trackId];
       if (cached) return cached;
 
       const { controller, finish } = beginFetch(trackId, signal);
-      beginLoad(trackId, controller);
+      if (!background) beginLoad(trackId, controller);
       try {
         const stored = await loadLyrics(trackId);
         if (controller.signal.aborted) return null;
@@ -146,9 +148,9 @@ export const lyricsStore = create<LyricsState>()((set, get) => {
           remember(trackId, stored);
           return stored;
         }
-        return await fetchFromServer(controller, trackId, artist, title);
+        return await fetchFromServer(controller, trackId, artist, title, !background);
       } catch {
-        if (!controller.signal.aborted) setError(trackId, 'error');
+        if (!background && !controller.signal.aborted) setError(trackId, 'error');
         return null;
       } finally {
         if (loadingFetches.get(trackId) === controller) {

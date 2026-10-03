@@ -147,6 +147,7 @@ function getTrackFileExtension(track: Child): string {
 /* ------------------------------------------------------------------ */
 
 let cacheDir: Directory | null = null;
+let cacheSession = 0;
 let isProcessing = false;
 let processingId = 0;
 let offlineSubscription: (() => void) | null = null;
@@ -210,6 +211,7 @@ function resolveSongFile(song: { id: string; albumId?: string; suffix: string })
  */
 export function initMusicCache(): void {
   if (cacheDir) return;
+  if (lyricsPrefetchController.signal.aborted) lyricsPrefetchController = new AbortController();
   try {
     const dir = new Directory(Paths.document, CACHE_DIR_NAME);
     if (!dir.exists) {
@@ -260,7 +262,12 @@ export function initMusicCache(): void {
  * The next login re-arms the listener via `initMusicCache()`.
  */
 export function teardownMusicCache(): void {
+  cacheSession++;
+  processingId++;
+  isProcessing = false;
   cancelLyricsPrefetch();
+  // Leave prefetch closed until the next account initializes its cache.
+  lyricsPrefetchController.abort();
   lyricsStore.getState().invalidatePendingFetches();
   appStateSubscription?.remove();
   appStateSubscription = null;
@@ -795,7 +802,7 @@ async function cacheTrackLyrics(song: Child, signal: AbortSignal): Promise<void>
   if (signal.aborted || isPausedForOffline() || pausedUntilForeground) return;
   await lyricsStore
     .getState()
-    .fetchLyrics(song.id, song.artist, song.title, signal)
+    .fetchLyrics(song.id, song.artist, song.title, signal, true)
     .catch(() => {
       /* Lyrics are optional metadata; audio is already finalized. */
     });
@@ -813,6 +820,7 @@ function cancelLyricsPrefetch(): void {
 }
 
 function queueTrackLyrics(songs: Child[]): void {
+  if (lyricsPrefetchController.signal.aborted) return;
   const pending = songs.filter((song) => {
     if (pendingLyricIds.has(song.id)) return false;
     pendingLyricIds.add(song.id);
@@ -1627,8 +1635,7 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
     }
     // Prefetch optional lyrics after audio finalization so slow or missing
     // responses cannot delay or fail the completed audio download.
-    const lyricsSongs = new Map(songs.map((song) => [song.id, song]));
-    queueTrackLyrics([...lyricsSongs.values()]);
+    queueTrackLyrics(songs);
     logDownloadEvent('item.done', { itemId: queueItem.itemId, songs: songs.length });
   } else {
     logDownloadEvent('item.partial', { itemId: queueItem.itemId, done: uniqueSongIds.size, songs: songs.length });
@@ -1651,6 +1658,7 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
  * in the caller.
  */
 async function downloadSong(track: Child): Promise<CachedSongMeta | null> {
+  const session = cacheSession;
   const existing = musicCacheStore.getState().cachedSongs[track.id];
   if (existing) return existing;
   // The same song queued by two items (an album and a playlist) transfers once.
@@ -1661,8 +1669,8 @@ async function downloadSong(track: Child): Promise<CachedSongMeta | null> {
     try {
       // While this waited for a slot the queue may have been paused, or every
       // item wanting the song cancelled or cleared.
-      if (pausedUntilForeground || readQueuedSongStatus(track.id) === null) return null;
-      return await transferSong(track);
+      if (session !== cacheSession || pausedUntilForeground || readQueuedSongStatus(track.id) === null) return null;
+      return await transferSong(track, session);
     } finally {
       releaseTransferSlot();
     }
@@ -1675,8 +1683,9 @@ async function downloadSong(track: Child): Promise<CachedSongMeta | null> {
   }
 }
 
-async function transferSong(track: Child): Promise<CachedSongMeta | null> {
+async function transferSong(track: Child, session: number): Promise<CachedSongMeta | null> {
   await ensureCoverArtAuth();
+  if (session !== cacheSession) return null;
 
   const url = getDownloadStreamUrl(track.id);
   if (!url) return null;
@@ -1698,11 +1707,21 @@ async function transferSong(track: Child): Promise<CachedSongMeta | null> {
       return null;
     }
 
+    if (session !== cacheSession) {
+      await deleteFileAsync(tmpDest.uri).catch(() => { /* Old account transfer cleanup is best-effort. */ });
+      clearDownload(track.id);
+      return null;
+    }
     const dest = new File(albumDir, fileName);
     if (dest.exists) {
       try { dest.delete(); } catch { /* best-effort */ }
     }
     await tmpDest.move(dest);
+    if (session !== cacheSession) {
+      await deleteFileAsync(dest.uri).catch(() => { /* Old account transfer cleanup is best-effort. */ });
+      clearDownload(track.id);
+      return null;
+    }
 
     const bytes = dest.exists ? dest.size ?? 0 : 0;
     logDownloadEvent('song.done', { songId: track.id, bytes });

@@ -1254,7 +1254,7 @@ describe('enqueueSongDownload', () => {
     await enqueueSongDownload(makeChild('lyric-cached', { artist: 'A', title: 'T' }));
     await waitForQueueIdle();
 
-    expect(mockFetchLyrics).toHaveBeenCalledWith('lyric-cached', 'A', 'T', expect.any(AbortSignal));
+    expect(mockFetchLyrics).toHaveBeenCalledWith('lyric-cached', 'A', 'T', expect.any(AbortSignal), true);
     expect(mockDownloadAudioFileAsync).not.toHaveBeenCalled();
     expect(musicCacheStore.getState().downloadQueue).toHaveLength(0);
   });
@@ -1265,7 +1265,7 @@ describe('enqueueSongDownload', () => {
     await enqueueSongDownload(makeChild('lyric-pooled', { artist: 'A', title: 'T' }));
     await waitForQueueIdle();
 
-    expect(mockFetchLyrics).toHaveBeenCalledWith('lyric-pooled', 'A', 'T', expect.any(AbortSignal));
+    expect(mockFetchLyrics).toHaveBeenCalledWith('lyric-pooled', 'A', 'T', expect.any(AbortSignal), true);
     expect(mockDownloadAudioFileAsync).not.toHaveBeenCalled();
     expect(musicCacheStore.getState().cachedItems['song:lyric-pooled']).toBeDefined();
   });
@@ -1326,6 +1326,7 @@ describe('enqueueSongDownload', () => {
       await waitForQueueIdle();
       await enqueueSongDownload(makeChild('lyric-queued'));
       teardownMusicCache();
+      initMusicCache();
       await enqueueSongDownload(makeChild('lyric-new'));
       await waitForQueueIdle();
       expect(mockFetchLyrics.mock.calls.map(([id]) => id)).toEqual(['lyric-old', 'lyric-new']);
@@ -2440,7 +2441,7 @@ describe('download pipeline', () => {
     await waitForQueueIdle();
 
     expect(mockFetchLyrics).toHaveBeenCalledTimes(1);
-    expect(mockFetchLyrics).toHaveBeenCalledWith('lyric-t1', 'A', 'T', expect.any(AbortSignal));
+    expect(mockFetchLyrics).toHaveBeenCalledWith('lyric-t1', 'A', 'T', expect.any(AbortSignal), true);
     expect(audioFinalizedBeforeLyrics).toBe(true);
   });
 
@@ -2484,6 +2485,24 @@ describe('download pipeline', () => {
       finishLyrics?.();
       await waitForQueueIdle();
     }
+  });
+
+  it('does not finalize audio or start lyrics when an old transfer finishes after teardown', async () => {
+    mockFileExists = true;
+    let finish: ((result: { status: number }) => void) | undefined;
+    mockDownloadAudioFileAsync.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    mockFetchAlbum.mockResolvedValue({
+      id: 'logout-a', name: 'A', song: [makeChild('logout-song', { albumId: 'logout-a' })],
+    });
+    await enqueueAlbumDownload('logout-a');
+    await new Promise((resolve) => setImmediate(resolve));
+    teardownMusicCache();
+    finish?.({ status: 200 });
+    await waitForQueueIdle(20);
+    expect(mockFetchLyrics).not.toHaveBeenCalled();
+    expect(musicCacheStore.getState().cachedItems['logout-a']).toBeUndefined();
+    expect(musicCacheStore.getState().cachedSongs['logout-song']).toBeUndefined();
+    musicCacheStore.setState({ downloadQueue: [] });
   });
 
   it('does not prefetch lyrics for an incomplete audio item', async () => {
