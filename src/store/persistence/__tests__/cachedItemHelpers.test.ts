@@ -82,12 +82,20 @@ describe('computeQueueItemProgress', () => {
     expect(computeQueueItemProgress(queue, cachedItems)).toEqual({ completed: 8, total: 10 });
   });
 
-  it('reports playlist top-up progress as existing + delta / expectedSongCount', () => {
+  it('does not count stale album IDs as completed replacement tracks', () => {
+    const cachedItems = {
+      a1: makeItem({ itemId: 'a1', songIds: ['old-1', 'old-2'], expectedSongCount: 2 }),
+    };
+    const queue = makeQueue({ itemId: 'a1', completedSongs: 0, totalSongs: 2 });
+    expect(computeQueueItemProgress(queue, cachedItems)).toEqual({ completed: 0, total: 2 });
+  });
+
+  it('reports full playlist payload progress without counting existing songs twice', () => {
     const cachedItems = {
       p1: makeItem({ itemId: 'p1', type: 'playlist', songIds: ['s1', 's2', 's3', 's4', 's5'], expectedSongCount: 10 }),
     };
-    const queue = makeQueue({ itemId: 'p1', type: 'playlist', completedSongs: 3, totalSongs: 5 });
-    expect(computeQueueItemProgress(queue, cachedItems)).toEqual({ completed: 8, total: 10 });
+    const queue = makeQueue({ itemId: 'p1', type: 'playlist', completedSongs: 3, totalSongs: 10 });
+    expect(computeQueueItemProgress(queue, cachedItems)).toEqual({ completed: 3, total: 10 });
   });
 
   it('reports 5/10 at start of top-up when completedSongs is 0', () => {

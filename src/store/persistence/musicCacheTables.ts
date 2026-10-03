@@ -997,7 +997,8 @@ const NO_REAL_HOLDER_SQL = `NOT EXISTS (SELECT 1 FROM cached_item_songs e2
         AND NOT EXISTS (SELECT 1 FROM download_queue_songs q2 WHERE q2.song_id = ?)`;
 
 /**
- * The orphan itself, as five self-guarded statements. Every decision is in the
+ * The orphan itself, as five self-guarded statements, or only the final song delete
+ * when derived holders must survive. Every decision is in the
  * SQL: nothing here reads a value and then branches on it in JS, which is what
  * makes the whole thing safe to ship as one indivisible batch.
  *
@@ -1007,7 +1008,14 @@ const NO_REAL_HOLDER_SQL = `NOT EXISTS (SELECT 1 FROM cached_item_songs e2
  * them: running the halves back to back would flip a survivor's tail back onto
  * the slot the doomed edge still occupies.
  */
-const orphanSongCommands = (songId: string): BatchCommand[] => {
+const orphanSongCommands = (songId: string, preserveDerived = false): BatchCommand[] => {
+  const deleteUnheldSong: BatchCommand = [
+    `DELETE FROM cached_songs WHERE song_id = ?
+     AND NOT EXISTS (SELECT 1 FROM cached_item_songs WHERE cached_item_songs.song_id = ?)
+     AND NOT EXISTS (SELECT 1 FROM download_queue_songs WHERE download_queue_songs.song_id = ?);`,
+    [songId, songId, songId],
+  ];
+  if (preserveDerived) return [deleteUnheldSong];
   // Every edge ABOVE this song's slot, in its owning item. Unscoped by item —
   // one call repacks every holder at once — so the restore half stays unscoped
   // too. `cached_item_songs` unaliased inside the subquery is the UPDATE target.
@@ -1042,17 +1050,13 @@ const orphanSongCommands = (songId: string): BatchCommand[] => {
     // 4. Bring the shifted tails back up.
     tailShift.restore,
     // 5. The song row, iff no edge anywhere and no queued download still points at it.
-    [
-      `DELETE FROM cached_songs WHERE song_id = ?
-       AND NOT EXISTS (SELECT 1 FROM cached_item_songs WHERE cached_item_songs.song_id = ?)
-       AND NOT EXISTS (SELECT 1 FROM download_queue_songs WHERE download_queue_songs.song_id = ?);`,
-      [songId, songId, songId],
-    ],
+    deleteUnheldSong,
   ];
 };
 
 /**
- * "Orphan this song iff no REAL holder remains" — one advisory pre-read, ONE
+ * Orphan a song without a real holder, or without ANY holder when preserveDerived
+ * is true. One advisory pre-read, ONE
  * atomic batch that makes no decision in JS, then post-reads for what actually
  * happened. Ships as `runAtomicBatchAsync` (one indivisible pool task) rather
  * than a transaction held across a JS yield.
@@ -1067,6 +1071,7 @@ const orphanSongCommands = (songId: string): BatchCommand[] => {
  */
 export async function orphanSongIfUnreferencedAsync(
   songId: string,
+  preserveDerived = false,
 ): Promise<{ orphaned: boolean; affectedItems: string[]; prunedItems: string[] }> {
   const db = getDb();
   const affectedItems: string[] = [];
@@ -1084,7 +1089,7 @@ export async function orphanSongIfUnreferencedAsync(
         WHERE e.song_id = ?;`,
       [songId],
     );
-    if (holders.some((h) => h.derived === 0)) return { orphaned: false, affectedItems, prunedItems };
+    if (holders.some((h) => h.derived === 0) || (preserveDerived && holders.length > 0)) return { orphaned: false, affectedItems, prunedItems };
     const queued = await db.getFirstAsync<{ c: number }>(
       'SELECT COUNT(*) AS c FROM download_queue_songs WHERE song_id = ?;',
       [songId],
@@ -1092,7 +1097,7 @@ export async function orphanSongIfUnreferencedAsync(
     if ((queued?.c ?? 0) > 0) return { orphaned: false, affectedItems, prunedItems };
     affectedItems.push(...new Set(holders.map((h) => h.item_id)));
 
-    await db.runAtomicBatchAsync(orphanSongCommands(songId));
+    await db.runAtomicBatchAsync(orphanSongCommands(songId, preserveDerived));
 
     const remaining = await db.getFirstAsync<{ c: number }>(
       'SELECT COUNT(*) AS c FROM cached_songs WHERE song_id = ?;',
@@ -1377,9 +1382,9 @@ export async function insertCachedItemSong(itemId: string, position: number, son
  * Remove an edge at a specific position and shift higher positions down by 1
  * so positions remain contiguous within the item.
  */
-export async function removeCachedItemSong(itemId: string, position: number): Promise<void> {
+export async function removeCachedItemSong(itemId: string, position: number): Promise<boolean> {
   const db = getDb();
-  if (db === null) return;
+  if (db === null) return false;
   const tailShift = positionShiftCommands({
     table: 'cached_item_songs',
     column: 'position',
@@ -1395,8 +1400,114 @@ export async function removeCachedItemSong(itemId: string, position: number): Pr
       tailShift.shift,
       tailShift.restore,
     ]);
+    return true;
   } catch {
-    /* dropped */
+    return false;
+  }
+}
+
+/**
+ * Remove one exact edge and orphan its song if that removal leaves no REAL
+ * holder. The edge delete, position repack, derived-holder cleanup, and song-row
+ * delete are one atomic batch, so callers never need to recover a half-finished
+ * orphan cleanup.
+ */
+export async function removeCachedItemSongAndOrphanAsync(
+  itemId: string,
+  songId: string,
+): Promise<{ persisted: boolean; orphaned: boolean }> {
+  const db = getDb();
+  if (db === null) return { persisted: false, orphaned: false };
+
+  // Resolve the position inside the batch: another removal can shift this song
+  // while the caller is awaiting persistence. Replaying an absent ID is a no-op.
+  const tailShift = positionShiftCommands({
+    table: 'cached_item_songs',
+    column: 'position',
+    newPosition: 'position - 1',
+    where: `item_id = ? AND position > (
+              SELECT position FROM cached_item_songs
+               WHERE item_id = ? AND song_id = ?
+            )`,
+    params: [itemId, itemId, songId],
+    restoreWhere: 'item_id = ?',
+    restoreParams: [itemId],
+  });
+
+  try {
+    await db.runAtomicBatchAsync([
+      tailShift.shift,
+      [
+        'DELETE FROM cached_item_songs WHERE item_id = ? AND song_id = ?;',
+        [itemId, songId],
+      ],
+      tailShift.restore,
+      ...orphanSongCommands(songId),
+    ]);
+
+    const remaining = await db.getFirstAsync<{ c: number }>(
+      'SELECT COUNT(*) AS c FROM cached_songs WHERE song_id = ?;',
+      [songId],
+    );
+    return { persisted: true, orphaned: (remaining?.c ?? 1) === 0 };
+  } catch {
+    // A failed post-read is also reported as not persisted. Retrying is safe:
+    // every command above targets the same song ID, never a shifted successor.
+    return { persisted: false, orphaned: false };
+  }
+}
+
+/**
+ * Atomically turn a downloaded album into a derived partial grouping and orphan
+ * the songs that were held only by that album. Surviving songs are untouched.
+ *
+ * Replaying after an uncertain post-read is safe: setting `derived = 1` and the
+ * orphan command set are idempotent.
+ */
+export async function demoteCachedAlbumToPartialAsync(
+  itemId: string,
+  candidateOrphanSongIds: readonly string[],
+): Promise<{ persisted: boolean; orphanedSongIds: string[] }> {
+  const db = getDb();
+  if (db === null) return { persisted: false, orphanedSongIds: [] };
+
+  try {
+    const commands: BatchCommand[] = [
+      ['UPDATE cached_items SET derived = 1 WHERE item_id = ?;', [itemId]],
+    ];
+    for (const songId of candidateOrphanSongIds) {
+      commands.push(...orphanSongCommands(songId));
+    }
+    await db.runAtomicBatchAsync(commands);
+
+    if (candidateOrphanSongIds.length === 0) {
+      return { persisted: true, orphanedSongIds: [] };
+    }
+    const remaining = await db.getAllAsync<{ song_id: string }>(
+      'SELECT song_id FROM cached_songs WHERE song_id IN (SELECT value FROM json_each(?));',
+      [JSON.stringify(candidateOrphanSongIds)],
+    );
+    const alive = new Set(remaining.map((row) => row.song_id));
+    return {
+      persisted: true,
+      orphanedSongIds: candidateOrphanSongIds.filter((songId) => !alive.has(songId)),
+    };
+  } catch {
+    return { persisted: false, orphanedSongIds: [] };
+  }
+}
+
+/** Read the authoritative edge order after an awaited membership mutation. */
+export async function readCachedItemSongIdsAsync(itemId: string): Promise<string[] | null> {
+  const db = getDb();
+  if (!db) return null;
+  try {
+    const rows = await db.getAllAsync<{ song_id: string }>(
+      'SELECT song_id FROM cached_item_songs WHERE item_id = ? ORDER BY position;', [itemId],
+    );
+    return rows.map((row) => row.song_id);
+  } catch {
+    return null;
   }
 }
 
@@ -1413,10 +1524,10 @@ export async function reorderCachedItemSongs(
   itemId: string,
   fromPosition: number,
   toPosition: number,
-): Promise<void> {
+): Promise<boolean> {
   const db = getDb();
-  if (db === null) return;
-  if (fromPosition === toPosition) return;
+  if (db === null) return false;
+  if (fromPosition === toPosition) return true;
   const step = fromPosition < toPosition ? -1 : 1;
   const move = positionShiftCommands({
     table: 'cached_item_songs',
@@ -1436,8 +1547,9 @@ export async function reorderCachedItemSongs(
   });
   try {
     await db.runAtomicBatchAsync([move.shift, move.restore]);
+    return true;
   } catch {
-    /* dropped */
+    return false;
   }
 }
 
@@ -1851,13 +1963,18 @@ export async function insertDownloadQueueItem(
  * and because the queue drains from the front, that is O(N²) writes across a
  * full-library download, at a library ceiling of ~200k albums.
  */
-export async function removeDownloadQueueItem(queueId: string): Promise<void> {
+export async function removeDownloadQueueItem(queueId: string): Promise<boolean> {
   const db = getDb();
-  if (db === null) return;
+  if (db === null) return false;
   try {
-    await db.runAsync('DELETE FROM download_queue WHERE queue_id = ?;', [queueId]);
+    // Use the atomic-batch queue so this delete stays ordered behind any
+    // preceding edge-reorder batches from a replacement repair.
+    await db.runAtomicBatchAsync([
+      ['DELETE FROM download_queue WHERE queue_id = ?;', [queueId]],
+    ]);
+    return true;
   } catch {
-    /* dropped */
+    return false;
   }
 }
 
@@ -1966,30 +2083,30 @@ const APPEND_CACHED_ITEM_SONG_SQL = `INSERT OR IGNORE INTO cached_item_songs (it
    VALUES (?, (SELECT COALESCE(MAX(position), 0) + 1 FROM cached_item_songs WHERE item_id = ?), ?);`;
 
 /**
- * Atomically finalise a download: delete the queue row, upsert the item, upsert
- * all songs, and append every edge — ONE `runAtomicBatchAsync`, so consumers
- * never observe a half-committed state and nothing can interleave mid-write.
+ * Atomically write a completed download: upsert the item, all songs, and every
+ * edge in ONE `runAtomicBatchAsync`, so consumers never observe a half-committed
+ * item and nothing can interleave mid-write.
+ *
+ * The normal path deletes the queue row in this same batch. A re-key repair sets
+ * `keepQueue` so crash recovery retains the full fresh payload until stale-edge
+ * cleanup and reordering finish; its caller removes the queue row afterward.
  *
  * The queue DELETE cascades `download_queue_songs` and its five array tables, so the
  * payload goes with the item it belonged to. A row left in `error` status is NOT
  * deleted (the user may still retry it), and keeps its songs for the same reason.
  *
- * The vacated `queue_position` stays vacant, deliberately — see
- * `removeDownloadQueueItem`. This is the path that makes renumbering untenable:
- * the queue drains from the front, so a shift here would rewrite every remaining
- * row once per completed album.
+ * The vacated `queue_position` stays vacant, deliberately. See
+ * `removeDownloadQueueItem`. The queue drains from the front, so shifting every
+ * survivor here would turn a full-library download into O(N²) queue rewrites.
  *
  * Statement order is load-bearing: `cached_items` and `cached_songs` are the FK
  * parents of `cached_item_songs`, so both must land before any edge.
  *
- * `songs` is a MIX of `Child`-derived rows and rows rebuilt from memory, and
- * nothing on the row distinguishes them — so `childBySongId` is the explicit
- * channel for the real `Child`s, and only ids present in it get their
- * `cached_song_*` mirrors rewritten.
+ * `songs` is a mix of `Child`-derived rows and rows rebuilt from memory. Only ids
+ * present in `childBySongId` get their `cached_song_*` mirrors rewritten.
  *
- * `replaceEdges` drops the item's existing edges first — used when a real
- * download completes a derived partial-album row, so the final edges are the
- * album's track order rather than the order songs happened to finish.
+ * `replaceEdges` replaces a derived partial-album row's finish-order edges with
+ * the completed album's track order.
  */
 export async function markDownloadComplete(
   queueId: string,
@@ -1997,34 +2114,35 @@ export async function markDownloadComplete(
   songs: CachedSongRow[],
   edges: Array<{ songId: string; position: number }>,
   childBySongId?: Map<string, Child>,
-  replaceEdges = false,
-): Promise<void> {
+  options?: { keepQueue?: boolean; replaceEdges?: boolean },
+): Promise<boolean> {
   const db = getDb();
-  if (db === null) return;
+  if (db === null) return false;
   try {
-    const commands: BatchCommand[] = [
-      ['DELETE FROM download_queue WHERE queue_id = ?;', [queueId]],
-      ...(replaceEdges
-        ? [['DELETE FROM cached_item_songs WHERE item_id = ?;', [item.itemId]] as BatchCommand]
-        : []),
-      ...cachedItemCommands(item),
-    ];
+    const commands: BatchCommand[] = [];
+    if (!options?.keepQueue) {
+      commands.push(['DELETE FROM download_queue WHERE queue_id = ?;', [queueId]]);
+    }
+    if (options?.replaceEdges) {
+      commands.push(['DELETE FROM cached_item_songs WHERE item_id = ?;', [item.itemId]]);
+    }
+    commands.push(...cachedItemCommands(item));
     for (const song of songs) {
       if (!song.id || !song.albumId) continue;
       commands.push(...cachedSongCommands(song, childBySongId?.get(song.id)));
     }
     // Edges append after whatever the item already holds, so a top-up merging
-    // into an existing row doesn't collide with its 1..K edges (the caller's
-    // positions are 1-based within the queue item's payload, not the cached
-    // row). Sorting fixes the statement order, which fixes the resulting order.
+    // into an existing row doesn't collide with its 1..K edges. Sorting fixes
+    // statement order, which fixes the resulting edge order.
     const sortedEdges = [...edges].sort((a, b) => a.position - b.position);
     for (const edge of sortedEdges) {
       if (!edge.songId) continue;
       commands.push([APPEND_CACHED_ITEM_SONG_SQL, [item.itemId, item.itemId, edge.songId]]);
     }
     await db.runAtomicBatchAsync(commands);
+    return true;
   } catch {
-    /* dropped */
+    return false;
   }
 }
 

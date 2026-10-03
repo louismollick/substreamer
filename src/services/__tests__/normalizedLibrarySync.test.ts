@@ -2,9 +2,12 @@ import type { AlbumID3, Child } from 'subsonic-api';
 
 import { countAlbums, upsertAlbums } from '../../db/repository/albums';
 import { countSongs } from '../../db/repository/songs';
-import { getDb } from '../../store/persistence/db';
+import { getDb, __setDbForTests } from '../../store/persistence/db';
+import { musicCacheStore } from '../../store/musicCacheStore';
+import { offlineModeStore } from '../../store/offlineModeStore';
+import { clearAllMusicCacheRows, upsertCachedItem } from '../../store/persistence/musicCacheTables';
 import { syncStatusStore } from '../../store/syncStatusStore';
-import { runNormalizedLibrarySync, __setPageSizesForTest } from '../normalizedLibrarySync';
+import { runNormalizedLibrarySync, __setPageSizesForTest, refreshArtistLibrary, refreshPlaylistLibrary, syncArtistsNormalized, syncPlaylistsNormalized } from '../normalizedLibrarySync';
 
 // Fixed server pages: 5 albums, 10 songs across those 5 albums (2 each). Prefixed
 // `mock*` so jest permits referencing them inside the hoisted mock factory.
@@ -28,6 +31,8 @@ const mockFetchPlaylistDetail = jest.fn((id: string) =>
   Promise.resolve({ id, entry: [] } as unknown),
 );
 const mockSyncCachedItemTracks = jest.fn();
+const mockGetAllArtists = jest.fn(async () => [] as { id: string; name: string; userRating?: number }[]);
+const mockGetAllPlaylists = jest.fn(async () => mockPlaylists);
 /** The song pager and the per-album fetch are jest.fn()s so a test can inject a
  *  transient empty page, a hole in the library, or assert exactly which albums the gap
  *  repair asked the server about. */
@@ -62,8 +67,8 @@ jest.mock('../subsonicService', () => ({
   // consult this to tell that apart from "no usable API, so everything resolves []".
   getApi: () => mockApi,
   ensureCoverArtAuth: () => Promise.resolve(),
-  getAllArtists: () => Promise.resolve([]),
-  getAllPlaylists: () => Promise.resolve(mockPlaylists),
+  getAllArtists: () => mockGetAllArtists(),
+  getAllPlaylists: () => mockGetAllPlaylists(),
 }));
 jest.mock('../detailFetchService', () => ({
   fetchPlaylistDetail: (id: string) => mockFetchPlaylistDetail(id),
@@ -71,9 +76,10 @@ jest.mock('../detailFetchService', () => ({
 jest.mock('../musicCacheService', () => ({
   syncCachedItemTracks: (...a: unknown[]) => mockSyncCachedItemTracks(...a),
 }));
-jest.mock('../../store/offlineModeStore', () => ({
-  offlineModeStore: { getState: () => ({ offlineMode: false }), subscribe: () => () => {} },
-}));
+jest.mock('../../store/offlineModeStore', () => {
+  const { create } = require('zustand');
+  return { offlineModeStore: create(() => ({ offlineMode: false })) };
+});
 
 const db = () => getDb()!;
 
@@ -86,7 +92,12 @@ const flush = async () => {
 
 afterEach(flush);
 
-beforeEach(() => {
+beforeEach(async () => {
+  offlineModeStore.setState({ offlineMode: false });
+  musicCacheStore.setState({ cachedItems: {}, cachedSongs: {}, downloadQueue: [] });
+  await clearAllMusicCacheRows();
+  mockGetAllArtists.mockReset().mockResolvedValue([]);
+  mockGetAllPlaylists.mockReset().mockImplementation(async () => mockPlaylists);
   // Page sizes matched to the fixtures (5 albums, 10 songs) so the default flow is a
   // FULL page followed by an empty one — the exact-multiple case, which is what
   // exercises empty-page termination and the corroborator. Tests that need a
@@ -1043,3 +1054,118 @@ describe('escaping a pinned slow path', () => {
   });
 });
 
+
+describe('normalized list refresh and download reconciliation', () => {
+  it.each(['artists', 'playlists'] as const)('refreshes %s and clears loading after success or failure', async (kind) => {
+    const refresh = kind === 'artists' ? refreshArtistLibrary : refreshPlaylistLibrary;
+    const loading = kind === 'artists' ? 'artistLibraryLoading' : 'playlistLibraryLoading';
+    const fetched = kind === 'artists' ? 'artistLibraryLastFetchedAt' : 'playlistLibraryLastFetchedAt';
+    if (kind === 'artists') mockGetAllArtists.mockResolvedValue([{ id: 'artist-rated', name: 'Artist', userRating: 4 }, { id: 'artist-unrated', name: 'Other' }]);
+    else mockPlaylists = [{ id: 'p1', name: 'Mix', songCount: 0 }];
+    await refresh();
+    await flush();
+    expect(syncStatusStore.getState()[loading]).toBe(false);
+    expect(syncStatusStore.getState()[fetched]).toBeGreaterThan(0);
+    const fetch = kind === 'artists' ? mockGetAllArtists : mockGetAllPlaylists;
+    fetch.mockRejectedValueOnce(new Error('connection lost'));
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await refresh();
+      expect(warn).toHaveBeenCalledWith(`[normalized-sync] ${kind === 'artists' ? 'artist' : 'playlist'} refresh failed`, expect.any(Error));
+      expect(syncStatusStore.getState()[loading]).toBe(false);
+    } finally { warn.mockRestore(); }
+  });
+
+  it.each(['artists', 'playlists'] as const)('skips %s refresh while loading or without the database', async (kind) => {
+    const refresh = kind === 'artists' ? refreshArtistLibrary : refreshPlaylistLibrary;
+    const fetch = kind === 'artists' ? mockGetAllArtists : mockGetAllPlaylists;
+    syncStatusStore.getState().setListRefresh(kind, true);
+    await refresh();
+    expect(fetch).not.toHaveBeenCalled();
+    syncStatusStore.getState().setListRefresh(kind, false);
+    const handle = db();
+    __setDbForTests(null);
+    try { await refresh(); expect(fetch).not.toHaveBeenCalled(); }
+    finally { __setDbForTests(handle); }
+  });
+
+  it('does not prune artist or playlist lists when there is no API', async () => {
+    db().runSync("INSERT INTO artists(id, name) VALUES ('keep-artist', 'Keep')");
+    db().runSync("INSERT INTO playlists(id, name) VALUES ('keep-playlist', 'Keep')");
+    mockApi = null;
+    await syncArtistsNormalized(db(), undefined);
+    await syncPlaylistsNormalized(db(), undefined);
+    expect(db().getFirstSync('SELECT id FROM artists WHERE id = ?', ['keep-artist'])).toBeTruthy();
+    expect(db().getFirstSync('SELECT id FROM playlists WHERE id = ?', ['keep-playlist'])).toBeTruthy();
+    expect(mockFetchPlaylistDetail).not.toHaveBeenCalled();
+  });
+
+  it.each(['cached', 'queued'] as const)('reconciles %s playlist membership after a changed server detail', async (kind) => {
+    const songs = [mockSongsData[0], mockSongsData[1]];
+    mockPlaylists = [{ id: 'p1', name: 'Mix', songCount: 2 }];
+    mockFetchPlaylistDetail.mockResolvedValue({ id: 'p1', entry: songs });
+    if (kind === 'cached') await upsertCachedItem({ itemId: 'p1', type: 'playlist', name: 'Mix', expectedSongCount: 1, lastSyncAt: 1, downloadedAt: 1 });
+    else musicCacheStore.getState().enqueue({ itemId: 'p1', type: 'playlist', name: 'Mix', totalSongs: 1 }, [songs[0]]);
+    await refreshPlaylistLibrary();
+    await flush();
+    expect(mockSyncCachedItemTracks).toHaveBeenCalledWith('p1', songs);
+  });
+
+  it('keeps downloaded playlists within the refresh cap and supplies empty membership when omitted', async () => {
+    await upsertCachedItem({ itemId: 'downloaded', type: 'playlist', name: 'Old', expectedSongCount: 1, lastSyncAt: 1, downloadedAt: 1 });
+    mockPlaylists = [{ id: 'downloaded', name: 'Old' }, ...Array.from({ length: 52 }, (_, i) => ({ id: `recent-${i}`, name: `Recent ${i}`, changed: new Date(1_700_000_000_000 + i) }))];
+    mockFetchPlaylistDetail.mockImplementation(async (id) => ({ id }));
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await refreshPlaylistLibrary();
+      await flush();
+      expect(mockFetchPlaylistDetail).toHaveBeenCalledTimes(51);
+      expect(mockSyncCachedItemTracks).toHaveBeenCalledWith('downloaded', []);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('playlist detail refresh capped: 51/53'));
+      expect(db().getFirstSync<{ detail_song_count: number }>('SELECT detail_song_count FROM playlists WHERE id = ?', ['downloaded'])?.detail_song_count).toBe(0);
+    } finally { warn.mockRestore(); }
+  });
+
+  it('does not stamp failed detail fetches and joins an in-flight reconcile', async () => {
+    mockPlaylists = [{ id: 'p1', name: 'Mix', songCount: 1 }];
+    let release!: () => void;
+    mockFetchPlaylistDetail.mockImplementation(() => new Promise((resolve) => { release = () => resolve(null); }));
+    await refreshPlaylistLibrary();
+    await flush();
+    await refreshPlaylistLibrary();
+    await flush();
+    expect(mockFetchPlaylistDetail).toHaveBeenCalledTimes(1);
+    release();
+    await flush();
+    expect(db().getFirstSync<{ detail_song_count: number | null }>('SELECT detail_song_count FROM playlists WHERE id = ?', ['p1'])?.detail_song_count).toBeNull();
+  });
+
+  it('aborts remaining playlist refreshes when the user goes offline or cancels sync', async () => {
+    mockPlaylists = Array.from({ length: 5 }, (_, i) => ({ id: `p${i}`, name: `Mix ${i}`, songCount: 1 }));
+    mockFetchPlaylistDetail.mockImplementation(async (id) => {
+      offlineModeStore.setState({ offlineMode: true });
+      syncStatusStore.setState((state) => ({ generation: state.generation + 1 }));
+      mockApi = null;
+      return { id, entry: [] };
+    });
+    await refreshPlaylistLibrary();
+    await flush();
+    expect(mockFetchPlaylistDetail.mock.calls.length).toBeLessThan(5);
+    expect(mockSyncCachedItemTracks).not.toHaveBeenCalled();
+  });
+
+  it('skips a full library run offline or without a database, and joins concurrent callers', async () => {
+    offlineModeStore.setState({ offlineMode: true });
+    await runNormalizedLibrarySync();
+    expect(mockSearchAlbumsPage).not.toHaveBeenCalled();
+    offlineModeStore.setState({ offlineMode: false });
+    const handle = db();
+    __setDbForTests(null);
+    try { await runNormalizedLibrarySync(); expect(mockSearchAlbumsPage).not.toHaveBeenCalled(); }
+    finally { __setDbForTests(handle); }
+    const run = runNormalizedLibrarySync({ full: true });
+    expect(runNormalizedLibrarySync()).toBe(run);
+    expect(runNormalizedLibrarySync({ full: true })).toBe(run);
+    await run;
+  });
+});

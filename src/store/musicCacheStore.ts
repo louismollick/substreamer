@@ -23,6 +23,7 @@ import {
   childGenreNames,
   clearAllMusicCacheRows,
   convertLegacyMetadataAsync,
+  demoteCachedAlbumToPartialAsync as demoteCachedAlbumToPartialRow,
   orphanSongIfUnreferencedAsync,
   deleteCachedItem as deleteCachedItemRow,
   deleteCachedSong as deleteCachedSongRow,
@@ -31,7 +32,8 @@ import {
   hydrateDownloadQueueAsync,
   insertDownloadQueueItem,
   markDownloadComplete,
-  removeCachedItemSong as removeCachedItemSongRow,
+  readCachedItemSongIdsAsync,
+  removeCachedItemSongAndOrphanAsync as removeCachedItemSongAndOrphanRow,
   removeDownloadQueueItem,
   reorderCachedItemSongs as reorderCachedItemSongsRow,
   reorderDownloadQueue,
@@ -159,15 +161,17 @@ export interface MusicCacheState {
    * `enqueueAlbumDownload` writes the real total to `expectedSongCount` first.
    */
   enqueueTopUp: (draft: DownloadQueueDraft, songs: readonly Child[]) => void;
-  removeFromQueue: (queueId: string) => void;
+  /** Remove a queue row from disk first, then from the in-memory mirror. */
+  removeFromQueue: (queueId: string) => Promise<boolean>;
   reorderQueue: (fromIndex: number, toIndex: number) => void;
   updateQueueItem: (
     queueId: string,
     update: Partial<Pick<DownloadQueueItem, 'status' | 'completedSongs' | 'error'>>,
   ) => void;
   /**
-   * Finalise a download: remove the queue row, upsert the item + songs, and
-   * insert the edges -- atomic in SQL, then mirrored in memory.
+   * Write a completed download to SQL, then mirror it in memory. The normal path
+   * removes the queue row. `keepQueue` leaves it recoverable while a re-key repair
+   * removes stale edges and restores order.
    *
    * `childBySongId` carries the real server `Child` for the songs that have one;
    * only those get their `cached_song_*` mirrors rewritten.
@@ -178,7 +182,8 @@ export interface MusicCacheState {
     songs: CachedSongMeta[],
     edges: Array<{ songId: string; position: number }>,
     childBySongId?: Map<string, Child>,
-  ) => void;
+    options?: { keepQueue?: boolean },
+  ) => Promise<boolean>;
 
   /* Cached item / song actions */
   upsertCachedItem: (
@@ -191,6 +196,8 @@ export interface MusicCacheState {
    * store itself has already removed the orphan songs from `cachedSongs`.
    */
   removeCachedItem: (itemId: string) => Promise<string[]>;
+  /** Orphan candidates atomically, then reconcile their rows, holders and counters. */
+  orphanCachedSongs: (songIds: readonly string[], preserveDerived?: boolean) => Promise<string[]>;
   /**
    * Remove a single song at `position` from an item. Returns the song id if
    * that song became orphan (so service can delete its file); `null` if the
@@ -199,12 +206,24 @@ export interface MusicCacheState {
   removeCachedItemSong: (
     itemId: string,
     position: number,
-  ) => Promise<{ orphanedSongId: string | null }>;
+  ) => Promise<{ orphanedSongId: string | null; persisted: boolean }>;
+  /**
+   * Atomically turn an album into a derived partial grouping and orphan the
+   * supplied songs when they have no other REAL holder.
+   */
+  demoteCachedAlbum: (
+    itemId: string,
+    candidateOrphanSongIds: readonly string[],
+  ) => Promise<{ persisted: boolean; orphanedSongIds: string[] }>;
+  /**
+   * Reorder one cached item edge. Memory changes only after the SQL batch lands,
+   * so callers doing recovery work can safely keep their queue row on failure.
+   */
   reorderCachedItemSongs: (
     itemId: string,
     fromPosition: number,
     toPosition: number,
-  ) => void;
+  ) => Promise<boolean>;
   /** `child` is the real server `Child` behind this write, when there is one —
    *  the only thing that rewrites the song's `cached_song_*` mirrors. */
   upsertCachedSong: (song: CachedSongMeta, child?: Child) => void;
@@ -430,9 +449,11 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
   // row is expected and must not block the enqueue.
   enqueueTopUp: (draft, songs) => appendToQueue(set, get, draft, songs, false),
 
-  removeFromQueue: (queueId) => {
-    removeDownloadQueueItem(queueId);
+  removeFromQueue: async (queueId) => {
+    const persisted = await removeDownloadQueueItem(queueId);
+    if (!persisted) return false;
     set((state) => ({ downloadQueue: dropFromQueueMirror(state.downloadQueue, queueId) }));
+    return true;
   },
 
   reorderQueue: (fromIndex, toIndex) => {
@@ -467,19 +488,20 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
     }));
   },
 
-  markItemComplete: (queueId, item, songs, edges, childBySongId) => {
+  markItemComplete: async (queueId, item, songs, edges, childBySongId, options) => {
+    const queuedAtStart = get().downloadQueue.some((q) => q.queueId === queueId);
     const current = get().cachedItems[item.itemId];
     // A derived partial-album row being completed by a real download is replaced,
     // not topped up: its edges were written in finish order and its metadata is
     // the partial grouping's.
     const promoting = current?.derived === true && !item.derived;
+    const replaceEdges = promoting || item.type === 'playlist' || item.type === 'favorites';
     const existing = promoting ? undefined : current;
     // For top-ups (existing row):
     //   - preserve `downloadedAt` (user "downloaded" this earlier).
     //   - preserve `expectedSongCount`: the worker derives it from `songs.length`,
     //     which for a top-up is only the missing-song delta. The existing row already
-    //     holds the authoritative album total from `enqueueAlbumDownload`; clobbering
-    //     it misclassifies a later remove-with-survivors as complete.
+    //     holds the authoritative album total from `enqueueAlbumDownload`.
     const itemToPersist: Omit<CachedItemMeta, 'songIds'> = existing
       ? {
           ...preserveItemMetadata(item, existing),
@@ -488,16 +510,17 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
         }
       : item;
 
-    markDownloadComplete(queueId, itemToPersist, songs, edges, childBySongId, promoting);
+    const persisted = markDownloadComplete(
+      queueId, itemToPersist, songs, edges, childBySongId,
+      { ...options, replaceEdges },
+    );
 
-    // New songIds from this run, in caller-supplied position order.
-    const newSongIdsInOrder = [...edges]
+    const newSongIdsInOrder = [...new Set([...edges]
       .sort((a, b) => a.position - b.position)
-      .map((e) => e.songId);
+      .map((e) => e.songId))];
 
-    // Merge: keep existing order, append new songs that aren't already edged.
     let songIds: string[];
-    if (existing) {
+    if (existing && !replaceEdges) {
       const existingSet = new Set(existing.songIds);
       const additions = newSongIdsInOrder.filter((id) => !existingSet.has(id));
       songIds = [...existing.songIds, ...additions];
@@ -505,20 +528,29 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
       songIds = newSongIdsInOrder;
     }
 
-    set((state) => {
-      const nextSongs = { ...state.cachedSongs };
-      for (const s of songs) {
-        nextSongs[s.id] = mergeCachedSong(state.cachedSongs[s.id], s, childBySongId?.get(s.id));
-      }
-      return bumped(state, {
-        downloadQueue: dropFromQueueMirror(state.downloadQueue, queueId),
-        cachedItems: {
-          ...state.cachedItems,
-          [item.itemId]: { ...itemToPersist, songIds },
-        },
-        cachedSongs: nextSongs,
+    const applyMirror = (): void => {
+      set((state) => {
+        const nextSongs = { ...state.cachedSongs };
+        for (const s of songs) {
+          nextSongs[s.id] = mergeCachedSong(state.cachedSongs[s.id], s, childBySongId?.get(s.id));
+        }
+        return bumped(state, {
+          downloadQueue: options?.keepQueue
+            ? state.downloadQueue
+            : dropFromQueueMirror(state.downloadQueue, queueId),
+          cachedItems: {
+            ...state.cachedItems,
+            [item.itemId]: { ...itemToPersist, songIds },
+          },
+          cachedSongs: nextSongs,
+        });
       });
-    });
+    };
+
+    const ok = await persisted;
+    if (!ok || (queuedAtStart && !get().downloadQueue.some((q) => q.queueId === queueId))) return false;
+    applyMirror();
+    return true;
   },
 
   upsertCachedItem: (item, songIds) => {
@@ -554,13 +586,17 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
     // orphan run in ONE transaction inside `orphanSongIfUnreferencedAsync`, so
     // no concurrent insert can add a holder between the count and the delete.
     await deleteCachedItemRow(itemId);
+    return get().orphanCachedSongs(affectedSongIds);
+  },
+
+  orphanCachedSongs: async (songIds, preserveDerived = false) => {
     const orphaned: string[] = [];
     const touchedHolders = new Set<string>();
     const prunedHolders = new Set<string>();
-    for (const songId of affectedSongIds) {
+    for (const songId of new Set(songIds)) {
       // eslint-disable-next-line no-await-in-loop
       const { orphaned: didOrphan, affectedItems, prunedItems } =
-        await orphanSongIfUnreferencedAsync(songId);
+        await orphanSongIfUnreferencedAsync(songId, preserveDerived);
       if (didOrphan) {
         orphaned.push(songId);
         affectedItems.forEach((i) => touchedHolders.add(i));
@@ -583,7 +619,9 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
       // (symmetric with addBytes/addFiles on download; boot recomputes from truth).
       // Without this the card's file count and disk usage stay stale after a delete.
       let freedBytes = 0;
+      let freedFiles = 0;
       for (const songId of orphaned) {
+        if (prev.cachedSongs[songId]) freedFiles++;
         freedBytes += prev.cachedSongs[songId]?.bytes ?? 0;
         delete nextSongs[songId];
       }
@@ -591,7 +629,7 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
         cachedItems: nextItems,
         cachedSongs: nextSongs,
         totalBytes: Math.max(0, prev.totalBytes - freedBytes),
-        totalFiles: Math.max(0, prev.totalFiles - orphaned.length),
+        totalFiles: Math.max(0, prev.totalFiles - freedFiles),
       });
     });
     return orphaned;
@@ -600,82 +638,135 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
   removeCachedItemSong: async (itemId, position) => {
     const state = get();
     const item = state.cachedItems[itemId];
-    if (!item) return { orphanedSongId: null };
+    if (!item) return { orphanedSongId: null, persisted: true };
     // position is 1-indexed in SQL; songIds array is 0-indexed.
     const index = position - 1;
     if (index < 0 || index >= item.songIds.length) {
-      return { orphanedSongId: null };
+      return { orphanedSongId: null, persisted: true };
     }
     const songId = item.songIds[index];
-    // Optimistic: drop the edge from the item's in-memory songIds immediately.
-    set((prev) => {
-      const prevItem = prev.cachedItems[itemId];
-      if (!prevItem) return {}; // no-op — must not bump
-      const nextItems = { ...prev.cachedItems };
-      nextItems[itemId] = {
-        ...prevItem,
-        songIds: prevItem.songIds.filter((_, i) => i !== index),
-      };
-      return bumped(prev, { cachedItems: nextItems });
-    });
-    // Persist: remove the edge row (so a real-ref count of 0 means no OTHER real
-    // holder remains), then atomically orphan the song iff unreferenced.
-    await removeCachedItemSongRow(itemId, position);
-    const { orphaned, affectedItems, prunedItems } =
-      await orphanSongIfUnreferencedAsync(songId);
-    if (!orphaned) return { orphanedSongId: null };
-    const orphanedSongId = songId;
+
+    // Edge removal and orphan cleanup are one SQL batch. If anything fails,
+    // memory stays untouched and a recovery caller can safely replay the same
+    // exact edge.
+    const { persisted, orphaned } = await removeCachedItemSongAndOrphanRow(
+      itemId,
+      songId,
+    );
+    if (!persisted) return { orphanedSongId: null, persisted: false };
+
+    const orphanedSongId = orphaned ? songId : null;
     set((prev) => {
       const nextItems = { ...prev.cachedItems };
-      const prunedSet = new Set(prunedItems);
-      for (const pid of prunedItems) delete nextItems[pid];
-      // Surviving derived holders of the orphaned song lost it too.
-      for (const hid of affectedItems) {
-        if (prunedSet.has(hid) || hid === itemId) continue;
-        const h = nextItems[hid];
-        if (h) nextItems[hid] = { ...h, songIds: h.songIds.filter((s) => s !== orphanedSongId) };
+      const prevItem = nextItems[itemId];
+      if (prevItem) {
+        nextItems[itemId] = {
+          ...prevItem,
+          songIds: prevItem.songIds.filter((id) => id !== songId),
+        };
       }
-      // Decrement disk-usage aggregates for the single orphaned song (see
-      // removeCachedItem).
+
+      if (orphanedSongId) {
+        // The atomic orphan batch also removes the song from every DERIVED holder.
+        // Mirror that from local state rather than relying on advisory pre-reads,
+        // which keeps a replay correct even if a prior post-read failed.
+        for (const [holderId, holder] of Object.entries(nextItems)) {
+          if (holderId === itemId || !holder.songIds.includes(orphanedSongId)) continue;
+          const songIds = holder.songIds.filter((id) => id !== orphanedSongId);
+          if (holder.derived && songIds.length === 0) delete nextItems[holderId];
+          else nextItems[holderId] = { ...holder, songIds };
+        }
+      }
+
+      if (!orphanedSongId) {
+        return bumped(prev, { cachedItems: nextItems });
+      }
+
       const freedBytes = prev.cachedSongs[orphanedSongId]?.bytes ?? 0;
       const { [orphanedSongId]: _gone, ...restSongs } = prev.cachedSongs;
       return bumped(prev, {
         cachedItems: nextItems,
         cachedSongs: restSongs,
         totalBytes: Math.max(0, prev.totalBytes - freedBytes),
-        totalFiles: Math.max(0, prev.totalFiles - 1),
+        totalFiles: Math.max(0, prev.totalFiles - (prev.cachedSongs[orphanedSongId] ? 1 : 0)),
       });
     });
-    return { orphanedSongId };
+    return { orphanedSongId, persisted: true };
   },
 
-  reorderCachedItemSongs: (itemId, fromPosition, toPosition) => {
+  demoteCachedAlbum: async (itemId, candidateOrphanSongIds) => {
+    const result = await demoteCachedAlbumToPartialRow(itemId, candidateOrphanSongIds);
+    if (!result.persisted) return result;
+
+    const orphanSet = new Set(result.orphanedSongIds);
+    set((prev) => {
+      const nextItems = { ...prev.cachedItems };
+      const target = nextItems[itemId];
+      if (target) nextItems[itemId] = { ...target, derived: true };
+
+      if (orphanSet.size > 0) {
+        for (const [holderId, holder] of Object.entries(nextItems)) {
+          const songIds = holder.songIds.filter((songId) => !orphanSet.has(songId));
+          if (songIds.length === holder.songIds.length) continue;
+          if (holder.derived && holderId !== itemId && songIds.length === 0) {
+            delete nextItems[holderId];
+          } else {
+            nextItems[holderId] = { ...holder, songIds };
+          }
+        }
+      }
+
+      const nextSongs = { ...prev.cachedSongs };
+      let freedBytes = 0;
+      let freedFiles = 0;
+      for (const songId of orphanSet) {
+        freedBytes += prev.cachedSongs[songId]?.bytes ?? 0;
+        if (prev.cachedSongs[songId]) freedFiles++;
+        delete nextSongs[songId];
+      }
+      return bumped(prev, {
+        cachedItems: nextItems,
+        cachedSongs: nextSongs,
+        totalBytes: Math.max(0, prev.totalBytes - freedBytes),
+        totalFiles: Math.max(0, prev.totalFiles - freedFiles),
+      });
+    });
+
+    return result;
+  },
+
+  reorderCachedItemSongs: async (itemId, fromPosition, toPosition) => {
     const state = get();
     const item = state.cachedItems[itemId];
-    if (!item) return;
+    if (!item) return false;
     const fromIdx = fromPosition - 1;
     const toIdx = toPosition - 1;
     if (
       fromIdx < 0 ||
       fromIdx >= item.songIds.length ||
       toIdx < 0 ||
-      toIdx >= item.songIds.length ||
-      fromIdx === toIdx
+      toIdx >= item.songIds.length
     ) {
-      return;
+      return false;
     }
-    void reorderCachedItemSongsRow(itemId, fromPosition, toPosition);
-    const nextSongIds = [...item.songIds];
-    const [moved] = nextSongIds.splice(fromIdx, 1);
-    nextSongIds.splice(toIdx, 0, moved);
-    set((prev) =>
-      bumped(prev, {
-        cachedItems: {
-          ...prev.cachedItems,
-          [itemId]: { ...prev.cachedItems[itemId], songIds: nextSongIds },
-        },
-      }),
-    );
+    if (fromIdx === toIdx) return true;
+
+    const persisted = await reorderCachedItemSongsRow(itemId, fromPosition, toPosition);
+    if (!persisted) return false;
+
+    const beforeRead = get().cachedItems[itemId];
+    const songIds = await readCachedItemSongIdsAsync(itemId);
+    if (songIds === null || !beforeRead || get().cachedItems[itemId] !== beforeRead) return false;
+    set((prev) => {
+      const current = prev.cachedItems[itemId];
+      if (!current) return {};
+      return bumped(prev, {
+        cachedItems: { ...prev.cachedItems, [itemId]: { ...current, songIds } },
+      });
+    });
+    // A prior confirmation failure or concurrent edit can leave the caller's
+    // source position stale. Keep recovery pending until this identity landed.
+    return songIds[toIdx] === item.songIds[fromIdx];
   },
 
   upsertCachedSong: (song, child) => {

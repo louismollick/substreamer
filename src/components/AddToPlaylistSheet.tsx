@@ -204,9 +204,9 @@ export function AddToPlaylistSheet() {
           // Only downloaded playlists need a re-fetch here — to re-sync the on-disk
           // tracks with the added songs. Non-downloaded playlists re-fetch lazily when
           // their detail screen next opens (local-first).
-          if (playlist.id in musicCacheStore.getState().cachedItems) {
+          if (playlist.id in musicCacheStore.getState().cachedItems || musicCacheStore.getState().downloadQueue.some((q) => q.itemId === playlist.id)) {
             const updated = await fetchPlaylistDetail(playlist.id, { force: true });
-            if (updated) syncCachedItemTracks(playlist.id, updated.entry ?? []);
+            if (updated) await syncCachedItemTracks(playlist.id, updated.entry ?? []);
           }
 
           void refreshPlaylistLibrary();
