@@ -86,6 +86,7 @@ import { playerStore } from '../playerStore';
 import { processingOverlayStore } from '../processingOverlayStore';
 import { searchStore } from '../searchStore';
 import { resetAllStores } from '../resetAllStores';
+import { teardownMusicCache } from '../../services/musicCacheService';
 
 beforeEach(() => {
   (clearKvStorage as jest.Mock).mockClear();
@@ -96,6 +97,21 @@ beforeEach(() => {
 });
 
 describe('resetAllStores', () => {
+  it('waits for old account audio workers before clearing persistence', async () => {
+    let finish: (() => void) | undefined;
+    jest.mocked(teardownMusicCache).mockImplementationOnce(() => new Promise<void>((resolve) => {
+      finish = resolve;
+    }));
+    const reset = resetAllStores();
+    await Promise.resolve();
+    expect(clearKvStorage).not.toHaveBeenCalled();
+    expect(clearAllMusicCacheRows).not.toHaveBeenCalled();
+    finish?.();
+    await reset;
+    expect(clearKvStorage).toHaveBeenCalledTimes(1);
+    expect(clearAllMusicCacheRows).toHaveBeenCalledTimes(1);
+  });
+
   it('clears SQLite storage', async () => {
     await resetAllStores();
     expect(clearKvStorage).toHaveBeenCalledTimes(1);

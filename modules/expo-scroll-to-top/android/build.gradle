@@ -8,6 +8,7 @@ version = '1.0.0'
 android {
   namespace "expo.modules.scrolltotop"
   defaultConfig {
-    minSdkVersion safeExtGet("minSdkVersion", 24)
+    versionCode 1
+    versionName "1.0.0"
   }
 }

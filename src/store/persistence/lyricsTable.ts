@@ -31,11 +31,20 @@ export interface LyricsCounts {
   unsynced: number;
 }
 
+// Reads must wait for deferred deletes as well as the saves those deletes follow.
+const pendingDeletes = new Map<string, Promise<void>>();
+let pendingClear: Promise<void> | null = null;
+const deletionRevisions = new Map<string, number>();
+let clearRevision = 0;
+
 /** Read one song's lyrics, or null when we have none stored. */
 export async function loadLyrics(songId: string): Promise<LyricsData | null> {
   const db = getDb();
   if (db === null) return null;
   try {
+    const revision = deletionRevisions.get(songId);
+    const clear = clearRevision;
+    await Promise.all([pendingDeletes.get(songId), pendingClear]);
     const row = await db.getFirstAsync<LyricsRow>(
       'SELECT synced, lang, offset_ms, source FROM lyrics WHERE song_id = ?;',
       [songId],
@@ -45,6 +54,7 @@ export async function loadLyrics(songId: string): Promise<LyricsData | null> {
       'SELECT start_ms, text FROM lyric_lines WHERE song_id = ? ORDER BY pos;',
       [songId],
     );
+    if (revision !== deletionRevisions.get(songId) || clear !== clearRevision) return null;
     const data: LyricsData = {
       synced: row.synced === 1,
       lines: lines.map((l) => ({ startMs: l.start_ms, text: l.text })),
@@ -117,10 +127,15 @@ export async function saveLyrics(
 export async function deleteLyrics(songId: string): Promise<void> {
   const db = getDb();
   if (db === null) return;
+  deletionRevisions.set(songId, (deletionRevisions.get(songId) ?? 0) + 1);
+  const deleted = db.runAtomicBatchAsync([['DELETE FROM lyrics WHERE song_id = ?;', [songId]]]);
+  pendingDeletes.set(songId, deleted);
   try {
-    await db.runAsync('DELETE FROM lyrics WHERE song_id = ?;', [songId]);
+    await deleted;
   } catch {
     /* dropped */
+  } finally {
+    if (pendingDeletes.get(songId) === deleted) pendingDeletes.delete(songId);
   }
 }
 
@@ -175,9 +190,15 @@ export async function listCachedLyrics(): Promise<CachedLyricsEntry[]> {
 export async function clearAllLyrics(): Promise<void> {
   const db = getDb();
   if (db === null) return;
+  clearRevision++;
+  deletionRevisions.clear();
+  const cleared = db.runAtomicBatchAsync([['DELETE FROM lyrics;', []]]);
+  pendingClear = cleared;
   try {
-    await db.runAsync('DELETE FROM lyrics;');
+    await cleared;
   } catch {
     /* dropped */
+  } finally {
+    if (pendingClear === cleared) pendingClear = null;
   }
 }

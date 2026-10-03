@@ -276,7 +276,83 @@ describe('deleteLyrics', () => {
 /*  Clearing                                                           */
 /* ------------------------------------------------------------------ */
 
+describe('pending saves and deletion', () => {
+  it.each(['clear', 'delete'] as const)('does not restore lyrics after %s overtakes a deferred save', async (action) => {
+    const pendingSave = saveLyrics('pending', syncedLyrics(2));
+    const deletion = action === 'clear' ? clearAllLyrics() : deleteLyrics('pending');
+    await Promise.all([pendingSave, deletion]);
+    expect(await loadLyrics('pending')).toBeNull();
+    expect(lineRows('pending')).toHaveLength(0);
+  });
+
+  it('does not save a deleted track when its network response arrives later', async () => {
+    let finish: ((data: LyricsData | null) => void) | undefined;
+    mockGetLyrics.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const pending = lyricsStore.getState().refreshLyrics('removed');
+    await lyricsStore.getState().removeLyrics('removed');
+    finish?.(syncedLyrics(2));
+    expect(await pending).toBeNull();
+    expect(await loadLyrics('removed')).toBeNull();
+    expect(lyricsStore.getState().entries['removed']).toBeUndefined();
+  });
+});
+
 describe('clearing', () => {
+  it.each(['table', 'store'] as const)('keeps another song readable through the %s while deleting one song', async (reader) => {
+    const data = syncedLyrics(2);
+    await saveLyrics('reading-keep', data);
+    await saveLyrics('deleting-other', classicLyrics);
+    let release!: () => void;
+    let started!: () => void;
+    const readingLines = new Promise<void>((resolve) => { started = resolve; });
+    const getLines = jest.spyOn(realDb, 'getAllAsync').mockImplementationOnce(async (sql, params) => {
+      const snapshot = realDb.getAllSync(sql, params);
+      started();
+      await new Promise<void>((resolve) => { release = resolve; });
+      return snapshot;
+    });
+    try {
+      const reading = reader === 'table'
+        ? loadLyrics('reading-keep')
+        : lyricsStore.getState().fetchLyrics('reading-keep');
+      await readingLines;
+      await deleteLyrics('deleting-other');
+      release();
+      expect(await reading).toEqual(data);
+      expect(mockGetLyrics).not.toHaveBeenCalled();
+    } finally {
+      release();
+      getLines.mockRestore();
+    }
+  });
+
+  it.each(['single', 'all'])('discards a row read before its %s deletion', async (kind) => {
+    await saveLyrics('reading-delete', syncedLyrics(2));
+    let release: (() => void) | undefined;
+    let started: (() => void) | undefined;
+    const readingLines = new Promise<void>((resolve) => { started = resolve; });
+    const getLines = jest.spyOn(realDb, 'getAllAsync').mockImplementationOnce(async (sql, params) => {
+      const snapshot = await realDb.getAllSync(sql, params);
+      started?.();
+      await new Promise<void>((resolve) => { release = resolve; });
+      return snapshot;
+    });
+    const reading = loadLyrics('reading-delete');
+    await readingLines;
+    await (kind === 'single' ? deleteLyrics('reading-delete') : clearAllLyrics());
+    release?.();
+    expect(await reading).toBeNull();
+    getLines.mockRestore();
+  });
+
+  it.each(['single', 'all'])('does not read a deleted row while its %s delete is deferred', async (kind) => {
+    await saveLyrics('pending-delete', syncedLyrics(2));
+    const deleting = kind === 'single' ? deleteLyrics('pending-delete') : clearAllLyrics();
+    const reading = loadLyrics('pending-delete');
+    expect(await reading).toBeNull();
+    await deleting;
+  });
+
   it('clearAllLyrics empties both tables', async () => {
     await saveLyrics('song-1', syncedLyrics(10));
     await saveLyrics('song-2', classicLyrics);

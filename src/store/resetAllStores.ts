@@ -152,7 +152,7 @@ export async function resetAllStores(): Promise<void> {
   // Unregister cache-service AppState listeners before clearing state so a
   // background→foreground transition while logged out can't fire stalled-
   // download recovery against a reset store. The next login re-arms them.
-  teardownMusicCache();
+  await teardownMusicCache();
   teardownImageCache();
   // Module-scope flags in favoritesSyncService: zustand's `getInitialState()` returns a
   // memoised object and never re-runs the store initializer, so the reset loop below

@@ -41,6 +41,7 @@ interface ExpoAsyncFsNativeModule {
   statAsync(uri: string): Promise<StatResult>;
   deleteFileAsync(uri: string): Promise<boolean>;
   deleteDirectoryAsync(uri: string): Promise<boolean>;
+  prepareDownload?(downloadId: string): void;
   downloadFileAsyncWithProgress(
     url: string,
     destinationUri: string,

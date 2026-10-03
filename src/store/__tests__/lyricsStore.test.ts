@@ -45,6 +45,9 @@ const flush = async (): Promise<void> => {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockGetLyrics.mockReset();
+  mockLoad.mockReset();
+  mockSave.mockReset();
   mockLoad.mockResolvedValue(null);
   mockSave.mockResolvedValue(undefined);
   mockDelete.mockResolvedValue(undefined);
@@ -55,6 +58,132 @@ beforeEach(() => {
 });
 
 describe('lyricsStore.fetchLyrics', () => {
+  it('discards an in-flight response after the account fetches are invalidated', async () => {
+    let finish: ((value: LyricsData | null) => void) | undefined;
+    mockGetLyrics.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const pending = lyricsStore.getState().fetchLyrics('old-account', 'A', 'T');
+    await flush();
+
+    lyricsStore.getState().invalidatePendingFetches();
+    lyricsStore.setState({ entries: {}, loading: {}, errors: {}, revision: 0 });
+    finish?.(sample);
+
+    expect(await pending).toBeNull();
+    expect(mockSave).not.toHaveBeenCalled();
+    expect(lyricsStore.getState().entries).toEqual({});
+  });
+
+  it('discards a stored-row read that completes after account invalidation', async () => {
+    let finish: ((value: LyricsData | null) => void) | undefined;
+    mockLoad.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const pending = lyricsStore.getState().fetchLyrics('old-row');
+
+    lyricsStore.getState().invalidatePendingFetches();
+    lyricsStore.setState({ entries: {}, loading: {}, errors: {}, revision: 0 });
+    finish?.(sample);
+
+    expect(await pending).toBeNull();
+    expect(mockGetLyrics).not.toHaveBeenCalled();
+    expect(lyricsStore.getState().entries).toEqual({});
+  });
+
+  it('does not clear a new fetch loading flag when an invalidated request ends', async () => {
+    let finishOld: ((value: LyricsData | null) => void) | undefined;
+    let finishNew: ((value: LyricsData | null) => void) | undefined;
+    mockGetLyrics
+      .mockReturnValueOnce(new Promise((resolve) => { finishOld = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { finishNew = resolve; }));
+    const oldRequest = lyricsStore.getState().fetchLyrics('same-id');
+    await flush();
+    lyricsStore.getState().invalidatePendingFetches();
+    lyricsStore.setState({ entries: {}, loading: {}, errors: {}, revision: 0 });
+    const newRequest = lyricsStore.getState().fetchLyrics('same-id');
+    await flush();
+
+    finishOld?.(sample);
+    expect(await oldRequest).toBeNull();
+    expect(lyricsStore.getState().loading['same-id']).toBe(true);
+    finishNew?.(sample);
+    expect(await newRequest).toBe(sample);
+    expect(mockSave).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not remember a saved result after account invalidation', async () => {
+    mockGetLyrics.mockResolvedValue(sample);
+    let finishSave: (() => void) | undefined;
+    mockSave.mockImplementationOnce(() => new Promise((resolve) => {
+      finishSave = resolve;
+    }));
+    const pending = lyricsStore.getState().fetchLyrics('saving');
+    while (mockSave.mock.calls.length === 0) await flush();
+    lyricsStore.getState().invalidatePendingFetches();
+    lyricsStore.setState({ entries: {}, loading: {}, errors: {}, revision: 0 });
+    finishSave?.();
+    expect(await pending).toBeNull();
+    expect(lyricsStore.getState().entries).toEqual({});
+  });
+
+  it('ignores errors from invalidated requests', async () => {
+    let fail: ((error: Error) => void) | undefined;
+    mockGetLyrics.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    const pending = lyricsStore.getState().fetchLyrics('old-error');
+    await flush();
+    lyricsStore.getState().invalidatePendingFetches();
+    lyricsStore.setState({ entries: {}, loading: {}, errors: {}, revision: 0 });
+    fail?.(new Error('old server'));
+    expect(await pending).toBeNull();
+    expect(lyricsStore.getState().errors).toEqual({});
+  });
+
+  it('aborts the network request when the prefetch signal is cancelled', async () => {
+    let finish: ((value: LyricsData | null) => void) | undefined;
+    mockGetLyrics.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const controller = new AbortController();
+    const pending = lyricsStore.getState().fetchLyrics('cancelled', 'A', 'T', controller.signal);
+    await flush();
+    const networkSignal = mockGetLyrics.mock.calls[0][3];
+    expect(networkSignal?.aborted).toBe(false);
+    controller.abort();
+    expect(networkSignal?.aborted).toBe(true);
+    finish?.(sample);
+    expect(await pending).toBeNull();
+    expect(mockSave).not.toHaveBeenCalled();
+  });
+
+  it('does not expose background prefetch loading or errors to the player', async () => {
+    let fail: ((error: Error) => void) | undefined;
+    mockGetLyrics.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    const pending = lyricsStore.getState().fetchLyrics('background', 'A', 'T', undefined, true);
+    await flush();
+    expect(lyricsStore.getState().loading['background']).toBeUndefined();
+    lyricsStore.setState({ entries: { background: sample } });
+    fail?.(new Error('optional lyrics failed'));
+    expect(await pending).toBeNull();
+    expect(lyricsStore.getState().entries.background).toBe(sample);
+    expect(lyricsStore.getState().errors.background).toBeUndefined();
+  });
+
+  it('saves background lyrics without growing the player session cache', async () => {
+    mockGetLyrics.mockResolvedValue(sample);
+    expect(await lyricsStore.getState().fetchLyrics('downloaded', 'A', 'T', undefined, true)).toBe(sample);
+    expect(mockSave).toHaveBeenCalledWith('downloaded', sample, 'T', 'A');
+    expect(lyricsStore.getState().entries).toEqual({});
+    expect(lyricsStore.getState().revision).toBe(1);
+    expect(lyricsStore.getState().loading).toEqual({});
+  });
+
+  it('leaves background SQL hits out of memory and does not report a table mutation', async () => {
+    mockLoad.mockResolvedValue(sample);
+    expect(await lyricsStore.getState().fetchLyrics('stored', undefined, undefined, undefined, true)).toBe(sample);
+    expect(mockGetLyrics).not.toHaveBeenCalled();
+    expect(mockSave).not.toHaveBeenCalled();
+    expect(lyricsStore.getState().entries).toEqual({});
+    expect(lyricsStore.getState().revision).toBe(0);
+    // Opening the player still warms its foreground cache from the stored row.
+    expect(await lyricsStore.getState().fetchLyrics('stored')).toBe(sample);
+    expect(lyricsStore.getState().entries.stored).toBe(sample);
+  });
+
   it('populates entries on successful fetch, writes one row, and clears loading', async () => {
     mockGetLyrics.mockResolvedValue(sample);
 
@@ -64,7 +193,7 @@ describe('lyricsStore.fetchLyrics', () => {
     expect(lyricsStore.getState().entries['t1']).toBe(sample);
     expect(lyricsStore.getState().loading['t1']).toBeUndefined();
     expect(lyricsStore.getState().errors['t1']).toBeUndefined();
-    expect(mockGetLyrics).toHaveBeenCalledWith('t1', 'A', 'B');
+    expect(mockGetLyrics).toHaveBeenCalledWith('t1', 'A', 'B', expect.any(AbortSignal));
     // The row captures the names so the browser can label it and replay the
     // classic artist+title lookup on refresh.
     expect(mockSave).toHaveBeenCalledWith('t1', sample, 'B', 'A');
@@ -185,6 +314,17 @@ describe('lyricsStore.fetchLyrics', () => {
 });
 
 describe('lyricsStore.refreshLyrics', () => {
+  it('does not repopulate cleared lyrics from an in-flight refresh', async () => {
+    let finish: ((value: LyricsData | null) => void) | undefined;
+    mockGetLyrics.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const pending = lyricsStore.getState().refreshLyrics('cleared');
+    await lyricsStore.getState().clearLyrics();
+    finish?.(sample);
+    expect(await pending).toBeNull();
+    expect(mockSave).not.toHaveBeenCalled();
+    expect(lyricsStore.getState().entries).toEqual({});
+  });
+
   it('bypasses both caches, refetches and overwrites the row', async () => {
     mockGetLyrics.mockResolvedValue(sample);
     await lyricsStore.getState().fetchLyrics('t1', 'A', 'B');
@@ -198,7 +338,7 @@ describe('lyricsStore.refreshLyrics', () => {
     expect(result).toBe(fresher);
     // Neither the memory hit nor the stored row short-circuited it.
     expect(mockLoad).not.toHaveBeenCalled();
-    expect(mockGetLyrics).toHaveBeenCalledWith('t1', 'A', 'B');
+    expect(mockGetLyrics).toHaveBeenCalledWith('t1', 'A', 'B', expect.any(AbortSignal));
     expect(mockSave).toHaveBeenCalledWith('t1', fresher, 'B', 'A');
     expect(lyricsStore.getState().entries['t1']).toBe(fresher);
     expect(lyricsStore.getState().loading['t1']).toBeUndefined();
@@ -238,6 +378,17 @@ describe('lyricsStore.refreshLyrics', () => {
 });
 
 describe('lyricsStore.removeLyrics', () => {
+  it('cancels queued work only for the deleted track', async () => {
+    const parent = new AbortController();
+    const removed = lyricsStore.getState().prepareFetch('removed', parent.signal);
+    const retained = lyricsStore.getState().prepareFetch('retained', parent.signal);
+    await lyricsStore.getState().removeLyrics('removed');
+    expect(removed.signal.aborted).toBe(true);
+    expect(retained.signal.aborted).toBe(false);
+    removed.dispose();
+    retained.dispose();
+  });
+
   it('drops the memory entry and the row, leaving other tracks alone', async () => {
     mockGetLyrics.mockResolvedValue(sample);
     await lyricsStore.getState().fetchLyrics('t1', 'A', 'B');

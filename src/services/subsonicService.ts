@@ -535,13 +535,14 @@ export async function getLyricsForTrack(
   trackId: string,
   artist?: string,
   title?: string,
+  signal?: AbortSignal,
 ): Promise<LyricsData | null> {
   const api = getApi();
-  if (!api) return null;
+  if (!api || signal?.aborted) return null;
 
   if (supports('structuredLyrics')) {
     try {
-      const response = await api.getLyricsBySongId({ id: trackId });
+      const response = await api.getLyricsBySongId({ id: trackId }, signal);
       // Ampache deviation: `structuredLyrics` arrives as a single object
       // (not an array) when lyrics exist. Normalise to array here so the
       // rest of the code can assume the spec-compliant shape.
@@ -564,9 +565,9 @@ export async function getLyricsForTrack(
     }
   }
 
-  if (artist && title) {
+  if (!signal?.aborted && artist && title) {
     try {
-      const response = await api.getLyrics({ artist, title });
+      const response = await api.getLyrics({ artist, title }, signal);
       const value = response.lyrics?.value;
       if (value && value.trim().length > 0) {
         const data = classicValueToLyricsData(value);
@@ -724,10 +725,11 @@ export async function getAllArtists(): Promise<ArtistID3[]> {
 /**
  * Fetch a single artist by ID, including their albums.
  */
-export async function getArtist(id: string): Promise<ArtistWithAlbumsID3 | null> {
+export async function getArtist(id: string, signal?: AbortSignal): Promise<ArtistWithAlbumsID3 | null> {
   const api = getApi();
   if (!api) return null;
-  const response = await api.getArtist({ id });
+  if (signal?.aborted) return null;
+  const response = await api.getArtist({ id }, signal);
   return response.artist ?? null;
 }
 

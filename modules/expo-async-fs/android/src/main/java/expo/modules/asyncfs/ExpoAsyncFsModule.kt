@@ -116,15 +116,11 @@ class ExpoAsyncFsModule : Module() {
       }
     }
 
-    // Mirrors expo-file-system's downloadFileAsync but adds a network
-    // interceptor for progress events. Uses OkHttpClientProvider (rather
-    // than a bare OkHttpClient) so the RN network stack configuration
-    // (including custom SSL trust) is inherited.
-    //
-    // Takes a Promise parameter and dispatches to Dispatchers.IO so that
-    // concurrent calls run on separate threads. Expo's default module
-    // queue is a single HandlerThread; without this, blocking execute()
-    // calls would serialize all downloads.
+    // Register before async dispatch so a cancellation cannot miss a pending worker.
+    Function("prepareDownload") { downloadId: String ->
+      activeCalls[downloadId] = DownloadTransfer()
+    }
+
     AsyncFunction("downloadFileAsyncWithProgress") { url: String, destinationUri: String, downloadId: String, promise: Promise ->
       download(url, destinationUri, downloadId, validateAudio = false, promise)
     }
@@ -137,13 +133,29 @@ class ExpoAsyncFsModule : Module() {
     }
 
     AsyncFunction("cancelDownloadAsync") { downloadId: String ->
-      val call = activeCalls.remove(downloadId)
-      call?.cancel()
-      call != null
+      val transfer = activeCalls[downloadId]
+      transfer?.cancel()
+      transfer != null
     }
   }
 
-  private val activeCalls = ConcurrentHashMap<String, Call>()
+  private class DownloadTransfer {
+    private var call: Call? = null
+    private var cancelled = false
+
+    @Synchronized fun attach(next: Call): Boolean {
+      if (cancelled) return false
+      call = next
+      return true
+    }
+
+    @Synchronized fun cancel() {
+      cancelled = true
+      call?.cancel()
+    }
+  }
+
+  private val activeCalls = ConcurrentHashMap<String, DownloadTransfer>()
 
   // Mirrors expo-file-system's downloadFileAsync but adds a network
   // interceptor for progress events. Uses OkHttpClientProvider (rather
@@ -160,8 +172,8 @@ class ExpoAsyncFsModule : Module() {
     validateAudio: Boolean,
     promise: Promise,
   ) {
+    val transfer = activeCalls.computeIfAbsent(downloadId) { DownloadTransfer() }
     CoroutineScope(Dispatchers.IO).launch {
-      var call: Call? = null
       try {
         val destPath = Uri.parse(destinationUri).path
           ?: throw Exception("Invalid destination URI")
@@ -201,8 +213,8 @@ class ExpoAsyncFsModule : Module() {
           .build()
 
         val request = Request.Builder().url(url).build()
-        call = client.newCall(request)
-        activeCalls[downloadId] = call
+        val call = client.newCall(request)
+        if (!transfer.attach(call)) throw IOException("cancelled")
         val response = call.execute()
 
         if (!response.isSuccessful) {
@@ -244,8 +256,8 @@ class ExpoAsyncFsModule : Module() {
       } catch (e: Exception) {
         promise.reject("ERR_DOWNLOAD", e.message ?: "Download failed", e)
       } finally {
-        // Only our own call: a retry of the same id may already have registered.
-        call?.let { activeCalls.remove(downloadId, it) }
+        // A retry may already own this id.
+        activeCalls.remove(downloadId, transfer)
       }
     }
   }
