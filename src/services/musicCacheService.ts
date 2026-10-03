@@ -148,6 +148,8 @@ function getTrackFileExtension(track: Child): string {
 
 let cacheDir: Directory | null = null;
 let cacheSession = 0;
+let cacheActive = false;
+let downloadController = new AbortController();
 let isProcessing = false;
 let processingId = 0;
 let offlineSubscription: (() => void) | null = null;
@@ -181,8 +183,12 @@ const trackToItems = new Map<string, Set<string>>();
 /* ------------------------------------------------------------------ */
 
 function ensureCacheDir(): Directory {
-  if (!cacheDir) initMusicCache();
-  return cacheDir!;
+  if (!cacheDir) {
+    const dir = new Directory(Paths.document, CACHE_DIR_NAME);
+    if (!dir.exists) dir.create();
+    cacheDir = dir;
+  }
+  return cacheDir;
 }
 
 function ensureAlbumDir(albumId: string): Directory {
@@ -210,14 +216,12 @@ function resolveSongFile(song: { id: string; albumId?: string; suffix: string })
  * {@link deferredMusicCacheInit}.
  */
 export function initMusicCache(): void {
-  if (cacheDir) return;
-  if (lyricsPrefetchController.signal.aborted) lyricsPrefetchController = new AbortController();
+  if (cacheActive) return;
   try {
-    const dir = new Directory(Paths.document, CACHE_DIR_NAME);
-    if (!dir.exists) {
-      dir.create();
-    }
-    cacheDir = dir;
+    ensureCacheDir();
+    if (lyricsPrefetchController.signal.aborted) lyricsPrefetchController = new AbortController();
+    if (downloadController.signal.aborted) downloadController = new AbortController();
+    cacheActive = true;
 
     if (!appStateSubscription) {
       appStateSubscription = onAppForeground(() => {
@@ -261,7 +265,10 @@ export function initMusicCache(): void {
  * transition while logged out doesn't fire recovery against a reset store.
  * The next login re-arms the listener via `initMusicCache()`.
  */
-export function teardownMusicCache(): void {
+export async function teardownMusicCache(): Promise<void> {
+  cacheActive = false;
+  pausedUntilForeground = false;
+  downloadController.abort();
   cacheSession++;
   processingId++;
   isProcessing = false;
@@ -279,6 +286,11 @@ export function teardownMusicCache(): void {
   cacheDir = null;
   // The next login may be a different server.
   serverTransferCap = Number.POSITIVE_INFINITY;
+  // Cancel native transfers and drain their workers before account tables/files reset.
+  await Promise.allSettled([...inFlightSongs.keys()].map((id) => cancelDownloadAsync(id)));
+  await Promise.allSettled([...activeQueueTasks.values()]);
+  interruptedSongs.clear();
+  interruptedRequeues.clear();
 }
 
 /**
@@ -287,6 +299,7 @@ export function teardownMusicCache(): void {
  * stalled downloads.
  */
 export async function deferredMusicCacheInit(): Promise<void> {
+  initMusicCache();
   // Ensure the per-row tables are hydrated into the store BEFORE building the
   // in-memory maps. This init runs from a `requestIdleCallback` on a different
   // boot effect than the store hydration (`rehydrateAllStores`), so the idle
@@ -1135,7 +1148,7 @@ function isPausedForOffline(): boolean {
  * size — so a queue of one-song albums keeps every slot busy instead of
  * downloading one album at a time.
  */
-const activeQueueIds = new Set<string>();
+const activeQueueTasks = new Map<string, Promise<void>>();
 let claiming = false;
 
 let claimAgain = false;
@@ -1172,7 +1185,7 @@ function pauseUntilForeground(): void {
 }
 
 async function processQueue(): Promise<void> {
-  if (isPausedForOffline() || pausedUntilForeground || clearingQueue) return;
+  if (!cacheActive || isPausedForOffline() || pausedUntilForeground || clearingQueue) return;
   if (claiming) {
     claimAgain = true;
     return;
@@ -1186,11 +1199,11 @@ async function processQueue(): Promise<void> {
 
   try {
     while (myId === processingId && !checkStorageLimit()) {
-      if (activeQueueIds.size >= maxTransfers()) break;
+      if (activeQueueTasks.size >= maxTransfers()) break;
 
       const { downloadQueue } = musicCacheStore.getState();
       const next = downloadQueue.find(
-        (q) => q.status === 'queued' && !activeQueueIds.has(q.queueId),
+        (q) => q.status === 'queued' && !activeQueueTasks.has(q.queueId),
       );
       if (!next) break;
 
@@ -1202,21 +1215,21 @@ async function processQueue(): Promise<void> {
       const claimed = musicCacheStore.getState().downloadQueue.find(
         (q) => q.queueId === next.queueId,
       );
-      if (claimed?.status !== 'queued' || activeQueueIds.has(next.queueId)) continue;
+      if (claimed?.status !== 'queued' || activeQueueTasks.has(next.queueId)) continue;
 
       musicCacheStore.getState().updateQueueItem(next.queueId, { status: 'downloading' });
-      activeQueueIds.add(next.queueId);
-      void downloadItem(next, myId)
+      const task = downloadItem(next, myId)
         .catch(() => { /* per-song failures are recorded on the queue item */ })
         .finally(() => {
-          activeQueueIds.delete(next.queueId);
-          if (activeQueueIds.size === 0 && myId === processingId) isProcessing = false;
+          activeQueueTasks.delete(next.queueId);
+          if (activeQueueTasks.size === 0 && myId === processingId) isProcessing = false;
           void processQueue();
         });
+      activeQueueTasks.set(next.queueId, task);
     }
   } finally {
     claiming = false;
-    if (activeQueueIds.size === 0 && myId === processingId) isProcessing = false;
+    if (activeQueueTasks.size === 0 && myId === processingId) isProcessing = false;
   }
   if (claimAgain) void processQueue();
 }
@@ -1267,7 +1280,7 @@ const interruptedRequeues = new Map<string, number>();
 const MAX_INTERRUPTED_REQUEUES = 3;
 
 /** Resolves when the in-flight transfer of the same song finishes. */
-const inFlightSongs = new Map<string, Promise<CachedSongMeta | null>>();
+const inFlightSongs = new Map<string, { session: number; promise: Promise<CachedSongMeta | null> }>();
 
 function registerTrackToItem(songId: string, itemId: string): void {
   let bucket = trackToItems.get(songId);
@@ -1663,27 +1676,29 @@ async function downloadSong(track: Child): Promise<CachedSongMeta | null> {
   if (existing) return existing;
   // The same song queued by two items (an album and a playlist) transfers once.
   const pending = inFlightSongs.get(track.id);
-  if (pending) return pending;
+  if (pending?.session === session) return pending.promise;
+  const signal = downloadController.signal;
   const transfer = (async () => {
     await acquireTransferSlot();
     try {
       // While this waited for a slot the queue may have been paused, or every
       // item wanting the song cancelled or cleared.
       if (session !== cacheSession || pausedUntilForeground || readQueuedSongStatus(track.id) === null) return null;
-      return await transferSong(track, session);
+      return await transferSong(track, session, signal);
     } finally {
       releaseTransferSlot();
     }
   })();
-  inFlightSongs.set(track.id, transfer);
+  const entry = { session, promise: transfer };
+  inFlightSongs.set(track.id, entry);
   try {
     return await transfer;
   } finally {
-    inFlightSongs.delete(track.id);
+    if (inFlightSongs.get(track.id) === entry) inFlightSongs.delete(track.id);
   }
 }
 
-async function transferSong(track: Child, session: number): Promise<CachedSongMeta | null> {
+async function transferSong(track: Child, session: number, signal: AbortSignal): Promise<CachedSongMeta | null> {
   await ensureCoverArtAuth();
   if (session !== cacheSession) return null;
 
@@ -1702,7 +1717,7 @@ async function transferSong(track: Child, session: number): Promise<CachedSongMe
   try {
     beginDownload(track.id);
     const tmpDest = new File(albumDir, tmpName);
-    if (!(await transferAudio(url, tmpDest.uri, track.id))) {
+    if (!(await transferAudio(url, tmpDest.uri, track.id, signal))) {
       clearDownload(track.id);
       return null;
     }
@@ -1787,14 +1802,28 @@ const MAX_NETWORK_ATTEMPTS = 3;
 const NETWORK_RETRY_DELAY_MS = 2000;
 const MAX_RETRY_AFTER_SECONDS = 30;
 
+async function waitForTransferRetry(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
+}
+
 /**
  * Transfer one audio file to `dest`. A server asking us to back off (429/503
  * with `Retry-After`, e.g. Navidrome's transcode limit) is retried after the
  * requested delay; any other rejection — non-2xx or a Subsonic error body
  * served as HTTP 200 — fails without leaving a file behind.
  */
-async function transferAudio(url: string, dest: string, downloadId: string): Promise<boolean> {
+async function transferAudio(url: string, dest: string, downloadId: string, signal: AbortSignal): Promise<boolean> {
   for (let attempt = 1; ; attempt++) {
+    if (signal.aborted) return false;
     logDownloadEvent('song.start', { songId: downloadId, attempt, inFlight: activeTransfers });
     let result;
     try {
@@ -1804,14 +1833,15 @@ async function transferAudio(url: string, dest: string, downloadId: string): Pro
       // A dropped connection is retried after a pause; a cancel (expiry, the
       // user cancelling) or a paused queue is not.
       const message = errMessage(error);
-      if (/cancel/i.test(message) || pausedUntilForeground || attempt >= MAX_NETWORK_ATTEMPTS) {
+      if (signal.aborted || /cancel/i.test(message) || pausedUntilForeground || attempt >= MAX_NETWORK_ATTEMPTS) {
         throw error;
       }
       logDownloadEvent('song.networkRetry', { songId: downloadId, attempt, error: message });
       // eslint-disable-next-line no-await-in-loop
-      await new Promise<void>((resolve) => setTimeout(resolve, NETWORK_RETRY_DELAY_MS * attempt));
+      await waitForTransferRetry(NETWORK_RETRY_DELAY_MS * attempt, signal);
       continue;
     }
+    if (signal.aborted) return false;
     if (!result.rejected) return true;
     logDownloadEvent('song.rejected', {
       songId: downloadId,
@@ -1826,7 +1856,7 @@ async function transferAudio(url: string, dest: string, downloadId: string): Pro
     if (!retryable || attempt >= MAX_RETRY_AFTER_ATTEMPTS) return false;
     const delaySeconds = Math.min(result.retryAfterSeconds!, MAX_RETRY_AFTER_SECONDS);
     // eslint-disable-next-line no-await-in-loop
-    await new Promise<void>((resolve) => setTimeout(resolve, delaySeconds * 1000));
+    await waitForTransferRetry(delaySeconds * 1000, signal);
   }
 }
 
@@ -2471,7 +2501,7 @@ async function clearQueueSnapshot(queue: DownloadQueueItem[]): Promise<void> {
   // Only items being downloaded have transfers to stop and .tmp files to sweep;
   // cancel those one by one. Everything else goes in one SQL delete.
   for (const item of queue) {
-    if (!activeQueueIds.has(item.queueId)) continue;
+    if (!activeQueueTasks.has(item.queueId)) continue;
     // eslint-disable-next-line no-await-in-loop
     await cancelDownload(item.queueId);
   }
@@ -2519,6 +2549,8 @@ export async function clearQueuedDownloads(): Promise<void> {
  * number of bytes freed.
  */
 export async function clearMusicCache(): Promise<number> {
+  const wasActive = cacheActive;
+  await teardownMusicCache();
   const dir = ensureCacheDir();
   const freedBytes = await getDirectorySizeAsync(dir.uri);
 
@@ -2530,8 +2562,9 @@ export async function clearMusicCache(): Promise<number> {
   cacheDir = null;
   trackUriMap.clear();
   trackToItems.clear();
-  initMusicCache();
+  ensureCacheDir();
   musicCacheStore.getState().reset();
+  if (wasActive) initMusicCache();
 
   return freedBytes;
 }

@@ -540,11 +540,12 @@ function seedSong(song: any) {
   }));
 }
 
-beforeEach(() => {
-  teardownMusicCache();
+beforeEach(async () => {
+  await teardownMusicCache();
   mockListDirectoryAsync.mockReset();
   mockGetDirectorySizeAsync.mockReset();
   mockDownloadAudioFileAsync.mockReset();
+  mockCancelDownloadAsync.mockReset().mockResolvedValue(false);
   mockFetchLyrics.mockReset().mockResolvedValue(null);
   mockFetchAlbum.mockReset();
   mockFetchPlaylist.mockReset();
@@ -1325,7 +1326,7 @@ describe('enqueueSongDownload', () => {
       await enqueueSongDownload(makeChild('lyric-old'));
       await waitForQueueIdle();
       await enqueueSongDownload(makeChild('lyric-queued'));
-      teardownMusicCache();
+      await teardownMusicCache();
       initMusicCache();
       await enqueueSongDownload(makeChild('lyric-new'));
       await waitForQueueIdle();
@@ -2214,6 +2215,42 @@ describe('clearMusicCache', () => {
     expect(state.totalFiles).toBe(0);
   });
 
+  it('cancels an active download before deleting files from the clear-cache setting', async () => {
+    mockFileExists = true;
+    mockGetDirectorySizeAsync.mockResolvedValue(100);
+    let fail: ((error: Error) => void) | undefined;
+    mockDownloadAudioFileAsync.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    mockCancelDownloadAsync.mockImplementation(async () => {
+      expect(dirDeletesAsync).toHaveLength(0);
+      fail?.(new Error('cancelled'));
+      return true;
+    });
+    mockFetchAlbum.mockResolvedValue({
+      id: 'clear-active', name: 'Clear', song: [makeChild('clear-active-song', { albumId: 'clear-active' })],
+    });
+    await enqueueAlbumDownload('clear-active');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(await clearMusicCache()).toBe(100);
+    expect(mockCancelDownloadAsync).toHaveBeenCalledWith('clear-active-song');
+    expect(dirDeletesAsync).toHaveLength(1);
+    expect(musicCacheStore.getState().cachedSongs).toEqual({});
+    expect(musicCacheStore.getState().downloadQueue).toEqual([]);
+    expect(mockFetchLyrics).not.toHaveBeenCalled();
+  });
+
+  it('does not reinstall account listeners when clearing files after logout', async () => {
+    await teardownMusicCache();
+    const listenerCount = mockAppStateListeners.length;
+    const expiryCount = mockExpiryHandlers.length;
+    await clearMusicCache();
+    expect(mockAppStateListeners).toHaveLength(listenerCount);
+    expect(mockExpiryHandlers).toHaveLength(expiryCount);
+    // The next authenticated deferred startup explicitly reinstalls listeners.
+    await deferredMusicCacheInit();
+    expect(mockAppStateListeners).toHaveLength(listenerCount + 1);
+    expect(mockExpiryHandlers).toHaveLength(expiryCount + 1);
+  });
+
   it('clears track URI map', async () => {
     mockFileExists = true;
     seedSong(makeCachedSong('s1'));
@@ -2496,13 +2533,67 @@ describe('download pipeline', () => {
     });
     await enqueueAlbumDownload('logout-a');
     await new Promise((resolve) => setImmediate(resolve));
-    teardownMusicCache();
+    const teardown = teardownMusicCache();
     finish?.({ status: 200 });
+    await teardown;
     await waitForQueueIdle(20);
     expect(mockFetchLyrics).not.toHaveBeenCalled();
     expect(musicCacheStore.getState().cachedItems['logout-a']).toBeUndefined();
     expect(musicCacheStore.getState().cachedSongs['logout-song']).toBeUndefined();
     musicCacheStore.setState({ downloadQueue: [] });
+  });
+
+  it('cancels and drains native audio before the next account downloads the same ID', async () => {
+    mockFileExists = true;
+    musicCacheStore.setState({ maxConcurrentDownloads: 1 });
+    let failOld: ((error: Error) => void) | undefined;
+    mockDownloadAudioFileAsync
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { failOld = reject; }))
+      .mockResolvedValue({ status: 200 });
+    mockCancelDownloadAsync.mockImplementation(async (id: string) => {
+      expect(id).toBe('same-account-id');
+      failOld?.(new Error('cancelled'));
+      return true;
+    });
+    mockFetchAlbum.mockResolvedValue({
+      id: 'account-album', name: 'Account',
+      song: [makeChild('same-account-id', { albumId: 'account-album' })],
+    });
+    await enqueueAlbumDownload('account-album');
+    await new Promise((resolve) => setImmediate(resolve));
+    await teardownMusicCache();
+    expect(mockCancelDownloadAsync).toHaveBeenCalledWith('same-account-id');
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(1);
+    expect(musicCacheStore.getState().cachedSongs['same-account-id']).toBeUndefined();
+    await clearMusicCache();
+    await deferredMusicCacheInit();
+    await enqueueAlbumDownload('account-album');
+    await waitForQueueIdle();
+    expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(2);
+    expect(musicCacheStore.getState().cachedItems['account-album']?.songIds).toEqual(['same-account-id']);
+  });
+
+  it.each(['backoff', 'network'])('aborts the %s retry wait during account teardown', async (kind) => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    try {
+      if (kind === 'backoff') mockDownloadAudioFileAsync.mockResolvedValue({
+        status: 429, rejected: 'http', retryAfterSeconds: 30,
+      });
+      else mockDownloadAudioFileAsync.mockRejectedValue(new Error('connection reset'));
+      mockFetchAlbum.mockResolvedValue({
+        id: 'retry-logout', name: 'Retry', song: [makeChild('retry-old', { albumId: 'retry-logout' })],
+      });
+      await enqueueAlbumDownload('retry-logout');
+      for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+      expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(1);
+      await teardownMusicCache();
+      await jest.advanceTimersByTimeAsync(60_000);
+      expect(mockDownloadAudioFileAsync).toHaveBeenCalledTimes(1);
+      expect(musicCacheStore.getState().cachedSongs['retry-old']).toBeUndefined();
+      musicCacheStore.setState({ downloadQueue: [] });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('does not prefetch lyrics for an incomplete audio item', async () => {
@@ -2658,7 +2749,7 @@ describe('download pipeline', () => {
       expect(musicCacheStore.getState().cachedSongs['r-t1']).toBeDefined();
     } finally {
       jest.useRealTimers();
-      teardownMusicCache();
+      await teardownMusicCache();
       initMusicCache();
     }
   });
@@ -3918,7 +4009,7 @@ describe('global transfer pool', () => {
       await waitForQueueIdle();
       expect(peakAfter).toBeLessThanOrEqual(2);
     } finally {
-      teardownMusicCache();
+      await teardownMusicCache();
       initMusicCache();
     }
   });
