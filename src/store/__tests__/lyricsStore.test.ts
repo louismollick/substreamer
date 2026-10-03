@@ -163,6 +163,27 @@ describe('lyricsStore.fetchLyrics', () => {
     expect(lyricsStore.getState().errors.background).toBeUndefined();
   });
 
+  it('saves background lyrics without growing the player session cache', async () => {
+    mockGetLyrics.mockResolvedValue(sample);
+    expect(await lyricsStore.getState().fetchLyrics('downloaded', 'A', 'T', undefined, true)).toBe(sample);
+    expect(mockSave).toHaveBeenCalledWith('downloaded', sample, 'T', 'A');
+    expect(lyricsStore.getState().entries).toEqual({});
+    expect(lyricsStore.getState().revision).toBe(1);
+    expect(lyricsStore.getState().loading).toEqual({});
+  });
+
+  it('leaves background SQL hits out of memory and does not report a table mutation', async () => {
+    mockLoad.mockResolvedValue(sample);
+    expect(await lyricsStore.getState().fetchLyrics('stored', undefined, undefined, undefined, true)).toBe(sample);
+    expect(mockGetLyrics).not.toHaveBeenCalled();
+    expect(mockSave).not.toHaveBeenCalled();
+    expect(lyricsStore.getState().entries).toEqual({});
+    expect(lyricsStore.getState().revision).toBe(0);
+    // Opening the player still warms its foreground cache from the stored row.
+    expect(await lyricsStore.getState().fetchLyrics('stored')).toBe(sample);
+    expect(lyricsStore.getState().entries.stored).toBe(sample);
+  });
+
   it('populates entries on successful fetch, writes one row, and clears loading', async () => {
     mockGetLyrics.mockResolvedValue(sample);
 

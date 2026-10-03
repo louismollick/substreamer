@@ -86,15 +86,15 @@ export const lyricsStore = create<LyricsState>()((set, get) => {
   };
 
   /**
-   * Network → row → memory. Shared by the cache-miss path and the browser's explicit
-   * refresh, which differ only in whether the caches are consulted first.
+   * Save network results to SQL. Foreground callers also warm the player cache;
+   * background downloads leave lyrics on disk until the player requests them.
    */
   const fetchFromServer = async (
     controller: AbortController,
     trackId: string,
     artist?: string,
     title?: string,
-    reportErrors = true,
+    foreground = true,
   ): Promise<LyricsData | null> => {
     const network = new AbortController();
     const cancel = () => network.abort();
@@ -116,7 +116,7 @@ export const lyricsStore = create<LyricsState>()((set, get) => {
 
     if (controller.signal.aborted) return null;
     if (result === 'timeout') {
-      if (reportErrors) setError(trackId, 'timeout');
+      if (foreground) setError(trackId, 'timeout');
       return null;
     }
 
@@ -125,7 +125,8 @@ export const lyricsStore = create<LyricsState>()((set, get) => {
 
     await saveLyrics(trackId, result, title, artist);
     if (controller.signal.aborted) return null;
-    remember(trackId, result);
+    if (foreground) remember(trackId, result);
+    else set({ revision: get().revision + 1 });
     return result;
   };
 
@@ -145,7 +146,7 @@ export const lyricsStore = create<LyricsState>()((set, get) => {
         const stored = await loadLyrics(trackId);
         if (controller.signal.aborted) return null;
         if (stored !== null) {
-          remember(trackId, stored);
+          if (!background) remember(trackId, stored);
           return stored;
         }
         return await fetchFromServer(controller, trackId, artist, title, !background);
