@@ -182,6 +182,16 @@ const cancellingQueueIds = new Set<string>();
 const itemFinalizations = new Map<string, Promise<void>>();
 // Active repairs may publish one last transfer after their queue row is cancelled.
 const cancelledRepairSongs = new Map<string, string[]>();
+// A song cannot be reused or replaced until its repair cleanup has finished unlinking.
+const repairSongCleanups = new Map<string, Promise<void>>();
+
+async function waitForRepairSongCleanup(songId: string): Promise<void> {
+  let pending = repairSongCleanups.get(songId);
+  while (pending) {
+    await pending;
+    pending = repairSongCleanups.get(songId);
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /*  Path helpers                                                       */
@@ -1020,6 +1030,7 @@ export async function enqueueSongDownload(song: Child): Promise<void> {
     try { await ensureCached(songCover); } catch { /* best-effort */ }
   }
 
+  await waitForRepairSongCleanup(song.id);
   const state = musicCacheStore.getState();
   // If the underlying song is already fully cached, don't transfer bytes —
   // just create the `song:` item + edge so it shows up in the browser, and
@@ -1495,6 +1506,7 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
   // this run. Songs already in `cached_songs` are counted immediately.
   // (This pre-scan is authoritative — the worker loop skips these.)
   const preScannedSongs = new Set<string>();
+  await Promise.all(songs.map((song) => waitForRepairSongCleanup(song.id)));
   const state0 = musicCacheStore.getState();
   for (let i = 0; i < songs.length; i++) {
     const song = songs[i];
@@ -1725,6 +1737,7 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
  * in the caller.
  */
 async function downloadSong(track: Child): Promise<CachedSongMeta | null> {
+  await waitForRepairSongCleanup(track.id);
   const existing = musicCacheStore.getState().cachedSongs[track.id];
   if (existing) return existing;
   // The same song queued by two items (an album and a playlist) transfers once.
@@ -1969,6 +1982,7 @@ export async function redownloadTrack(
   itemId: string,
   trackId: string,
 ): Promise<boolean> {
+  await waitForRepairSongCleanup(trackId);
   const cached = musicCacheStore.getState().cachedItems[itemId];
   if (!cached) return false;
 
@@ -2505,16 +2519,26 @@ async function reconcileCachedItemTracks(itemId: string, newSongs: Child[]): Pro
 
 /** Remove replacement audio that never gained an item edge; keep every existing holder. */
 async function cleanupUnheldRepairSongs(songIds: readonly string[]): Promise<void> {
-  const state = musicCacheStore.getState();
-  const heldIds = new Set(Object.values(state.cachedItems).flatMap((item) => item.songIds));
-  const candidates = [...new Set(songIds)].filter((id) => !heldIds.has(id) && state.cachedSongs[id]);
-  if (candidates.length === 0) return;
-  const orphaned = await musicCacheStore.getState().orphanCachedSongs(candidates, true);
-  for (const songId of orphaned) {
-    trackToItems.delete(songId);
-    trackUriMap.delete(songId);
-    const song = state.cachedSongs[songId];
-    void deleteFileAsync(resolveSongFile(song).uri).catch(() => { /* best-effort */ });
+  for (const songId of new Set(songIds)) {
+    const previous = repairSongCleanups.get(songId) ?? Promise.resolve();
+    const current = previous.then(async () => {
+      const state = musicCacheStore.getState();
+      const song = state.cachedSongs[songId];
+      if (!song || Object.values(state.cachedItems).some((item) => item.songIds.includes(songId))) return;
+      const orphaned = await musicCacheStore.getState().orphanCachedSongs([songId], true);
+      if (!orphaned.includes(songId)) return;
+      trackToItems.delete(songId);
+      trackUriMap.delete(songId);
+      await deleteFileAsync(resolveSongFile(song).uri).catch(() => { /* best-effort */ });
+    });
+    const settled = current.catch(() => { /* surfaced to this caller below */ });
+    repairSongCleanups.set(songId, settled);
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await current;
+    } finally {
+      if (repairSongCleanups.get(songId) === settled) repairSongCleanups.delete(songId);
+    }
   }
 }
 
