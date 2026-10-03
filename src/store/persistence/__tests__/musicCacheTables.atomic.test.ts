@@ -12,6 +12,7 @@
  * which enables `PRAGMA foreign_keys`.
  */
 import type { Child } from 'subsonic-api';
+import { musicCacheStore } from '../../musicCacheStore';
 
 import { __setDbForTests, getDb, type InternalDb } from '../db';
 import {
@@ -184,6 +185,23 @@ afterEach(() => {
 /* ------------------------------------------------------------------ */
 
 describe('markDownloadComplete (real SQL)', () => {
+  it('keeps mirror and SQL aligned when a playlist completion overlaps a reorder', async () => {
+    await seedHolder('pl-overlap', ['s1', 's2']);
+    const item = makeItem({ itemId: 'pl-overlap', type: 'playlist', expectedSongCount: 3 });
+    musicCacheStore.setState({
+      cachedItems: { 'pl-overlap': { ...item, songIds: ['s1', 's2'] } },
+      cachedSongs: { s1: makeSong({ id: 's1' }), s2: makeSong({ id: 's2' }) }, downloadQueue: [],
+    });
+    const reorder = musicCacheStore.getState().reorderCachedItemSongs('pl-overlap', 1, 2);
+    const completion = musicCacheStore.getState().markItemComplete('q-overlap', item,
+      [makeSong({ id: 's1' }), makeSong({ id: 's2' }), makeSong({ id: 's3' })], [
+        { songId: 's1', position: 1 }, { songId: 's2', position: 2 }, { songId: 's3', position: 3 },
+      ]);
+    await Promise.all([reorder, completion]);
+    expect(musicCacheStore.getState().cachedItems['pl-overlap'].songIds).toEqual(songOrderOf('pl-overlap'));
+    expect(songOrderOf('pl-overlap')).toEqual(['s1', 's2', 's3']);
+  });
+
   it('drops the queue row and writes item + songs + dense 1..N edges', async () => {
     await insertDownloadQueueItem(makeQueueRow(), []);
     await markDownloadComplete(
@@ -668,10 +686,19 @@ describe('orphanSongIfUnreferencedAsync (real SQL)', () => {
 /* ------------------------------------------------------------------ */
 
 describe('removeCachedItemSongAndOrphanAsync (real SQL)', () => {
+  it('removes both requested identities when a concurrent deletion shifts positions', async () => {
+    await seedHolder('alb-1', ['s1', 's2', 's3']);
+    await Promise.all([
+      removeCachedItemSongAndOrphanAsync('alb-1', 's1'),
+      removeCachedItemSongAndOrphanAsync('alb-1', 's2'),
+    ]);
+    expect(songOrderOf('alb-1')).toEqual(['s3']);
+  });
+
   it('drops an album edge while retaining a queued song and its row', async () => {
     await seedHolder('alb-1', ['s1', 's2']);
     await insertDownloadQueueItem(makeQueueRow(), [{ id: 's1' }] as Child[]);
-    expect(await removeCachedItemSongAndOrphanAsync('alb-1', 1, 's1')).toEqual({
+    expect(await removeCachedItemSongAndOrphanAsync('alb-1', 's1')).toEqual({
       persisted: true, orphaned: false,
     });
     expect(songExists('s1')).toBe(true);
@@ -681,7 +708,7 @@ describe('removeCachedItemSongAndOrphanAsync (real SQL)', () => {
   it('removes the exact edge and orphans the song in one commit', async () => {
     await seedHolder('alb-1', ['s1', 's2']);
 
-    const result = await removeCachedItemSongAndOrphanAsync('alb-1', 1, 's1');
+    const result = await removeCachedItemSongAndOrphanAsync('alb-1', 's1');
 
     expect(result).toEqual({ persisted: true, orphaned: true });
     expect(songExists('s1')).toBe(false);
@@ -693,7 +720,7 @@ describe('removeCachedItemSongAndOrphanAsync (real SQL)', () => {
     await seedHolder('alb-1', ['s1', 's2']);
     await seedHolder('pl-1', ['s1']);
 
-    const result = await removeCachedItemSongAndOrphanAsync('alb-1', 1, 's1');
+    const result = await removeCachedItemSongAndOrphanAsync('alb-1', 's1');
 
     expect(result).toEqual({ persisted: true, orphaned: false });
     expect(songExists('s1')).toBe(true);
@@ -713,7 +740,7 @@ describe('removeCachedItemSongAndOrphanAsync (real SQL)', () => {
     };
     __setDbForTests(poisoned);
 
-    const result = await removeCachedItemSongAndOrphanAsync('alb-1', 1, 's1');
+    const result = await removeCachedItemSongAndOrphanAsync('alb-1', 's1');
 
     __setDbForTests(realDb);
     expect(result).toEqual({ persisted: false, orphaned: false });
@@ -732,14 +759,14 @@ describe('removeCachedItemSongAndOrphanAsync (real SQL)', () => {
     __setDbForTests(postReadFails);
 
     expect(
-      await removeCachedItemSongAndOrphanAsync('alb-1', 1, 's1'),
+      await removeCachedItemSongAndOrphanAsync('alb-1', 's1'),
     ).toEqual({ persisted: false, orphaned: false });
 
     // The batch did land. Replay the same stale edge against the real handle:
-    // the exact-edge guard must not delete the successor now occupying slot 1.
+    // the song-ID delete must not remove the successor now occupying slot 1.
     __setDbForTests(realDb);
     expect(
-      await removeCachedItemSongAndOrphanAsync('alb-1', 1, 's1'),
+      await removeCachedItemSongAndOrphanAsync('alb-1', 's1'),
     ).toEqual({ persisted: true, orphaned: true });
     expect(songOrderOf('alb-1')).toEqual(['s2']);
     expect(songExists('s1')).toBe(false);

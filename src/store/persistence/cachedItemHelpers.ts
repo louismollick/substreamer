@@ -27,25 +27,19 @@ export function isPartialAlbum(item: CachedItemRow): boolean {
  * item. When the item's target already has a `cached_items` entry (top-up
  * flow), the display should read as `(existing + delta) / expectedSongCount`
  * — e.g. a 5-of-10 partial album progresses 5/10 → 10/10 even though the
- * queue row itself only tracks the 0/5 delta. Fresh downloads collapse to
- * the queue row's raw `completedSongs / totalSongs`.
+ * queue row itself only tracks the 0/5 delta. Fresh downloads and full replacement
+ * payloads use the queue row's raw `completedSongs / totalSongs`.
  */
 export function computeQueueItemProgress(
   queueItem: DownloadQueueRow,
   cachedItems: Record<string, CachedItemRow>,
 ): { completed: number; total: number } {
   const existing = cachedItems[queueItem.itemId];
-  if (existing && queueItem.type === 'album') {
+  if (existing && queueItem.type === 'album' && queueItem.totalSongs !== existing.expectedSongCount) {
     // Every song an album download finishes is edged onto its album row as it
     // lands, so the row alone holds everything done so far.
     return {
       completed: Math.min(existing.songIds.length, existing.expectedSongCount),
-      total: existing.expectedSongCount,
-    };
-  }
-  if (existing) {
-    return {
-      completed: existing.songIds.length + queueItem.completedSongs,
       total: existing.expectedSongCount,
     };
   }

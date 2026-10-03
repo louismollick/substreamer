@@ -42,7 +42,7 @@ import { useSongCoverArt } from '../hooks/useSongCoverArt';
 import { useTheme } from '../hooks/useTheme';
 import { useTransitionComplete } from '../hooks/useTransitionComplete';
 import { ensureCached, refreshCoverArt } from '../services/imageCacheService';
-import { enqueuePlaylistDownload, syncCachedPlaylistTracks } from '../services/musicCacheService';
+import { enqueuePlaylistDownload, syncCachedItemTracks } from '../services/musicCacheService';
 import { playTrack } from '../services/playerService';
 import { updatePlaylistDetails, updatePlaylistOrder } from '../services/subsonicService';
 import { shuffleArray } from '../utils/arrayHelpers';
@@ -359,8 +359,8 @@ export function PlaylistDetailScreen() {
           setSaving(false);
           return;
         }
-        if (id in musicCacheStore.getState().cachedItems) {
-          syncCachedPlaylistTracks(id, editedTracks.map((tr) => tr.id));
+        if (id in musicCacheStore.getState().cachedItems || musicCacheStore.getState().downloadQueue.some((q) => q.itemId === id)) {
+          await syncCachedItemTracks(id, editedTracks);
         }
       }
 

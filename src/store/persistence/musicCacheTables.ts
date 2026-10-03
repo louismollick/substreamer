@@ -1409,25 +1409,22 @@ export async function removeCachedItemSong(itemId: string, position: number): Pr
  */
 export async function removeCachedItemSongAndOrphanAsync(
   itemId: string,
-  position: number,
   songId: string,
 ): Promise<{ persisted: boolean; orphaned: boolean }> {
   const db = getDb();
   if (db === null) return { persisted: false, orphaned: false };
 
-  // Guard the tail shift with the exact edge the caller observed. If memory and
-  // disk ever disagree, the delete/repack becomes a no-op instead of shifting the
-  // wrong row. The orphan commands then also no-op while a REAL holder remains.
+  // Resolve the position inside the batch: another removal can shift this song
+  // while the caller is awaiting persistence. Replaying an absent ID is a no-op.
   const tailShift = positionShiftCommands({
     table: 'cached_item_songs',
     column: 'position',
     newPosition: 'position - 1',
-    where: `item_id = ? AND position > ?
-            AND EXISTS (
-              SELECT 1 FROM cached_item_songs d
-               WHERE d.item_id = ? AND d.position = ? AND d.song_id = ?
+    where: `item_id = ? AND position > (
+              SELECT position FROM cached_item_songs
+               WHERE item_id = ? AND song_id = ?
             )`,
-    params: [itemId, position, itemId, position, songId],
+    params: [itemId, itemId, songId],
     restoreWhere: 'item_id = ?',
     restoreParams: [itemId],
   });
@@ -1436,8 +1433,8 @@ export async function removeCachedItemSongAndOrphanAsync(
     await db.runAtomicBatchAsync([
       tailShift.shift,
       [
-        'DELETE FROM cached_item_songs WHERE item_id = ? AND position = ? AND song_id = ?;',
-        [itemId, position, songId],
+        'DELETE FROM cached_item_songs WHERE item_id = ? AND song_id = ?;',
+        [itemId, songId],
       ],
       tailShift.restore,
       ...orphanSongCommands(songId),
@@ -1450,8 +1447,7 @@ export async function removeCachedItemSongAndOrphanAsync(
     return { persisted: true, orphaned: (remaining?.c ?? 1) === 0 };
   } catch {
     // A failed post-read is also reported as not persisted. Retrying is safe:
-    // every command above is idempotent and the exact-edge guard prevents a
-    // shifted successor from being removed on replay.
+    // every command above targets the same song ID, never a shifted successor.
     return { persisted: false, orphaned: false };
   }
 }
@@ -1493,6 +1489,20 @@ export async function demoteCachedAlbumToPartialAsync(
     };
   } catch {
     return { persisted: false, orphanedSongIds: [] };
+  }
+}
+
+/** Read the authoritative edge order after an awaited membership mutation. */
+export async function readCachedItemSongIdsAsync(itemId: string): Promise<string[] | null> {
+  const db = getDb();
+  if (!db) return null;
+  try {
+    const rows = await db.getAllAsync<{ song_id: string }>(
+      'SELECT song_id FROM cached_item_songs WHERE item_id = ? ORDER BY position;', [itemId],
+    );
+    return rows.map((row) => row.song_id);
+  } catch {
+    return null;
   }
 }
 

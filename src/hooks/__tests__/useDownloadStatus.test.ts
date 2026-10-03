@@ -121,6 +121,18 @@ describe('useDownloadStatus', () => {
   });
 
   describe('playlist', () => {
+    it.each(['queued', 'downloading'] as const)('reports %s while a cached playlist refresh is pending', (status) => {
+      musicCacheStore.setState({
+        cachedItems: { p1: makeItem({ itemId: 'p1', type: 'playlist', songIds: ['s1'], expectedSongCount: 2 }) },
+        downloadQueue: [{
+          queueId: 'refresh', itemId: 'p1', type: 'playlist', name: 'P', status,
+          totalSongs: 2, completedSongs: 1, addedAt: 0, queuePosition: 1,
+        }],
+      });
+      const { result } = renderHook(() => useDownloadStatus('playlist', 'p1'));
+      expect(result.current).toBe(status);
+    });
+
     it('returns "complete" for a cached playlist (playlists never classify as partial)', () => {
       musicCacheStore.setState({
         cachedItems: {

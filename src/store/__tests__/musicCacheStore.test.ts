@@ -24,6 +24,7 @@ jest.mock('../persistence/musicCacheTables', () => ({
   removeCachedItemSongAndOrphanAsync: jest.fn(async () => ({ persisted: true, orphaned: false })),
   demoteCachedAlbumToPartialAsync: jest.fn(async () => ({ persisted: true, orphanedSongIds: [] })),
   reorderCachedItemSongs: jest.fn(),
+  readCachedItemSongIdsAsync: jest.fn(),
   orphanSongIfUnreferencedAsync: jest.fn(async () => ({
     orphaned: false,
     affectedItems: [],
@@ -47,6 +48,7 @@ import {
   hydrateDownloadQueueAsync,
   insertDownloadQueueItem,
   markDownloadComplete,
+  readCachedItemSongIdsAsync,
   orphanSongIfUnreferencedAsync,
   removeCachedItemSongAndOrphanAsync,
   removeDownloadQueueItem,
@@ -87,6 +89,7 @@ const mockUpsertCachedSong = upsertCachedSong as jest.Mock;
 const mockDeleteCachedSong = deleteCachedSong as jest.Mock;
 const mockRemoveCachedItemSongAndOrphan = removeCachedItemSongAndOrphanAsync as jest.Mock;
 const mockDemoteCachedAlbumToPartial = demoteCachedAlbumToPartialAsync as jest.Mock;
+const mockReadCachedItemSongIds = readCachedItemSongIdsAsync as jest.MockedFunction<typeof readCachedItemSongIdsAsync>;
 const mockReorderCachedItemSongs = reorderCachedItemSongs as jest.Mock;
 const mockOrphanSongIfUnreferencedAsync = orphanSongIfUnreferencedAsync as jest.Mock;
 const mockClearAllMusicCacheRows = clearAllMusicCacheRows as jest.Mock;
@@ -201,7 +204,14 @@ beforeEach(() => {
   mockHydrateCachedItemsAsync.mockResolvedValue({});
   mockHydrateDownloadQueueAsync.mockResolvedValue([]);
   mockMarkDownloadComplete.mockResolvedValue(true);
-  mockReorderCachedItemSongs.mockResolvedValue(true);
+  mockReadCachedItemSongIds.mockResolvedValue([]);
+  mockReorderCachedItemSongs.mockImplementation(async (itemId: string, from: number, to: number) => {
+    const songIds = [...musicCacheStore.getState().cachedItems[itemId].songIds];
+    const [moved] = songIds.splice(from - 1, 1);
+    songIds.splice(to - 1, 0, moved);
+    mockReadCachedItemSongIds.mockResolvedValue(songIds);
+    return true;
+  });
   mockRemoveDownloadQueueItem.mockResolvedValue(true);
   mockRemoveCachedItemSongAndOrphan.mockResolvedValue({ persisted: true, orphaned: false });
   mockDemoteCachedAlbumToPartial.mockResolvedValue({ persisted: true, orphanedSongIds: [] });
@@ -470,12 +480,12 @@ describe('reorderQueue', () => {
     ]);
   });
 
-  it('still moves the right row after a long run of completions', () => {
+  it('still moves the right row after a long run of completions', async () => {
     // What a full-library download leaves: every completion vacates the front slot,
     // so the survivors sit at a high, sparse offset and nothing is ever 1..N again.
     seedMirror([1, 2, 3, 4, 5, 6, 7, 8]);
     for (const done of ['q-1', 'q-2', 'q-3', 'q-4', 'q-5']) {
-      musicCacheStore.getState().markItemComplete(
+      await musicCacheStore.getState().markItemComplete(
         done,
         makeItem(`item-${done}`, []) as Omit<CachedItemMeta, 'songIds'>,
         [],
@@ -556,7 +566,7 @@ describe('enqueueTopUp', () => {
     expect(musicCacheStore.getState().downloadQueue).toHaveLength(1);
   });
 
-  it('contrast: plain enqueue refuses when item is already cached', () => {
+  it('contrast: plain enqueue refuses when item is already cached', async () => {
     musicCacheStore.setState({
       cachedItems: { 'album-1': makeItem('album-1', ['s1']) },
     });
@@ -570,7 +580,26 @@ describe('enqueueTopUp', () => {
 /* ------------------------------------------------------------------ */
 
 describe('markItemComplete', () => {
-  it('delegates to markDownloadComplete and mirrors item + songs in memory', () => {
+  it('does not publish or remove the queue after an unsuccessful completion write', async () => {
+    musicCacheStore.getState().enqueue(makeQueueDraft('a'), []);
+    const qid = musicCacheStore.getState().downloadQueue[0].queueId;
+    mockMarkDownloadComplete.mockResolvedValueOnce(false);
+    expect(await musicCacheStore.getState().markItemComplete(qid, makeItem('a', []), [makeSong('s1')], [
+      { songId: 's1', position: 1 },
+    ])).toBe(false);
+    expect(musicCacheStore.getState().cachedItems.a).toBeUndefined();
+    expect(musicCacheStore.getState().downloadQueue).toHaveLength(1);
+  });
+
+  it('mirrors the unique SQL membership for duplicate playlist entries', async () => {
+    await musicCacheStore.getState().markItemComplete('q', makeItem('a', [], { type: 'playlist' }),
+      [makeSong('s1'), makeSong('s2')], [
+        { songId: 's1', position: 1 }, { songId: 's2', position: 2 }, { songId: 's1', position: 3 },
+      ]);
+    expect(musicCacheStore.getState().cachedItems.a.songIds).toEqual(['s1', 's2']);
+  });
+
+  it('delegates to markDownloadComplete and mirrors item + songs in memory', async () => {
     musicCacheStore.getState().enqueue(makeQueueDraft('a'), []);
     const qid = musicCacheStore.getState().downloadQueue[0].queueId;
 
@@ -583,7 +612,7 @@ describe('markItemComplete', () => {
       { songId: 's2', position: 2 },
     ];
 
-    musicCacheStore.getState().markItemComplete(qid, item, songs, edges);
+    await musicCacheStore.getState().markItemComplete(qid, item, songs, edges);
 
     // Trailing `undefined` = no `childBySongId`: these rows carry no real `Child`.
     expect(mockMarkDownloadComplete).toHaveBeenCalledWith(qid, item, songs, edges, undefined, { replaceEdges: false });
@@ -596,9 +625,9 @@ describe('markItemComplete', () => {
     expect(state.cachedSongs['s3']).toEqual(songs[2]);
   });
 
-  it('drops the completed row and leaves every surviving slot alone', () => {
+  it('drops the completed row and leaves every surviving slot alone', async () => {
     seedMirror([1, 2, 3]);
-    musicCacheStore.getState().markItemComplete(
+    await musicCacheStore.getState().markItemComplete(
       'q-2',
       makeItem('item-2', []) as Omit<CachedItemMeta, 'songIds'>,
       [makeSong('s1')],
@@ -610,9 +639,9 @@ describe('markItemComplete', () => {
     ]);
   });
 
-  it('leaves every slot alone when the completed item was never queued', () => {
+  it('leaves every slot alone when the completed item was never queued', async () => {
     seedMirror([1, 2, 3]);
-    musicCacheStore.getState().markItemComplete(
+    await musicCacheStore.getState().markItemComplete(
       'q-9',
       makeItem('item-9', []) as Omit<CachedItemMeta, 'songIds'>,
       [makeSong('s1')],
@@ -625,9 +654,9 @@ describe('markItemComplete', () => {
     ]);
   });
 
-  it('preserves existing cached songs from other items', () => {
+  it('preserves existing cached songs from other items', async () => {
     musicCacheStore.setState({ cachedSongs: { existing: makeSong('existing') } });
-    musicCacheStore.getState().markItemComplete(
+    await musicCacheStore.getState().markItemComplete(
       'q1',
       makeItem('a', []) as Omit<CachedItemMeta, 'songIds'>,
       [makeSong('new')],
@@ -638,7 +667,7 @@ describe('markItemComplete', () => {
     expect(state.cachedSongs['new']).toBeDefined();
   });
 
-  it('merges edges into existing row on top-up: preserves downloadedAt, appends new songIds', () => {
+  it('merges edges into existing row on top-up: preserves downloadedAt, appends new songIds', async () => {
     // Seed an existing partial album with 3 of 10 songs and a known
     // downloadedAt timestamp that must survive the merge.
     musicCacheStore.setState({
@@ -671,7 +700,7 @@ describe('markItemComplete', () => {
       { songId: 's5', position: 2 },
       { songId: 's6', position: 3 },
     ];
-    musicCacheStore.getState().markItemComplete(qid, item, songs, edges);
+    await musicCacheStore.getState().markItemComplete(qid, item, songs, edges);
 
     const merged = musicCacheStore.getState().cachedItems['a'];
     expect(merged.songIds).toEqual(['s1', 's2', 's3', 's4', 's5', 's6']);
@@ -680,7 +709,7 @@ describe('markItemComplete', () => {
     expect(merged.expectedSongCount).toBe(10);
   });
 
-  it('dedupes songIds on merge (song already edged to the item is not re-added)', () => {
+  it('dedupes songIds on merge (song already edged to the item is not re-added)', async () => {
     musicCacheStore.setState({
       cachedItems: {
         a: {
@@ -694,7 +723,7 @@ describe('markItemComplete', () => {
         },
       },
     });
-    musicCacheStore.getState().markItemComplete(
+    await musicCacheStore.getState().markItemComplete(
       'q',
       {
         itemId: 'a',
@@ -832,6 +861,45 @@ describe('removeCachedItem', () => {
 /* ------------------------------------------------------------------ */
 
 describe('removeCachedItemSong', () => {
+  it.each(['remove', 'demote'] as const)('counts a repeated %s orphan only once', async (action) => {
+    musicCacheStore.setState({
+      cachedItems: { a: makeItem('a', ['s1', 's2', 's3']) },
+      cachedSongs: { s1: makeSong('s1', { bytes: 10 }), s2: makeSong('s2', { bytes: 10 }), s3: makeSong('s3', { bytes: 10 }) },
+      totalFiles: 3, totalBytes: 30,
+    });
+    mockRemoveCachedItemSongAndOrphan.mockResolvedValue({ persisted: true, orphaned: true });
+    mockDemoteCachedAlbumToPartial.mockResolvedValue({ persisted: true, orphanedSongIds: ['s3'] });
+    if (action === 'remove') {
+      await Promise.all([
+        musicCacheStore.getState().removeCachedItemSong('a', 3),
+        musicCacheStore.getState().removeCachedItemSong('a', 3),
+      ]);
+    } else {
+      await Promise.all([
+        musicCacheStore.getState().demoteCachedAlbum('a', ['s3']),
+        musicCacheStore.getState().demoteCachedAlbum('a', ['s3']),
+      ]);
+    }
+    expect(musicCacheStore.getState().totalFiles).toBe(2);
+    expect(musicCacheStore.getState().totalBytes).toBe(20);
+  });
+
+  it('removes song identities rather than stale indices after overlapping awaits', async () => {
+    musicCacheStore.setState({ cachedItems: { a: makeItem('a', ['s1', 's2', 's3']) } });
+    let finishFirst: ((result: { persisted: boolean; orphaned: boolean }) => void) | undefined;
+    let finishSecond: ((result: { persisted: boolean; orphaned: boolean }) => void) | undefined;
+    mockRemoveCachedItemSongAndOrphan
+      .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { finishSecond = resolve; }));
+    const first = musicCacheStore.getState().removeCachedItemSong('a', 1);
+    const second = musicCacheStore.getState().removeCachedItemSong('a', 2);
+    finishFirst?.({ persisted: true, orphaned: false });
+    await first;
+    finishSecond?.({ persisted: true, orphaned: false });
+    await second;
+    expect(musicCacheStore.getState().cachedItems.a.songIds).toEqual(['s3']);
+  });
+
   it('removes edge + orphans song when REAL refcount drops to 0', async () => {
     musicCacheStore.setState({
       cachedItems: { a: makeItem('a', ['s1', 's2', 's3']) },
@@ -846,7 +914,7 @@ describe('removeCachedItemSong', () => {
 
     const result = await musicCacheStore.getState().removeCachedItemSong('a', 2);
 
-    expect(mockRemoveCachedItemSongAndOrphan).toHaveBeenCalledWith('a', 2, 's2');
+    expect(mockRemoveCachedItemSongAndOrphan).toHaveBeenCalledWith('a', 's2');
     expect(result).toEqual({ orphanedSongId: 's2', persisted: true });
     const state = musicCacheStore.getState();
     expect(state.cachedItems['a'].songIds).toEqual(['s1', 's3']);
@@ -1047,7 +1115,7 @@ describe('removeCachedItemSong — derived-holder orphan matrix', () => {
     const result = await musicCacheStore.getState().removeCachedItemSong('__starred__', 1);
 
     expect(result).toEqual({ orphanedSongId: 'S', persisted: true });
-    expect(mockRemoveCachedItemSongAndOrphan).toHaveBeenCalledWith('__starred__', 1, 'S');
+    expect(mockRemoveCachedItemSongAndOrphan).toHaveBeenCalledWith('__starred__', 'S');
     const state = musicCacheStore.getState();
     // The favorites row survives (empty) — removeCachedItemSong only removes the
     // one edge; the holder itself is not pruned by this path.
@@ -1114,6 +1182,36 @@ describe('removeCachedItemSong — derived-holder orphan matrix', () => {
 /* ------------------------------------------------------------------ */
 
 describe('reorderCachedItemSongs', () => {
+  it('keeps an uncertain reorder recoverable until the intended song reaches its target', async () => {
+    musicCacheStore.setState({ cachedItems: { a: makeItem('a', ['s1', 's2', 's3']) } });
+    const persistedIds = ['s1', 's2', 's3'];
+    mockReorderCachedItemSongs.mockImplementation(async (_id: string, from: number, to: number) => {
+      const [moved] = persistedIds.splice(from - 1, 1);
+      persistedIds.splice(to - 1, 0, moved);
+      return true;
+    });
+    mockReadCachedItemSongIds.mockImplementation(async () => [...persistedIds]);
+    mockReadCachedItemSongIds.mockResolvedValueOnce(null);
+    expect(await musicCacheStore.getState().reorderCachedItemSongs('a', 3, 1)).toBe(false);
+    // The retry still has an old mirror. It must report the identity mismatch,
+    // refresh the mirror, and retain the caller's recovery record.
+    expect(await musicCacheStore.getState().reorderCachedItemSongs('a', 3, 1)).toBe(false);
+    const index = musicCacheStore.getState().cachedItems.a.songIds.indexOf('s3');
+    expect(await musicCacheStore.getState().reorderCachedItemSongs('a', index + 1, 1)).toBe(true);
+    expect(musicCacheStore.getState().cachedItems.a.songIds[0]).toBe('s3');
+  });
+
+  it('does not recreate an item deleted while reorder persistence is pending', async () => {
+    musicCacheStore.setState({ cachedItems: { a: makeItem('a', ['s1', 's2']) } });
+    let finish: ((ok: boolean) => void) | undefined;
+    mockReorderCachedItemSongs.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const pending = musicCacheStore.getState().reorderCachedItemSongs('a', 1, 2);
+    musicCacheStore.setState({ cachedItems: {} });
+    finish?.(true);
+    expect(await pending).toBe(false);
+    expect(musicCacheStore.getState().cachedItems.a).toBeUndefined();
+  });
+
   it('moves forward and updates both SQL and in-memory order', async () => {
     musicCacheStore.setState({
       cachedItems: { a: makeItem('a', ['s1', 's2', 's3', 's4']) },
@@ -1541,9 +1639,9 @@ describe('revision', () => {
     expect(revision()).toBe(2);
   });
 
-  it('bumps on markItemComplete — the download-finished path the lists must react to', () => {
+  it('bumps on markItemComplete — the download-finished path the lists must react to', async () => {
     const before = revision();
-    musicCacheStore
+    await musicCacheStore
       .getState()
       .markItemComplete('q1', makeItem('a', ['s1']), [makeSong('s1')], [
         { songId: 's1', position: 1 },

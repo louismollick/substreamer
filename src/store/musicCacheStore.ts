@@ -32,6 +32,7 @@ import {
   hydrateDownloadQueueAsync,
   insertDownloadQueueItem,
   markDownloadComplete,
+  readCachedItemSongIdsAsync,
   removeCachedItemSongAndOrphanAsync as removeCachedItemSongAndOrphanRow,
   removeDownloadQueueItem,
   reorderCachedItemSongs as reorderCachedItemSongsRow,
@@ -485,12 +486,14 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
     }));
   },
 
-  markItemComplete: (queueId, item, songs, edges, childBySongId, options) => {
+  markItemComplete: async (queueId, item, songs, edges, childBySongId, options) => {
+    const queuedAtStart = get().downloadQueue.some((q) => q.queueId === queueId);
     const current = get().cachedItems[item.itemId];
     // A derived partial-album row being completed by a real download is replaced,
     // not topped up: its edges were written in finish order and its metadata is
     // the partial grouping's.
     const promoting = current?.derived === true && !item.derived;
+    const replaceEdges = promoting || item.type === 'playlist' || item.type === 'favorites';
     const existing = promoting ? undefined : current;
     // For top-ups (existing row):
     //   - preserve `downloadedAt` (user "downloaded" this earlier).
@@ -507,15 +510,15 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
 
     const persisted = markDownloadComplete(
       queueId, itemToPersist, songs, edges, childBySongId,
-      { ...options, replaceEdges: promoting },
+      { ...options, replaceEdges },
     );
 
-    const newSongIdsInOrder = [...edges]
+    const newSongIdsInOrder = [...new Set([...edges]
       .sort((a, b) => a.position - b.position)
-      .map((e) => e.songId);
+      .map((e) => e.songId))];
 
     let songIds: string[];
-    if (existing) {
+    if (existing && !replaceEdges) {
       const existingSet = new Set(existing.songIds);
       const additions = newSongIdsInOrder.filter((id) => !existingSet.has(id));
       songIds = [...existing.songIds, ...additions];
@@ -542,17 +545,10 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
       });
     };
 
-    // Replacement cleanup is destructive. Do not publish the fresh edges until
-    // their SQL batch has succeeded. The normal path keeps its existing optimistic
-    // mirror behaviour.
-    if (options?.keepQueue) {
-      return persisted.then((ok) => {
-        if (ok) applyMirror();
-        return ok;
-      });
-    }
+    const ok = await persisted;
+    if (!ok || (queuedAtStart && !get().downloadQueue.some((q) => q.queueId === queueId))) return false;
     applyMirror();
-    return persisted;
+    return true;
   },
 
   upsertCachedItem: (item, songIds) => {
@@ -647,7 +643,6 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
     // exact edge.
     const { persisted, orphaned } = await removeCachedItemSongAndOrphanRow(
       itemId,
-      position,
       songId,
     );
     if (!persisted) return { orphanedSongId: null, persisted: false };
@@ -659,7 +654,7 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
       if (prevItem) {
         nextItems[itemId] = {
           ...prevItem,
-          songIds: prevItem.songIds.filter((_, i) => i !== index),
+          songIds: prevItem.songIds.filter((id) => id !== songId),
         };
       }
 
@@ -685,7 +680,7 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
         cachedItems: nextItems,
         cachedSongs: restSongs,
         totalBytes: Math.max(0, prev.totalBytes - freedBytes),
-        totalFiles: Math.max(0, prev.totalFiles - 1),
+        totalFiles: Math.max(0, prev.totalFiles - (prev.cachedSongs[orphanedSongId] ? 1 : 0)),
       });
     });
     return { orphanedSongId, persisted: true };
@@ -715,15 +710,17 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
 
       const nextSongs = { ...prev.cachedSongs };
       let freedBytes = 0;
+      let freedFiles = 0;
       for (const songId of orphanSet) {
         freedBytes += prev.cachedSongs[songId]?.bytes ?? 0;
+        if (prev.cachedSongs[songId]) freedFiles++;
         delete nextSongs[songId];
       }
       return bumped(prev, {
         cachedItems: nextItems,
         cachedSongs: nextSongs,
         totalBytes: Math.max(0, prev.totalBytes - freedBytes),
-        totalFiles: Math.max(0, prev.totalFiles - orphanSet.size),
+        totalFiles: Math.max(0, prev.totalFiles - freedFiles),
       });
     });
 
@@ -749,18 +746,19 @@ export const musicCacheStore = create<MusicCacheState>()((set, get) => ({
     const persisted = await reorderCachedItemSongsRow(itemId, fromPosition, toPosition);
     if (!persisted) return false;
 
-    const nextSongIds = [...item.songIds];
-    const [moved] = nextSongIds.splice(fromIdx, 1);
-    nextSongIds.splice(toIdx, 0, moved);
-    set((prev) =>
-      bumped(prev, {
-        cachedItems: {
-          ...prev.cachedItems,
-          [itemId]: { ...prev.cachedItems[itemId], songIds: nextSongIds },
-        },
-      }),
-    );
-    return true;
+    const beforeRead = get().cachedItems[itemId];
+    const songIds = await readCachedItemSongIdsAsync(itemId);
+    if (songIds === null || !beforeRead || get().cachedItems[itemId] !== beforeRead) return false;
+    set((prev) => {
+      const current = prev.cachedItems[itemId];
+      if (!current) return {};
+      return bumped(prev, {
+        cachedItems: { ...prev.cachedItems, [itemId]: { ...current, songIds } },
+      });
+    });
+    // A prior confirmation failure or concurrent edit can leave the caller's
+    // source position stale. Keep recovery pending until this identity landed.
+    return songIds[toIdx] === item.songIds[fromIdx];
   },
 
   upsertCachedSong: (song, child) => {

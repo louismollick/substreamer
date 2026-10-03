@@ -53,6 +53,7 @@ import { fireAndForget } from '@/utils/fireAndForget';
 import { toEpoch } from '@/db/repository/mappers';
 import { fetchPlaylistDetail } from './detailFetchService';
 import { syncCachedItemTracks } from './musicCacheService';
+import { musicCacheStore } from '../store/musicCacheStore';
 
 import {
   ensureCoverArtAuth,
@@ -501,7 +502,7 @@ async function reconcilePlaylistDetails(
           if (updated === 'timeout' || !updated || getApi() === null) return;
           await stampPlaylistDetailSynced(db, p.id, toEpoch(p.changed) ?? 0, p.songCount ?? 0);
           stamped += 1;
-          if (downloadedIds.has(p.id)) syncCachedItemTracks(p.id, updated.entry ?? []);
+          if (downloadedIds.has(p.id) || musicCacheStore.getState().downloadQueue.some((q) => q.itemId === p.id)) await syncCachedItemTracks(p.id, updated.entry ?? []);
         },
         { concurrency: PLAYLIST_PREFETCH_CONCURRENCY, signal: ctrl.signal },
       );

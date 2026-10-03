@@ -621,7 +621,7 @@ function describeDegraded(label: string, install: () => void): void {
       await expect(insertCachedItemSong('alb-1', 1, 's1')).resolves.toBeUndefined();
       await expect(removeCachedItemSong('alb-1', 1)).resolves.toBe(false);
       await expect(
-        removeCachedItemSongAndOrphanAsync('alb-1', 1, 's1'),
+        removeCachedItemSongAndOrphanAsync('alb-1', 's1'),
       ).resolves.toEqual({ persisted: false, orphaned: false });
       await expect(
         demoteCachedAlbumToPartialAsync('alb-1', ['s1']),
