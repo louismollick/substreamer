@@ -268,7 +268,7 @@ describe('LyricsBrowserScreen — swipe right→left: refresh', () => {
 
     fireEvent.press((await findAllByTestId('action-refresh-outline'))[0]); // "Apple"
 
-    await waitFor(() => expect(mockGetLyrics).toHaveBeenCalledWith('s2', 'Artist A', 'Apple'));
+    await waitFor(() => expect(mockGetLyrics).toHaveBeenCalledWith('s2', 'Artist A', 'Apple', expect.any(AbortSignal)));
     await waitFor(() =>
       expect(mockSave).toHaveBeenCalledWith(
         's2',

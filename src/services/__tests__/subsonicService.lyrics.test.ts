@@ -53,6 +53,28 @@ beforeEach(() => {
   i18n.changeLanguage('en');
 });
 
+describe('lyric cancellation', () => {
+  it('passes the signal and skips classic fallback when structured lookup is aborted', async () => {
+    mockSupports.mockReturnValue(true);
+    const controller = new AbortController();
+    mockGetLyricsBySongId.mockImplementation(async () => {
+      controller.abort();
+      throw new Error('aborted');
+    });
+    expect(await getLyricsForTrack('cancelled', 'A', 'T', controller.signal)).toBeNull();
+    expect(mockGetLyricsBySongId).toHaveBeenCalledWith({ id: 'cancelled' }, controller.signal);
+    expect(mockGetLyrics).not.toHaveBeenCalled();
+  });
+
+  it('skips requests when already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    expect(await getLyricsForTrack('cancelled', 'A', 'T', controller.signal)).toBeNull();
+    expect(mockGetLyricsBySongId).not.toHaveBeenCalled();
+    expect(mockGetLyrics).not.toHaveBeenCalled();
+  });
+});
+
 describe('getLyricsForTrack — structured (OpenSubsonic)', () => {
   beforeEach(() => {
     mockSupports.mockImplementation((cap) => cap === 'structuredLyrics');

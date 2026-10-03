@@ -15,6 +15,7 @@ import type { Child } from 'subsonic-api';
 
 import { __setDbForTests, getDb, type InternalDb } from '../db';
 import {
+  countRealSongRefsForSongsAsync,
   insertCachedItemSong,
   insertDownloadQueueItem,
   markDownloadComplete,
@@ -450,6 +451,44 @@ describe('orphanSongIfUnreferencedAsync (real SQL)', () => {
       expect(result.prunedItems).toEqual([]);
       expect(songExists('s1')).toBe(false);
       expect(songOrderOf('album:x')).toEqual(['s2']);
+    });
+  });
+
+  describe('the queued-download guard', () => {
+    it('keeps a song a queued download still lists, even with only derived holders', async () => {
+      await seedHolder('album:x', ['s1'], { derived: true });
+      await insertDownloadQueueItem(makeQueueRow({ queueId: 'q-keep' }), [
+        { id: 's1', title: 'Track One', isDir: false } as Child,
+      ]);
+
+      const result = await orphanSongIfUnreferencedAsync('s1');
+
+      expect(result.orphaned).toBe(false);
+      expect(songExists('s1')).toBe(true);
+      expect(itemExists('album:x')).toBe(true);
+    });
+
+    it('does not count queued downloads as real references', async () => {
+      await seedHolder('album:x', ['s1'], { derived: true });
+      await insertDownloadQueueItem(makeQueueRow({ queueId: 'q-count' }), [
+        { id: 's1', title: 'Track One', isDir: false } as Child,
+      ]);
+
+      const counts = await countRealSongRefsForSongsAsync(['s1', 's2']);
+
+      expect(counts.has('s1')).toBe(false);
+      expect(counts.has('s2')).toBe(false);
+    });
+
+    it('orphans again once the queue row is gone', async () => {
+      await seedHolder('album:x', ['s1'], { derived: true });
+      await insertDownloadQueueItem(makeQueueRow({ queueId: 'q-gone' }), [
+        { id: 's1', title: 'Track One', isDir: false } as Child,
+      ]);
+      realDb.runSync('DELETE FROM download_queue WHERE queue_id = ?;', ['q-gone']);
+
+      expect((await orphanSongIfUnreferencedAsync('s1')).orphaned).toBe(true);
+      expect(songExists('s1')).toBe(false);
     });
   });
 

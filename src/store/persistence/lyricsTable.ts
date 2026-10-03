@@ -118,7 +118,7 @@ export async function deleteLyrics(songId: string): Promise<void> {
   const db = getDb();
   if (db === null) return;
   try {
-    await db.runAsync('DELETE FROM lyrics WHERE song_id = ?;', [songId]);
+    await db.runAtomicBatchAsync([['DELETE FROM lyrics WHERE song_id = ?;', [songId]]]);
   } catch {
     /* dropped */
   }
@@ -176,7 +176,7 @@ export async function clearAllLyrics(): Promise<void> {
   const db = getDb();
   if (db === null) return;
   try {
-    await db.runAsync('DELETE FROM lyrics;');
+    await db.runAtomicBatchAsync([['DELETE FROM lyrics;', []]]);
   } catch {
     /* dropped */
   }

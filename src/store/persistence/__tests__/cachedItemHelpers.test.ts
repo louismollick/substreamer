@@ -74,11 +74,19 @@ describe('computeQueueItemProgress', () => {
     expect(p).toEqual({ completed: 3, total: 10 });
   });
 
-  it('reports album-level progress for a top-up: existing + delta / expectedSongCount', () => {
+  it('reports album progress from the album row, which gains each song as it lands', () => {
     const cachedItems = {
-      a1: makeItem({ itemId: 'a1', songIds: ['s1', 's2', 's3', 's4', 's5'], expectedSongCount: 10 }),
+      a1: makeItem({ itemId: 'a1', songIds: ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8'], expectedSongCount: 10 }),
     };
     const queue = makeQueue({ itemId: 'a1', completedSongs: 3, totalSongs: 5 });
+    expect(computeQueueItemProgress(queue, cachedItems)).toEqual({ completed: 8, total: 10 });
+  });
+
+  it('reports playlist top-up progress as existing + delta / expectedSongCount', () => {
+    const cachedItems = {
+      p1: makeItem({ itemId: 'p1', type: 'playlist', songIds: ['s1', 's2', 's3', 's4', 's5'], expectedSongCount: 10 }),
+    };
+    const queue = makeQueue({ itemId: 'p1', type: 'playlist', completedSongs: 3, totalSongs: 5 });
     expect(computeQueueItemProgress(queue, cachedItems)).toEqual({ completed: 8, total: 10 });
   });
 

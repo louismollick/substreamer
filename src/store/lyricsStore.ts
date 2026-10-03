@@ -24,6 +24,7 @@ interface LyricsState {
     trackId: string,
     artist?: string,
     title?: string,
+    signal?: AbortSignal,
   ) => Promise<LyricsData | null>;
   /**
    * Refetch from the server, consulting neither cache, and overwrite the stored row.
@@ -33,7 +34,12 @@ interface LyricsState {
     trackId: string,
     artist?: string,
     title?: string,
+    signal?: AbortSignal,
   ) => Promise<LyricsData | null>;
+  /** Register queued work so lyric deletion can cancel it before it starts. */
+  prepareFetch: (trackId: string, signal: AbortSignal) => { signal: AbortSignal; dispose: () => void };
+  /** Cancel one track's pending fetches, or all fetches before account teardown. */
+  invalidatePendingFetches: (trackId?: string) => void;
   /** Drop one song's cached lyrics, in memory and on disk. */
   removeLyrics: (trackId: string) => Promise<void>;
   /** Clear all cached lyrics, in memory and on disk. */
@@ -41,7 +47,24 @@ interface LyricsState {
 }
 
 export const lyricsStore = create<LyricsState>()((set, get) => {
-  const beginLoad = (trackId: string) => {
+  const pendingFetches = new Map<AbortController, string>();
+  const beginFetch = (trackId: string, signal?: AbortSignal) => {
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    if (signal?.aborted) cancel();
+    else signal?.addEventListener('abort', cancel, { once: true });
+    pendingFetches.set(controller, trackId);
+    return {
+      controller,
+      finish: () => {
+        signal?.removeEventListener('abort', cancel);
+        pendingFetches.delete(controller);
+      },
+    };
+  };
+  const loadingFetches = new Map<string, AbortController>();
+  const beginLoad = (trackId: string, controller: AbortController) => {
+    loadingFetches.set(trackId, controller);
     set({
       loading: { ...get().loading, [trackId]: true },
       errors: (() => {
@@ -66,15 +89,30 @@ export const lyricsStore = create<LyricsState>()((set, get) => {
    * refresh, which differ only in whether the caches are consulted first.
    */
   const fetchFromServer = async (
+    controller: AbortController,
     trackId: string,
     artist?: string,
     title?: string,
   ): Promise<LyricsData | null> => {
-    const result = await withTimeout(
-      async () => getLyricsForTrack(trackId, artist, title),
-      FETCH_TIMEOUT_MS,
-    );
+    const network = new AbortController();
+    const cancel = () => network.abort();
+    controller.signal.addEventListener('abort', cancel, { once: true });
+    if (controller.signal.aborted) cancel();
+    let result: LyricsData | null | 'timeout';
+    try {
+      result = await withTimeout(async (signal) => {
+        signal.addEventListener('abort', cancel, { once: true });
+        try {
+          return await getLyricsForTrack(trackId, artist, title, network.signal);
+        } finally {
+          signal.removeEventListener('abort', cancel);
+        }
+      }, FETCH_TIMEOUT_MS);
+    } finally {
+      controller.signal.removeEventListener('abort', cancel);
+    }
 
+    if (controller.signal.aborted) return null;
     if (result === 'timeout') {
       setError(trackId, 'timeout');
       return null;
@@ -84,6 +122,7 @@ export const lyricsStore = create<LyricsState>()((set, get) => {
     if (result === null) return null;
 
     await saveLyrics(trackId, result, title, artist);
+    if (controller.signal.aborted) return null;
     remember(trackId, result);
     return result;
   };
@@ -94,45 +133,75 @@ export const lyricsStore = create<LyricsState>()((set, get) => {
     errors: {},
     revision: 0,
 
-    fetchLyrics: async (trackId, artist, title) => {
+    fetchLyrics: async (trackId, artist, title, signal) => {
       const cached = get().entries[trackId];
       if (cached) return cached;
 
-      beginLoad(trackId);
+      const { controller, finish } = beginFetch(trackId, signal);
+      beginLoad(trackId, controller);
       try {
         const stored = await loadLyrics(trackId);
+        if (controller.signal.aborted) return null;
         if (stored !== null) {
           remember(trackId, stored);
           return stored;
         }
-        return await fetchFromServer(trackId, artist, title);
+        return await fetchFromServer(controller, trackId, artist, title);
       } catch {
-        setError(trackId, 'error');
+        if (!controller.signal.aborted) setError(trackId, 'error');
         return null;
       } finally {
-        clearLoading(trackId);
+        if (loadingFetches.get(trackId) === controller) {
+          loadingFetches.delete(trackId);
+          clearLoading(trackId);
+        }
+        finish();
       }
     },
 
-    refreshLyrics: async (trackId, artist, title) => {
-      beginLoad(trackId);
+    refreshLyrics: async (trackId, artist, title, signal) => {
+      const { controller, finish } = beginFetch(trackId, signal);
+      beginLoad(trackId, controller);
       try {
-        return await fetchFromServer(trackId, artist, title);
+        return await fetchFromServer(controller, trackId, artist, title);
       } catch {
-        setError(trackId, 'error');
+        if (!controller.signal.aborted) setError(trackId, 'error');
         return null;
       } finally {
-        clearLoading(trackId);
+        if (loadingFetches.get(trackId) === controller) {
+          loadingFetches.delete(trackId);
+          clearLoading(trackId);
+        }
+        finish();
+      }
+    },
+
+    prepareFetch: (trackId, signal) => {
+      const { controller, finish } = beginFetch(trackId, signal);
+      return { signal: controller.signal, dispose: finish };
+    },
+
+    invalidatePendingFetches: (trackId) => {
+      for (const [controller, id] of pendingFetches) {
+        if (trackId === undefined || trackId === id) controller.abort();
+      }
+      const loading = { ...get().loading };
+      if (trackId === undefined) set({ loading: {} });
+      else {
+        delete loading[trackId];
+        set({ loading });
       }
     },
 
     removeLyrics: async (trackId) => {
+      get().invalidatePendingFetches(trackId);
       const { [trackId]: _, ...entries } = get().entries;
       set({ entries, revision: get().revision + 1 });
       await deleteLyrics(trackId);
     },
 
     clearLyrics: async () => {
+      get().invalidatePendingFetches();
       set({ entries: {}, loading: {}, errors: {}, revision: get().revision + 1 });
       await clearAllLyrics();
     },

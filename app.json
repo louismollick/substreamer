@@ -80,6 +80,7 @@
       "./plugins/with-disable-sync-mount-props-override",
       "./modules/expo-ssl-trust/plugin",
       "./modules/expo-backup-exclusions/plugin",
+      "./modules/expo-continued-processing/plugin",
       [
         "react-native-queue-player",
         {

@@ -224,14 +224,16 @@ export async function ensureCoverArtAuth(): Promise<void> {
       .join('');
   } else {
     const bytes = await getRandomBytesAsync(16);
-    cachedCoverArtSalt = Array.from(bytes)
+    const salt = Array.from(bytes)
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('');
-    cachedCoverArtToken = await digestStringAsync(
+    const token = await digestStringAsync(
       CryptoDigestAlgorithm.MD5,
-      password + cachedCoverArtSalt,
+      password + salt,
       { encoding: CryptoEncoding.HEX }
     );
+    cachedCoverArtSalt = salt;
+    cachedCoverArtToken = token;
   }
   cachedCoverArtKey = key;
 }
@@ -331,8 +333,9 @@ export function getStreamUrl(trackId: string): string | null {
 /**
  * Build an authenticated stream URL for downloading a track.
  * Uses the separate download quality settings (downloadMaxBitRate,
- * downloadFormat) and always sets estimateContentLength=true for
- * accurate progress tracking.
+ * downloadFormat). Never asks for an estimated Content-Length: Navidrome
+ * aborts a transcode whose output outgrows its estimate
+ * (core/stream/media_streamer.go Serve), which fails the download.
  */
 export function getDownloadStreamUrl(trackId: string): string | null {
   const { isLoggedIn, serverUrl, username } = authStore.getState();
@@ -345,7 +348,6 @@ export function getDownloadStreamUrl(trackId: string): string | null {
     id: trackId,
     v: SUBSONIC_API_VERSION,
     c: SUBSONIC_CLIENT_NAME,
-    estimateContentLength: 'true',
   });
   applyUrlAuth(params, username);
 
@@ -533,13 +535,14 @@ export async function getLyricsForTrack(
   trackId: string,
   artist?: string,
   title?: string,
+  signal?: AbortSignal,
 ): Promise<LyricsData | null> {
   const api = getApi();
-  if (!api) return null;
+  if (!api || signal?.aborted) return null;
 
   if (supports('structuredLyrics')) {
     try {
-      const response = await api.getLyricsBySongId({ id: trackId });
+      const response = await api.getLyricsBySongId({ id: trackId }, signal);
       // Ampache deviation: `structuredLyrics` arrives as a single object
       // (not an array) when lyrics exist. Normalise to array here so the
       // rest of the code can assume the spec-compliant shape.
@@ -562,9 +565,9 @@ export async function getLyricsForTrack(
     }
   }
 
-  if (artist && title) {
+  if (!signal?.aborted && artist && title) {
     try {
-      const response = await api.getLyrics({ artist, title });
+      const response = await api.getLyrics({ artist, title }, signal);
       const value = response.lyrics?.value;
       if (value && value.trim().length > 0) {
         const data = classicValueToLyricsData(value);

@@ -2,7 +2,12 @@ import ExpoAsyncFsModule from './ExpoAsyncFsModule';
 
 import { type EventSubscription } from 'expo-modules-core';
 
-export { type DownloadProgressEvent, type DirectoryEntry, type StatResult } from './ExpoAsyncFsModule';
+export {
+  type AudioDownloadResult,
+  type DownloadProgressEvent,
+  type DirectoryEntry,
+  type StatResult,
+} from './ExpoAsyncFsModule';
 
 /**
  * List directory contents asynchronously on a native background thread.
@@ -85,6 +90,30 @@ export function downloadFileAsyncWithProgress(
   downloadId: string,
 ): Promise<{ uri: string; bytes: number }> {
   return ExpoAsyncFsModule.downloadFileAsyncWithProgress(url, destinationUri, downloadId);
+}
+
+/**
+ * Download an audio file with progress events. Unlike
+ * {@link downloadFileAsyncWithProgress}, an HTTP-level failure resolves rather
+ * than rejects: non-2xx or a non-audio body (a Subsonic error document served
+ * with HTTP 200) sets `rejected`, leaves nothing at the destination, and
+ * carries `retryAfterSeconds` when the server sent `Retry-After`. Network
+ * errors and cancellation still reject.
+ */
+export function downloadAudioFileAsync(
+  url: string,
+  destinationUri: string,
+  downloadId: string,
+): Promise<import('./ExpoAsyncFsModule').AudioDownloadResult> {
+  return ExpoAsyncFsModule.downloadAudioFileAsync(url, destinationUri, downloadId);
+}
+
+/**
+ * Cancel an in-flight download started with either download function. The
+ * pending promise rejects. Resolves true if a transfer with that id was running.
+ */
+export function cancelDownloadAsync(downloadId: string): Promise<boolean> {
+  return ExpoAsyncFsModule.cancelDownloadAsync(downloadId);
 }
 
 /**

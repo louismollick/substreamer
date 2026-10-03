@@ -187,8 +187,8 @@ export default class SubsonicAPI {
 		return this.#requestJSON<T>(method, params);
 	}
 
-	async #requestJSON<T>(method: string, args?: Record<string, unknown>) {
-		const res = await this.#request(method, args);
+	async #requestJSON<T>(method: string, args?: Record<string, unknown>, signal?: AbortSignal) {
+		const res = await this.#request(method, args, signal);
 		// Surface HTTP errors (proxy/CDN/auth error pages) as a status-bearing
 		// error instead of letting res.json() throw an opaque SyntaxError on a
 		// non-JSON body.
@@ -220,7 +220,7 @@ export default class SubsonicAPI {
 		return base;
 	}
 
-	async #request(method: string, params?: Record<string, unknown>) {
+	async #request(method: string, params?: Record<string, unknown>, signal?: AbortSignal) {
 		let base = this.baseURL();
 		// Match the '/rest/' path segment (leading slash), not a bare 'rest/': a
 // '.rest' TLD host makes baseURL() end '.rest/', which would else be mistaken
@@ -253,6 +253,7 @@ if (!base.endsWith("/rest/")) base += "rest/";
 			const [path, search] = url.toString().split("?");
 			return this.#fetch(path, {
 				method: "POST",
+				signal,
 				body: search,
 				headers: {
 					"Content-Type": "application/x-www-form-urlencoded",
@@ -262,6 +263,7 @@ if (!base.endsWith("/rest/")) base += "rest/";
 
 		return this.#fetch(url.toString(), {
 			method: "GET",
+			signal,
 			headers: {
 				"Content-Type": "application/json",
 			},
@@ -292,12 +294,12 @@ if (!base.endsWith("/rest/")) base += "rest/";
 	 *
 	 * https://opensubsonic.netlify.app/docs/endpoints/getlyricsbysongid/
 	 */
-	async getLyricsBySongId(args: { id: string }) {
+	async getLyricsBySongId(args: { id: string }, signal?: AbortSignal) {
 		return this.#requestJSON<
 			SubsonicBaseResponse & {
 				lyricsList?: LyricsList;
 			}
-		>("getLyricsBySongId", args);
+		>("getLyricsBySongId", args, signal);
 	}
 
 	/**
@@ -823,12 +825,12 @@ if (!base.endsWith("/rest/")) base += "rest/";
 		return this.#request("getCoverArt", args);
 	}
 
-	async getLyrics(args: { artist?: string; title?: string }) {
+	async getLyrics(args: { artist?: string; title?: string }, signal?: AbortSignal) {
 		return this.#requestJSON<
 			SubsonicBaseResponse & {
 				lyrics: Lyrics;
 			}
-		>("getLyrics", args);
+		>("getLyrics", args, signal);
 	}
 
 	async getAvatar(args: { username: string; size?: number }) {

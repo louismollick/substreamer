@@ -276,6 +276,27 @@ describe('deleteLyrics', () => {
 /*  Clearing                                                           */
 /* ------------------------------------------------------------------ */
 
+describe('pending saves and deletion', () => {
+  it.each(['clear', 'delete'] as const)('does not restore lyrics after %s overtakes a deferred save', async (action) => {
+    const pendingSave = saveLyrics('pending', syncedLyrics(2));
+    const deletion = action === 'clear' ? clearAllLyrics() : deleteLyrics('pending');
+    await Promise.all([pendingSave, deletion]);
+    expect(await loadLyrics('pending')).toBeNull();
+    expect(lineRows('pending')).toHaveLength(0);
+  });
+
+  it('does not save a deleted track when its network response arrives later', async () => {
+    let finish: ((data: LyricsData | null) => void) | undefined;
+    mockGetLyrics.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const pending = lyricsStore.getState().refreshLyrics('removed');
+    await lyricsStore.getState().removeLyrics('removed');
+    finish?.(syncedLyrics(2));
+    expect(await pending).toBeNull();
+    expect(await loadLyrics('removed')).toBeNull();
+    expect(lyricsStore.getState().entries['removed']).toBeUndefined();
+  });
+});
+
 describe('clearing', () => {
   it('clearAllLyrics empties both tables', async () => {
     await saveLyrics('song-1', syncedLyrics(10));

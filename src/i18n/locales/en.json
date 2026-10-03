@@ -1115,5 +1115,12 @@
   "backupBookmarkCount_other": "{{count}} bookmarks",
   "downloadsPausedOffline": "Downloads are paused while Offline Mode is on. They'll resume automatically when you turn it off.",
   "downloadsPausedUnreachable": "Your server can't be reached right now, so downloads are waiting. They'll continue once it's back.",
-  "loadingBiography": "Loading biography…"
+  "loadingBiography": "Loading biography…",
+  "backgroundDownloadTitle": "Downloading music",
+  "backgroundDownloadProgress": "{{completed}} of {{total}} songs",
+  "resumeDownloadsTitle": "Resume downloads?",
+  "resumeDownloadsBody_one": "{{count}} song is still waiting to download. Resume to keep downloading when you leave the app.",
+  "resumeDownloadsBody_other": "{{count}} songs are still waiting to download. Resume to keep downloading when you leave the app.",
+  "resumeDownloadsNotNow": "Not now",
+  "resumeDownloadsInBackground": "Resume in background"
 }
