@@ -148,10 +148,10 @@ describe('useDownloadStatus', () => {
 
 describe('retained download after a refresh error', () => {
   it.each([
-    ['album', ['s1', 's2'], 2, 'complete'],
-    ['album', ['s1'], 2, 'partial'],
-    ['playlist', ['s1'], 2, 'complete'],
-  ] as const)('shows the retained %s cache instead of a queued retry', (type, songIds, expectedSongCount, expected) => {
+    ['album', ['s1', 's2'], 2, 'complete', 'complete'],
+    ['album', ['s1'], 2, 'queued', 'partial'],
+    ['playlist', ['s1'], 2, 'complete', 'complete'],
+  ] as const)('keeps the %s button actionable after a failed refresh', (type, songIds, expectedSongCount, expected, afterCancel) => {
     musicCacheStore.setState({
       cachedItems: { retained: makeItem({ itemId: 'retained', type, songIds: [...songIds], expectedSongCount }) },
       downloadQueue: [{ queueId: 'repair', itemId: 'retained', type, name: 'Repair', status: 'downloading', totalSongs: 2, completedSongs: 1, addedAt: 0, queuePosition: 1 }],
@@ -162,6 +162,8 @@ describe('retained download after a refresh error', () => {
     expect(result.current).toBe(expected);
     act(() => musicCacheStore.setState((state) => ({ downloadQueue: state.downloadQueue.map((item) => ({ ...item, status: 'queued' as const })) })));
     expect(result.current).toBe('queued');
+    act(() => musicCacheStore.setState({ downloadQueue: [] }));
+    expect(result.current).toBe(afterCancel);
   });
 
   it('keeps a failed first download represented as queued when there is no retained item', () => {

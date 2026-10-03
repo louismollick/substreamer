@@ -27,7 +27,8 @@ export type DownloadStatus =
  *   queue membership for `'queued'`/`'downloading'`.
  * - **album/playlist:** pending queue work reports `'downloading'` / `'queued'`,
  *   including refreshes that retain the previous offline copy. A failed refresh
- *   falls back to the retained cached row's `'partial'` or `'complete'` status.
+ *   keeps a complete cached item marked `'complete'`; partial albums stay queued
+ *   so their button can cancel the failed top-up before starting another.
  */
 export function useDownloadStatus(
   type: 'song' | 'album' | 'playlist',
@@ -54,7 +55,7 @@ export function useDownloadStatus(
         // Album or playlist
         const item = s.cachedItems[id];
         const queueItem = s.downloadQueue.find((q) => q.itemId === id);
-        if (queueItem && (queueItem.status !== 'error' || !item)) {
+        if (queueItem && (queueItem.status !== 'error' || !item || isPartialAlbum(item))) {
           return queueItem.status === 'downloading' ? 'downloading' : 'queued';
         }
         if (item) return isPartialAlbum(item) ? 'partial' : 'complete';
