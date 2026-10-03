@@ -89,6 +89,7 @@ export function downloadFileAsyncWithProgress(
   destinationUri: string,
   downloadId: string,
 ): Promise<{ uri: string; bytes: number }> {
+  ExpoAsyncFsModule.prepareDownload?.(downloadId);
   return ExpoAsyncFsModule.downloadFileAsyncWithProgress(url, destinationUri, downloadId);
 }
 
@@ -105,12 +106,13 @@ export function downloadAudioFileAsync(
   destinationUri: string,
   downloadId: string,
 ): Promise<import('./ExpoAsyncFsModule').AudioDownloadResult> {
+  ExpoAsyncFsModule.prepareDownload?.(downloadId);
   return ExpoAsyncFsModule.downloadAudioFileAsync(url, destinationUri, downloadId);
 }
 
 /**
- * Cancel an in-flight download started with either download function. The
- * pending promise rejects. Resolves true if a transfer with that id was running.
+ * Cancel a prepared or running download. Its pending promise rejects, including
+ * when cancellation arrives before the native worker starts.
  */
 export function cancelDownloadAsync(downloadId: string): Promise<boolean> {
   return ExpoAsyncFsModule.cancelDownloadAsync(downloadId);

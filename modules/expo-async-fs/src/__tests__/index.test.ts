@@ -111,6 +111,19 @@ describe('listDirectoryWithSizesAsync / deleteFileAsync / deleteDirectoryAsync',
 });
 
 describe('downloadAudioFileAsync', () => {
+  it('registers cancellation synchronously before dispatching the native worker', async () => {
+    const events: string[] = [];
+    mockModule.prepareDownload?.mockImplementationOnce(() => { events.push('prepared'); });
+    mockModule.downloadAudioFileAsync.mockImplementationOnce(async () => {
+      events.push('dispatched');
+      return { uri: '', bytes: 0, status: 200 };
+    });
+    const pending = downloadAudioFileAsync('https://s/x', 'file:///d.mp3', 'pending');
+    expect(events).toEqual(['prepared', 'dispatched']);
+    expect(mockModule.prepareDownload).toHaveBeenCalledWith('pending');
+    await pending;
+  });
+
   it('passes arguments through and returns the rejection verbatim', async () => {
     const rejected = { uri: 'file:///d.mp3', bytes: 0, status: 429, rejected: 'http' as const, retryAfterSeconds: 5 };
     mockModule.downloadAudioFileAsync.mockResolvedValue(rejected);

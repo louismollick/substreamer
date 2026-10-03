@@ -266,6 +266,11 @@ export function initMusicCache(): void {
  * The next login re-arms the listener via `initMusicCache()`.
  */
 export async function teardownMusicCache(): Promise<void> {
+  lyricsStore.getState().invalidatePendingFetches();
+  await stopMusicCache();
+}
+
+async function stopMusicCache(): Promise<void> {
   cacheActive = false;
   pausedUntilForeground = false;
   downloadController.abort();
@@ -275,7 +280,6 @@ export async function teardownMusicCache(): Promise<void> {
   cancelLyricsPrefetch();
   // Leave prefetch closed until the next account initializes its cache.
   lyricsPrefetchController.abort();
-  lyricsStore.getState().invalidatePendingFetches();
   appStateSubscription?.remove();
   appStateSubscription = null;
   expirySubscription?.remove();
@@ -1043,7 +1047,8 @@ export async function enqueuePlaylistDownload(
  * dedupe against it.
  */
 export async function enqueueSongDownload(song: Child): Promise<void> {
-  if (!song?.id) return;
+  const signal = downloadController.signal;
+  if (!song?.id || signal.aborted) return;
   const itemId = `song:${song.id}`;
   if (itemId in musicCacheStore.getState().cachedItems) {
     queueTrackLyrics([song]);
@@ -1052,10 +1057,13 @@ export async function enqueueSongDownload(song: Child): Promise<void> {
   if (musicCacheStore.getState().downloadQueue.some((q) => q.itemId === itemId)) return;
 
   await ensureCoverArtAuth();
+  if (signal.aborted) return;
 
   try {
-    await ensureDownloadedArtistMetadata([song]);
+    await ensureDownloadedArtistMetadata([song], signal);
+    if (signal.aborted) return;
   } catch (error) {
+    if (signal.aborted) return;
     processingOverlayStore.getState().showError(errMessage(error));
     return;
   }
@@ -1081,6 +1089,7 @@ export async function enqueueSongDownload(song: Child): Promise<void> {
     try { await ensureCached(songCover); } catch { /* best-effort */ }
   }
 
+  if (signal.aborted) return;
   const state = musicCacheStore.getState();
   // If the underlying song is already fully cached, don't transfer bytes —
   // just create the `song:` item + edge so it shows up in the browser, and
@@ -1193,8 +1202,7 @@ async function processQueue(): Promise<void> {
   claiming = true;
   claimAgain = false;
   isProcessing = true;
-  // Bumped only by forceRecoverDownloadsAsync: workers of an older generation
-  // stop at their next song boundary.
+  // Recovery, expiry and teardown stop older workers at their next song boundary.
   const myId = processingId;
 
   try {
@@ -1459,6 +1467,7 @@ async function ensurePartialAlbumEdgeUnlocked(song: Child): Promise<void> {
  */
 async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise<void> {
   const { maxConcurrentDownloads } = musicCacheStore.getState();
+  const signal = downloadController.signal;
 
   const claimedAt = Date.now();
   const songs = await readDownloadQueueSongsAsync(queueItem.queueId);
@@ -1476,9 +1485,11 @@ async function downloadItem(queueItem: DownloadQueueItem, myId: number): Promise
   }
 
   try {
-    await ensureDownloadedArtistMetadata(songs);
+    await ensureDownloadedArtistMetadata(songs, signal);
+    if (signal.aborted) return;
     logDownloadEvent('item.ready', { itemId: queueItem.itemId, ms: Date.now() - claimedAt });
   } catch (error) {
+    if (signal.aborted) return;
     musicCacheStore.getState().updateQueueItem(queueItem.queueId, {
       status: 'error',
       error: errMessage(error),
@@ -2550,7 +2561,7 @@ export async function clearQueuedDownloads(): Promise<void> {
  */
 export async function clearMusicCache(): Promise<number> {
   const wasActive = cacheActive;
-  await teardownMusicCache();
+  await stopMusicCache();
   const dir = ensureCacheDir();
   const freedBytes = await getDirectorySizeAsync(dir.uri);
 

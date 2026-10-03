@@ -401,6 +401,7 @@ import { upsertSongs } from '../../db/repository/songs';
 import { markStarredSongs } from '../../db/repository/favorites';
 import { storageLimitStore } from '../../store/storageLimitStore';
 import { offlineModeStore } from '../../store/offlineModeStore';
+import { lyricsStore } from '../../store/lyricsStore';
 import { playbackSettingsStore } from '../../store/playbackSettingsStore';
 import { checkStorageLimit } from '../storageService';
 import { ensureCached, prefetchCoverArt } from '../imageCacheService';
@@ -2236,6 +2237,14 @@ describe('clearMusicCache', () => {
     expect(musicCacheStore.getState().cachedSongs).toEqual({});
     expect(musicCacheStore.getState().downloadQueue).toEqual([]);
     expect(mockFetchLyrics).not.toHaveBeenCalled();
+  });
+
+  it('leaves foreground lyric requests alone when clearing downloaded audio', async () => {
+    mockGetDirectorySizeAsync.mockResolvedValue(0);
+    const store = lyricsStore.getState();
+    jest.mocked(store.invalidatePendingFetches).mockClear();
+    await clearMusicCache();
+    expect(store.invalidatePendingFetches).not.toHaveBeenCalled();
   });
 
   it('does not reinstall account listeners when clearing files after logout', async () => {

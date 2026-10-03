@@ -88,6 +88,11 @@ public class ExpoAsyncFsModule: Module {
       return true
     }
 
+    // Register before async dispatch so a cancellation cannot miss a pending worker.
+    Function("prepareDownload") { (downloadId: String) in
+      ActiveDownloads.prepare(downloadId)
+    }
+
     AsyncFunction("downloadFileAsyncWithProgress") { (urlString: String, destinationUri: String, downloadId: String) -> [String: Any] in
       let result = try await self.download(urlString, destinationUri, downloadId, validateAudio: false)
       return ["uri": result["uri"]!, "bytes": result["bytes"]!]
@@ -111,6 +116,8 @@ public class ExpoAsyncFsModule: Module {
     _ downloadId: String,
     validateAudio: Bool
   ) async throws -> [String: Any] {
+    let transfer = ActiveDownloads.begin(downloadId)
+    defer { ActiveDownloads.remove(downloadId, transfer) }
     guard let url = URL(string: urlString) else {
       throw DownloadError.invalidUrl
     }
@@ -149,19 +156,18 @@ public class ExpoAsyncFsModule: Module {
       delegateQueue: nil
     )
 
-    var ownTask: URLSessionTask?
-    defer {
-      // Only our own task: a retry of the same id may already have registered.
-      if let ownTask = ownTask { ActiveDownloads.remove(downloadId, ownTask) }
-      session.finishTasksAndInvalidate()
-    }
+    defer { session.finishTasksAndInvalidate() }
 
     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
       delegate.continuation = continuation
       let task = session.downloadTask(with: request)
-      ownTask = task
-      ActiveDownloads.add(downloadId, task)
-      task.resume()
+      if ActiveDownloads.attach(transfer, task) {
+        task.resume()
+      } else {
+        delegate.continuation = nil
+        continuation.resume(throwing: DownloadError.cancelled)
+        task.cancel()
+      }
     }
 
     let fileSize = delegate.rejected == nil
@@ -335,35 +341,57 @@ private class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate {
   }
 }
 
-/// In-flight transfers by downloadId, so JS can cancel one (e.g. when the
-/// continued-processing task expires).
+/// Prepared transfers remain registered until their worker exits, even after cancel.
 private enum ActiveDownloads {
-  private static let lock = NSLock()
-  private static var tasks: [String: URLSessionTask] = [:]
-
-  static func add(_ id: String, _ task: URLSessionTask) {
-    lock.lock(); defer { lock.unlock() }
-    tasks[id] = task
+  final class Transfer {
+    var task: URLSessionTask?
+    var cancelled = false
   }
 
-  static func remove(_ id: String, _ task: URLSessionTask) {
+  private static let lock = NSLock()
+  private static var transfers: [String: Transfer] = [:]
+
+  static func prepare(_ id: String) {
     lock.lock(); defer { lock.unlock() }
-    if tasks[id] === task { tasks.removeValue(forKey: id) }
+    transfers[id] = Transfer()
+  }
+
+  static func begin(_ id: String) -> Transfer {
+    lock.lock(); defer { lock.unlock() }
+    let transfer = transfers[id] ?? Transfer()
+    transfers[id] = transfer
+    return transfer
+  }
+
+  static func attach(_ transfer: Transfer, _ task: URLSessionTask) -> Bool {
+    lock.lock(); defer { lock.unlock() }
+    if transfer.cancelled { return false }
+    transfer.task = task
+    return true
+  }
+
+  static func remove(_ id: String, _ transfer: Transfer) {
+    lock.lock(); defer { lock.unlock() }
+    if transfers[id] === transfer { transfers.removeValue(forKey: id) }
   }
 
   static func cancel(_ id: String) -> Bool {
     lock.lock()
-    let task = tasks.removeValue(forKey: id)
+    let transfer = transfers[id]
+    transfer?.cancelled = true
+    let task = transfer?.task
     lock.unlock()
     task?.cancel()
-    return task != nil
+    return transfer != nil
   }
 
   static func cancelAll() {
     lock.lock()
-    let all = Array(tasks.values)
-    tasks.removeAll()
+    let tasks = transfers.values.compactMap { transfer -> URLSessionTask? in
+      transfer.cancelled = true
+      return transfer.task
+    }
     lock.unlock()
-    all.forEach { $0.cancel() }
+    tasks.forEach { $0.cancel() }
   }
 }

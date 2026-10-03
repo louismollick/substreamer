@@ -298,6 +298,33 @@ describe('pending saves and deletion', () => {
 });
 
 describe('clearing', () => {
+  it.each(['single', 'all'])('discards a row read before its %s deletion', async (kind) => {
+    await saveLyrics('reading-delete', syncedLyrics(2));
+    let release: (() => void) | undefined;
+    let started: (() => void) | undefined;
+    const readingLines = new Promise<void>((resolve) => { started = resolve; });
+    const getLines = jest.spyOn(realDb, 'getAllAsync').mockImplementationOnce(async (sql, params) => {
+      const snapshot = await realDb.getAllSync(sql, params);
+      started?.();
+      await new Promise<void>((resolve) => { release = resolve; });
+      return snapshot;
+    });
+    const reading = loadLyrics('reading-delete');
+    await readingLines;
+    await (kind === 'single' ? deleteLyrics('reading-delete') : clearAllLyrics());
+    release?.();
+    expect(await reading).toBeNull();
+    getLines.mockRestore();
+  });
+
+  it.each(['single', 'all'])('does not read a deleted row while its %s delete is deferred', async (kind) => {
+    await saveLyrics('pending-delete', syncedLyrics(2));
+    const deleting = kind === 'single' ? deleteLyrics('pending-delete') : clearAllLyrics();
+    const reading = loadLyrics('pending-delete');
+    expect(await reading).toBeNull();
+    await deleting;
+  });
+
   it('clearAllLyrics empties both tables', async () => {
     await saveLyrics('song-1', syncedLyrics(10));
     await saveLyrics('song-2', classicLyrics);

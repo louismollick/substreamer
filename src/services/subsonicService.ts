@@ -725,10 +725,11 @@ export async function getAllArtists(): Promise<ArtistID3[]> {
 /**
  * Fetch a single artist by ID, including their albums.
  */
-export async function getArtist(id: string): Promise<ArtistWithAlbumsID3 | null> {
+export async function getArtist(id: string, signal?: AbortSignal): Promise<ArtistWithAlbumsID3 | null> {
   const api = getApi();
   if (!api) return null;
-  const response = await api.getArtist({ id });
+  if (signal?.aborted) return null;
+  const response = await api.getArtist({ id }, signal);
   return response.artist ?? null;
 }
 

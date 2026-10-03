@@ -30,12 +30,14 @@ jest.mock('../../store/playbackSettingsStore', () => ({
 }));
 
 import { digestStringAsync, getRandomBytesAsync } from 'expo-crypto';
+import SubsonicAPI from 'subsonic-api';
 
 import { authStore } from '../../store/authStore';
 import { playbackSettingsStore } from '../../store/playbackSettingsStore';
 import {
   clearApiCache,
   ensureCoverArtAuth,
+  getArtist as fetchArtist,
   getCoverArtUrl,
   getDownloadStreamUrl,
   getStreamUrl,
@@ -985,6 +987,17 @@ describe('getAllAlbumsAlphabetical', () => {
 });
 
 describe('getArtist', () => {
+  it('passes cancellation to the artist API and skips already cancelled work', async () => {
+    const request = jest.fn().mockResolvedValue({ artist: { id: 'ar1', name: 'Artist' } });
+    SubsonicAPI.prototype.getArtist = request;
+    const controller = new AbortController();
+    expect(await fetchArtist('ar1', controller.signal)).toEqual({ id: 'ar1', name: 'Artist' });
+    expect(request).toHaveBeenCalledWith({ id: 'ar1' }, controller.signal);
+    controller.abort();
+    expect(await fetchArtist('ar1', controller.signal)).toBeNull();
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it('returns null when no API', async () => {
     mockAuthStore.getState.mockReturnValue({ isLoggedIn: false } as any);
     const { getArtist } = require('../subsonicService');

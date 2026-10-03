@@ -781,6 +781,15 @@ describe('media retrieval', () => {
     expect(calls.map((call) => call.options?.method)).toEqual([post ? 'POST' : 'GET', post ? 'POST' : 'GET']);
   });
 
+  it.each([false, true])('passes artist cancellation to fetch for post=%s', async (post) => {
+    const { mockFetch, calls } = createMockFetch({ status: 'ok', artist: { id: 'artist-1' } });
+    const api = new SubsonicAPI({ ...PASSWORD_CONFIG, post, fetch: mockFetch });
+    const controller = new AbortController();
+    await api.getArtist({ id: 'artist-1' }, controller.signal);
+    expect(calls[0].options?.signal).toBe(controller.signal);
+    expect(calls[0].options?.method).toBe(post ? 'POST' : 'GET');
+  });
+
   it('getLyrics passes artist and title', async () => {
     const { mockFetch, calls } = createMockFetch({ status: 'ok', lyrics: {} });
     const api = new SubsonicAPI({ ...PASSWORD_CONFIG, fetch: mockFetch });

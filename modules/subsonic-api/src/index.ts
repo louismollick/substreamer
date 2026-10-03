@@ -482,12 +482,12 @@ if (!base.endsWith("/rest/")) base += "rest/";
 		>("getArtists", args);
 	}
 
-	async getArtist(args: { id: string }) {
+	async getArtist(args: { id: string }, signal?: AbortSignal) {
 		return this.#requestJSON<
 			SubsonicBaseResponse & {
 				artist: ArtistWithAlbumsID3;
 			}
-		>("getArtist", args);
+		>("getArtist", args, signal);
 	}
 
 	async getAlbum(args: { id: string }) {
