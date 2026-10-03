@@ -34,14 +34,16 @@ export interface LyricsCounts {
 // Reads must wait for deferred deletes as well as the saves those deletes follow.
 const pendingDeletes = new Map<string, Promise<void>>();
 let pendingClear: Promise<void> | null = null;
-let deletionRevision = 0;
+const deletionRevisions = new Map<string, number>();
+let clearRevision = 0;
 
 /** Read one song's lyrics, or null when we have none stored. */
 export async function loadLyrics(songId: string): Promise<LyricsData | null> {
   const db = getDb();
   if (db === null) return null;
   try {
-    const revision = deletionRevision;
+    const revision = deletionRevisions.get(songId);
+    const clear = clearRevision;
     await Promise.all([pendingDeletes.get(songId), pendingClear]);
     const row = await db.getFirstAsync<LyricsRow>(
       'SELECT synced, lang, offset_ms, source FROM lyrics WHERE song_id = ?;',
@@ -52,7 +54,7 @@ export async function loadLyrics(songId: string): Promise<LyricsData | null> {
       'SELECT start_ms, text FROM lyric_lines WHERE song_id = ? ORDER BY pos;',
       [songId],
     );
-    if (revision !== deletionRevision) return null;
+    if (revision !== deletionRevisions.get(songId) || clear !== clearRevision) return null;
     const data: LyricsData = {
       synced: row.synced === 1,
       lines: lines.map((l) => ({ startMs: l.start_ms, text: l.text })),
@@ -125,7 +127,7 @@ export async function saveLyrics(
 export async function deleteLyrics(songId: string): Promise<void> {
   const db = getDb();
   if (db === null) return;
-  deletionRevision++;
+  deletionRevisions.set(songId, (deletionRevisions.get(songId) ?? 0) + 1);
   const deleted = db.runAtomicBatchAsync([['DELETE FROM lyrics WHERE song_id = ?;', [songId]]]);
   pendingDeletes.set(songId, deleted);
   try {
@@ -188,7 +190,8 @@ export async function listCachedLyrics(): Promise<CachedLyricsEntry[]> {
 export async function clearAllLyrics(): Promise<void> {
   const db = getDb();
   if (db === null) return;
-  deletionRevision++;
+  clearRevision++;
+  deletionRevisions.clear();
   const cleared = db.runAtomicBatchAsync([['DELETE FROM lyrics;', []]]);
   pendingClear = cleared;
   try {
